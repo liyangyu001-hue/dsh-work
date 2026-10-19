@@ -12,4 +12,5 @@
 
 ## P1 · 闭环
 
+- 2026-10-19 · 伴随层全局热键落地（P1-1）：默认 `Control+Alt+Space`，可从 `~/.dsh/dsh-work/config.json` 改；裸 Tab 必须显式 `allowBareTab: true`；注册失败会写 `companion.log`，按下热键小条压缩 120ms
 <!-- 开发循环从这里往下追加 -->
