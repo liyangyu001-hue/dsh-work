@@ -612,37 +612,58 @@
       }
 
       /* ── 键盘 ───────────────────────────────────────────── */
-      window.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
+      /*
+       * 面板是"不抢焦点"的窗口（和 lolPing 的面板同一个道理：点得着，但不夺走
+       * 你正在打字的那个软件的键盘）。所以按键有两个来源：
+       *   1. 主进程在面板打开期间用 globalShortcut 独占那几个键，转成 action 发过来；
+       *   2. 万一独占注册失败，页面还留着 DOM keydown 兜底（此时窗口若有焦点才生效）。
+       * 两条路都走 handleAction，行为只有一份。
+       */
+      function handleAction(action) {
+        if (action === "close") {
           window.dshworkPanel.close();
           return;
         }
-        if (event.key === "Tab") {
-          event.preventDefault();
+        if (action === "capture") {
           window.dshworkPanel.capture();
           return;
         }
-        if (event.key === "Enter") {
-          event.preventDefault();
+        if (action === "advance") {
           window.dshworkPanel.intent({ type: "node.advance" });
           return;
         }
-        if (event.key === "Backspace") {
-          event.preventDefault();
+        if (action === "back") {
           window.dshworkPanel.intent({ type: "node.back" });
           return;
         }
-        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-          event.preventDefault();
+        if (action === "next" || action === "prev") {
           const cards = [...railEl.querySelectorAll(".card")];
           const at = cards.findIndex((c) => c.dataset.id === focused);
-          const next = cards[at + (event.key === "ArrowRight" ? 1 : -1)];
-          if (next) {
-            focused = next.dataset.id;
+          const target = cards[at + (action === "next" ? 1 : -1)];
+          if (target) {
+            focused = target.dataset.id;
             render(lastPayload);
           }
         }
+      }
+
+      const DOM_KEYS = {
+        Escape: "close",
+        Tab: "capture",
+        Enter: "advance",
+        Backspace: "back",
+        ArrowRight: "next",
+        ArrowLeft: "prev",
+      };
+
+      window.addEventListener("keydown", (event) => {
+        const action = DOM_KEYS[event.key];
+        if (!action) return;
+        event.preventDefault();
+        handleAction(action);
       });
+
+      window.dshworkPanel.onKey((action) => handleAction(action));
 
       document.getElementById("close").addEventListener("click", () => window.dshworkPanel.close());
 

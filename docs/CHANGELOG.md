@@ -18,3 +18,6 @@
 - 2026-10-19 · `plan.set` 新增可选 `title`：任务树的标题应该由"正在做的工作"决定，而不是创建文档时随手填的占位串。
 - 2026-10-19 · 视觉识别落地（P1-3）：框完即识别，不再要用户按键。伴随层把 PNG 交给宿主，宿主用 `ctx.attachments` 入库、`ctx.llm.stream` 调一次视觉模型，把截图拆成带目标与验收的任务树，解析后走既有 `plan.set` 通道落盘。HTTP 做成作业（POST 只受理、GET 轮询取结果）：几十秒的调用不能挂在同步响应上，超时与插件卸载用 `AbortController` 真停。解析失败会「就地修格式」重问一次，仍失败就返回可读原因、一个字节都不写文档；缩进大纲也收，但用 `looksLikeOutline` 挡住"抱歉看不清"被当成任务。小条挂「识别中…」，面板给开始/成功/失败三种文案。真机端到端待宿主重启后补验。
 <!-- 开发循环从这里往下追加 -->
+
+- 2026-10-19 P1-2c 完成：**面板的输入模型按 lolPing 的原理重做**。旧做法是 `show()+focus()`——面板一弹就把键盘从用户正在打字的软件里抢走，本质是个模态框。改成 `focusable:false` + `showInactive()`：面板永远不夺焦点，键盘靠"打开期间用 `globalShortcut` 独占 Enter/Backspace/Tab/Esc/←/→，关面板立刻释放"（实测 6/6 注册成功）。验证方式是可证伪的：先记下前台窗口（Edge），按 Enter，任务 seq 7→8、pointer 前进，前台窗口**仍是 Edge**。顺带补了每次显示重申 `setAlwaysOnTop(true,"screen-saver")`（Windows 会悄悄降级，lolPing #70），并删掉 `focusable:false` 下永远不会触发的 `blur` 收起逻辑。
+- 2026-10-19 隐私修正：`docs/assets/` 里的桌面截图（整屏 2 张 + 框选 2 张）已从工作区与 **全部 git 历史**中移除，并强推覆盖远端 main。文档配图改由 `scripts/make-shots.mjs` 用 Playwright + 合成数据 + 合成底图渲染真实 HTML——控件排版是真的，里面的内容全是假数据。另加 `scripts/check-assets.mjs`（白名单 + 尺寸上限）接进 `pnpm test`，防止复发。

@@ -8,8 +8,8 @@
 ## 进度
 
 - 阶段：**P1 · 闭环**
-- 已完成：P1-1 全局热键 ✅ `4870b3f` ｜ P1-2 截屏框选 ✅ ｜ P1-2b 面板 ✅ `4a0877e` ｜ **P1-3 视觉识别 ✅ `7e53a78`（本轮，真机待验）**
-- 上一轮收工：框完即识别——宿主一次视觉调用把截图拆成带目标与验收的任务树，走 `plan.set` 落盘；小条/面板各给「识别中／已成／失败原因」
+- 已完成：P1-1 全局热键 ✅ `4870b3f` ｜ P1-2 截屏框选 ✅ ｜ P1-2b 面板 ✅ `4a0877e` ｜ **P1-3 视觉识别 ✅ `7e53a78`（真机待验）** ｜ P1-2c 面板输入模型 ✅（不抢焦点 + 打开期间独占按键）
+- 上一轮收工：按 lolPing 的原理重做面板的输入方式——面板 `focusable:false` + `showInactive()`，键盘靠"打开期间用 globalShortcut 独占 Enter/Backspace/Tab/Esc/←/→"，关面板立刻释放；实测前台一直是 Edge，按 Enter 照样推进任务。
 - 下一轮从：**P1-4 卡片轮播** 开始（开工第一步：重启一次宿主，把 P1-3 的真机端到端补验）
 
 ## 当前任务（只做一个，做完就停）
@@ -51,13 +51,14 @@
    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$token"))
    git -c http.extraHeader="AUTHORIZATION: basic $b64" push https://github.com/liyangyu001-hue/dsh-work.git HEAD:main
    ```
-   只允许 fast-forward；**绝不允许 force push**。
+   只允许 fast-forward；**绝不允许 force push**。唯一例外：清理误提交的隐私内容，且必须在提交信息里写清为什么。
 3. **提交信息**写"改了什么、为什么"，中文正文，一行标题 + 空行 + 要点。
 4. **不要新建"临时验证脚本"**留在地上；验证完删掉，或写进 `scripts/` 并说明用途。
-5. 起 dev server 前先按端口杀旧进程，否则 `dsh` 会静默起不来：
+5. **`docs/assets/` 只准放 `scripts/make-shots.mjs` 生成的合成图**——仓库是公开的，桌面截图会带出别人窗口、标签页、账号。`pnpm test` 里有白名单守卫拦着。
+6. 起 dev server 前先按端口杀旧进程，否则 `dsh` 会静默起不来：
    `Get-NetTCPConnection -LocalPort 64001 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`
-6. 改完客户端必须 `pnpm build`，否则浏览器里看到的还是旧 bundle。
-7. 每轮结束时，在 `docs/CHANGELOG.md` 追加一行（日期 + 本轮做了什么）。
+7. 改完客户端必须 `pnpm build`，否则浏览器里看到的还是旧 bundle。
+8. 每轮结束时，在 `docs/CHANGELOG.md` 追加一行（日期 + 本轮做了什么）。
 
 ---
 
@@ -78,6 +79,9 @@
 - `nativeImage` 没有 `width`/`height` 属性，几何换算必须传 `getSize()`；传对象本体不会报错，只会得到一堆 NaN 和 0 字节 PNG。
 - `store.test.ts` 偶发 `ENOTEMPTY ... rmdir` —— 临时目录清理与原子写（临时文件 600ms 内 rename）踩在同一拍上，重跑即过；真出现先重跑一次再判断是不是代码坏了。
 - 视觉模型不是默认就收图：`agentDefaultModel` 若选的是纯文本模型，宿主会把图片投影成文字说明，识别质量会很差。要换 `deepseek-v4-flash-vision-exp` 或在插件 Config 里写 `llm.model`。
+- **`focusable:false` 的窗口收不到任何 DOM 键盘事件**。要键盘可用只有两条路：抢焦点（那就会打断用户正在打的字），或者像 lolPing 那样在输入层把手势键吃掉。本机实测 `globalShortcut.register("Enter" / "Backspace" / "Tab" / "Escape" / "Right" / "Left")` 在 Windows 上 **6/6 全部成功**，这就是"打开期间独占、关掉立刻释放"方案的依据。
+- **置顶窗口会被 Windows 悄悄降级**（lolPing issue #70）：每次 `show()` 之后都要重新 `setAlwaysOnTop(true,"screen-saver")`，否则面板过一会儿就跑到别的窗口后面。
+- 面板既然不抢焦点，`blur` 事件永远不会来——**别用 blur 做"点外面就收起"**，那条路在 `focusable:false` 下是死的。收起只走 Esc / 热键 / 关闭按钮。
 
 ---
 

@@ -16,6 +16,12 @@ contextBridge.exposeInMainWorld("dshworkPanel", {
     return () => ipcRenderer.removeAllListeners("host:state");
   },
 
+  /** 面板打开期间由主进程独占的按键，只转发动作名（close/capture/advance/back/next/prev） */
+  onKey(callback) {
+    ipcRenderer.on("panel:key", (_event, action) => callback(action));
+    return () => ipcRenderer.removeAllListeners("panel:key");
+  },
+
   /** 框选回来的结果：{ file, width, height } */
   onCapture(callback) {
     ipcRenderer.on("capture:result", (_event, result) => callback(result));

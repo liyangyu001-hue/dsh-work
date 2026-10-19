@@ -160,6 +160,9 @@ function createPanel() {
     skipTaskbar: true,
     hasShadow: false,
     alwaysOnTop: true,
+    // 不夺焦点：用户正在别的软件里打字时弹出面板，不该把光标抢走。
+    // 键盘操作靠"打开期间独占那几个键"（见 armKeys），不靠窗口焦点。
+    focusable: false,
     backgroundColor: "#00000000",
     webPreferences: {
       preload: path.join(__dirname, "panel", "preload.cjs"),
@@ -178,13 +181,61 @@ function createPanel() {
     log.log(`[panel] ${details ? details.message : args[1]}`);
   });
 
-  // 点到别处就收起：悬浮面板留在屏幕上挡视线，比"多按一次 Esc"更烦人。
-  // 框选期间例外 —— 那时是我们主动藏起来的，不应触发收起逻辑。
-  panel.on("blur", () => {
-    if (!capture.isActive()) hidePanel();
-  });
-
   panel.on("closed", () => { panel = null; });
+}
+
+/**
+ * 面板打开期间"独占"的那几个键。
+ *
+ * 这是从 lolPing 学到的关键一条：它的面板**不抢焦点**（focusable:false +
+ * showInactive），键盘之所以还能操作它，是因为按键在原生钩子那一层就被吃掉了。
+ * 我们没有原生钩子，退而用 globalShortcut 做同样的事——只在面板开着的那一小段
+ * 时间里独占这几个键，面板一关立刻释放，不占用用户任何常驻热键。
+ */
+const ARMED_KEYS = [
+  ["Enter", "advance"],
+  ["Backspace", "back"],
+  ["Tab", "capture"],
+  ["Escape", "close"],
+  ["Right", "next"],
+  ["Left", "prev"],
+];
+
+/** 已成功独占的键，关面板时按名单精确释放。 */
+const armed = [];
+
+function armKeys() {
+  if (armed.length > 0) return;
+  for (const [accelerator, action] of ARMED_KEYS) {
+    try {
+      const ok = globalShortcut.register(accelerator, () => onArmedKey(action));
+      if (ok) armed.push(accelerator);
+      else log.warn(`按键独占失败（被别的软件占了？）：${accelerator}`);
+    } catch (err) {
+      log.warn(`按键独占失败：${accelerator} —— ${err.message}`);
+    }
+  }
+  log.log(`面板按键已独占 ${armed.length}/${ARMED_KEYS.length}：${armed.join(" ")}`);
+}
+
+function disarmKeys() {
+  for (const accelerator of armed) {
+    try {
+      globalShortcut.unregister(accelerator);
+    } catch {
+      // 释放失败不影响退出路径，别让清理抛异常盖住真正的原因
+    }
+  }
+  armed.length = 0;
+}
+
+function onArmedKey(action) {
+  if (action === "close") {
+    hidePanel();
+    return;
+  }
+  if (!panel || panel.isDestroyed()) return;
+  panel.webContents.send("panel:key", action);
 }
 
 function isPanelOpen() {
@@ -195,8 +246,11 @@ function showPanel() {
   if (!panel || panel.isDestroyed()) createPanel();
   if (!panel) return;
   panel.setBounds(panelBounds());
-  panel.show();
-  panel.focus();
+  // Windows 会把置顶窗口在一段时间后掉到普通窗口后面（lolPing #70），每次显示都重新声明一次
+  panel.setAlwaysOnTop(true, "screen-saver");
+  // showInactive：显示但不抢焦点。用户正在编辑器里打的字不会因为面板弹出而中断。
+  panel.showInactive();
+  armKeys();
   // 采样与首帧状态互不依赖：先发状态（快），背景慢慢补（慢 120ms）
   void refreshBackdrop();
   if (panel.webContents.isLoading()) return;
@@ -228,6 +282,7 @@ async function refreshBackdrop() {
 
 function hidePanel() {
   if (!panel || panel.isDestroyed()) return;
+  disarmKeys();
   if (panel.isVisible()) panel.hide();
 }
 
