@@ -1,0 +1,28 @@
+# ── 依赖 ───────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ── 构建产物 ────────────────────────────────────────────
+dist/
+lib/
+build/
+out/
+*.tsbuildinfo
+
+# ── DSH Work 运行时数据（工作区内的任务数据永不入库）────────
+.dsh-work/
+# 但保留目录结构说明文件
+!.dsh-work/.gitkeep
+
+# ── 伴随层（Electron）───────────────────────────────────
+apps/companion/release/
+apps/companion/.electron/
+
+# ── 编辑器 / 系统 ──────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*

@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - apps/*
+
+# esbuild 的安装脚本只做「把平台二进制就位」，是构建必需项。
+allowBuilds:
+  esbuild: true

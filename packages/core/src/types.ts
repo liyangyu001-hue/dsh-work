@@ -1,0 +1,131 @@
+/**
+ * 核心数据结构。
+ *
+ * 设计约束：
+ * - 全部可 JSON 序列化（要落盘、要过 WS、要能被人手改）。
+ * - 不使用 enum（Node 的类型擦除不支持），一律用字面量联合。
+ * - 时间戳一律由调用方传入，本包永不读时钟。
+ */
+
+export const SCHEMA_VERSION = 1;
+
+export type NodeId = string;
+export type WorkId = string;
+
+/** 节点的推进状态。`active` 全树最多一个，由 validateDoc 保证。 */
+export type NodeStatus = 'todo' | 'active' | 'done' | 'skipped';
+
+/** `task` = 要做的事；`concept` = 要理解的东西（学习模式入口）。 */
+export type NodeKind = 'task' | 'concept';
+
+/** 变更归因：这件事是人的决定、AI 的建议，还是系统巡检。 */
+export type Actor = 'human' | 'ai' | 'system';
+
+export type HandoffState = 'offered' | 'running' | 'review' | 'accepted' | 'returned';
+
+/** AI 给出的建议 / 更优解。异步写入，不阻塞任务推进。 */
+export interface Advice {
+  text: string;
+  /** 备选方案。有则界面以「或者」并列呈现。 */
+  alt?: string;
+  at: number;
+  model?: string;
+}
+
+/** 交给 AI 执行时的状态机。完成判定权始终在人手里。 */
+export interface Handoff {
+  state: HandoffState;
+  /** AI 侧 agent 会话 id，用于把产出接回会话。 */
+  agentSessionId?: string;
+  since: number;
+  note?: string;
+}
+
+/** 证据：凭什么说这件事做完了。 */
+export interface Evidence {
+  /** 指向 captures/ 下的资源，或外部引用。 */
+  assetId: string;
+  note?: string;
+  at: number;
+}
+
+export interface WorkNode {
+  id: NodeId;
+  parentId: NodeId | null;
+  /** 子节点顺序，决定深度优先遍历与卡片排列。 */
+  children: NodeId[];
+  title: string;
+  /** 这一步到底要做什么。 */
+  detail?: string;
+  /** 什么算做完了。AI 拆解时应尽量给出。 */
+  acceptance?: string;
+  kind: NodeKind;
+  status: NodeStatus;
+  advice?: Advice | null;
+  handoff?: Handoff | null;
+  evidence: Evidence[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkDoc {
+  schema: number;
+  id: WorkId;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  /** 已应用的最后一条日志序号，与 journal 对齐。 */
+  seq: number;
+  /** 当前推进到的节点。null 表示全部完成或尚未开始。 */
+  pointer: NodeId | null;
+  roots: NodeId[];
+  nodes: Record<NodeId, WorkNode>;
+}
+
+/* ─────────────────────────── 意图 ─────────────────────────── */
+
+export interface ApplyContext {
+  /** 发生时刻（毫秒）。由调用方提供，保证 apply 纯净。 */
+  at: number;
+  by: Actor;
+}
+
+export type Intent =
+  /** 整体设定任务树：首次拆解、或重新拆解。 */
+  | { type: 'plan.set'; roots: NodeId[]; nodes: WorkNode[] }
+  | { type: 'plan.add'; parentId: NodeId | null; node: WorkNode; index?: number }
+  | { type: 'plan.remove'; nodeId: NodeId }
+  | { type: 'plan.rename'; nodeId: NodeId; title?: string; detail?: string; acceptance?: string }
+  /** 当前节点完成并前进（人按「完成」）。 */
+  | { type: 'node.advance' }
+  /** 回到上一个任务（人按「上一个」）。 */
+  | { type: 'node.back' }
+  | { type: 'node.complete'; nodeId: NodeId }
+  | { type: 'node.skip'; nodeId: NodeId }
+  | { type: 'node.focus'; nodeId: NodeId }
+  | { type: 'node.advise'; nodeId: NodeId; advice: Advice }
+  | { type: 'node.evidence'; nodeId: NodeId; evidence: Evidence }
+  | { type: 'handoff.offer'; nodeId: NodeId }
+  | { type: 'handoff.start'; nodeId: NodeId; agentSessionId: string }
+  | { type: 'handoff.submit'; nodeId: NodeId; note?: string }
+  | { type: 'handoff.accept'; nodeId: NodeId }
+  | { type: 'handoff.return'; nodeId: NodeId; reason?: string };
+
+export type IntentType = Intent['type'];
+
+/* ─────────────────────── 计划（AI 产出） ──────────────────── */
+
+/** AI 拆解出的计划节点：没有 id，由 materializePlan 补。 */
+export interface PlanSpec {
+  title: string;
+  detail?: string;
+  acceptance?: string;
+  kind?: NodeKind;
+  children?: PlanSpec[];
+}
+
+export interface MaterializeOptions {
+  now: number;
+  newId: () => NodeId;
+  parentId?: NodeId | null;
+}

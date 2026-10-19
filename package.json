@@ -1,0 +1,30 @@
+{
+  "name": "dsh-work-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Work —— 让人与 AI 共享同一个任务进程的办公专注层",
+  "license": "MIT",
+  "author": "liyangyu001-hue",
+  "homepage": "https://github.com/liyangyu001-hue/dsh-work",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liyangyu001-hue/dsh-work.git"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
+    "test:watch": "node --test --watch \"packages/*/src/**/*.test.ts\"",
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "clean": "node scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
