@@ -92,7 +92,7 @@ export interface ApplyContext {
 
 export type Intent =
   /** 整体设定任务树：首次拆解、或重新拆解。 */
-  | { type: 'plan.set'; roots: NodeId[]; nodes: WorkNode[] }
+  | { type: 'plan.set'; roots: NodeId[]; nodes: WorkNode[]; title?: string }
   | { type: 'plan.add'; parentId: NodeId | null; node: WorkNode; index?: number }
   | { type: 'plan.remove'; nodeId: NodeId }
   | { type: 'plan.rename'; nodeId: NodeId; title?: string; detail?: string; acceptance?: string }

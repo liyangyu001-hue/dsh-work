@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld("dshwork", {
   setPointerOver(over) {
     ipcRenderer.send("bar:pointer", Boolean(over));
   },
+  /** 点小条 = 展开面板 */
+  openPanel() {
+    ipcRenderer.send("bar:open");
+  },
   ready() {
     ipcRenderer.send("bar:ready");
   },

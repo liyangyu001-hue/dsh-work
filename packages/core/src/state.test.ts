@@ -290,3 +290,26 @@ test('协议信封：坏 JSON 返回可读原因', () => {
   const decoded = decodeEnvelope('{]');
   assert.equal(decoded.ok, false);
 });
+
+
+test('plan.set 可以同时给文档换标题', () => {
+  const doc = seed();
+  const [first, second] = linearOrder(doc);
+  const next = run(doc, {
+    type: 'plan.set',
+    title: '把插件做成能用的东西',
+    roots: [first!, second!],
+    nodes: [
+      { ...doc.nodes[first!]!, children: [], parentId: null, status: 'todo' },
+      { ...doc.nodes[second!]!, children: [], parentId: null, status: 'todo' },
+    ],
+  });
+  assert.equal(next.title, '把插件做成能用的东西');
+  // 不给 title 时必须原样保留，避免拆解顺手把标题清空
+  const again = run(next, {
+    type: 'plan.set',
+    roots: [first!],
+    nodes: [{ ...next.nodes[first!]!, children: [], parentId: null, status: 'todo' }],
+  });
+  assert.equal(again.title, '把插件做成能用的东西');
+});

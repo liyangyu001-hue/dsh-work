@@ -203,6 +203,9 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
       draft.nodes = nodes;
       draft.roots = [...intent.roots];
       draft.pointer = null;
+      // 标题随拆解一起给：任务树的标题应该由"正在做的工作"决定，
+      // 而不是创建文档时随手填的那个占位串。
+      if (intent.title) draft.title = intent.title;
 
       const order = linearOrder(draft);
       if (order.length === 0) break;

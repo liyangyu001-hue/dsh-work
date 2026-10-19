@@ -177,6 +177,9 @@
       bar.addEventListener("mouseenter", () => window.dshwork.setPointerOver(true));
       bar.addEventListener("mouseleave", () => window.dshwork.setPointerOver(false));
 
+      // 点小条展开面板：小条是收起态，面板是展开态，同一个东西的两个形态
+      bar.addEventListener("click", () => window.dshwork.openPanel());
+
       /* ── 临时提示 ──────────────────────────────────────────────
        * 框选完要有一声"收到了"。用一条覆盖在标题上的短句，2.4 秒后自动退回
        * 真实状态；不弹窗、不改连接状态，避免打断用户手上正在做的事。
