@@ -5,6 +5,10 @@
   "type": "module",
   "description": "DSH Work —— 让人与 AI 共享同一个任务进程的办公专注层",
   "license": "MIT",
+  "contributors": [
+    { "name": "liyangyu001-hue", "url": "https://github.com/liyangyu001-hue" },
+    { "name": "DeepSeek Harness Agent (AI)", "url": "https://github.com/deepseek-ai" }
+  ],
   "author": "liyangyu001-hue",
   "homepage": "https://github.com/liyangyu001-hue/dsh-work",
   "repository": {

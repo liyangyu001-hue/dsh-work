@@ -91,3 +91,14 @@ cd apps/companion && ./node_modules/electron/dist/electron.exe .
 ## 许可
 
 [MIT](LICENSE) © 2026 liyangyu001-hue
+
+## 制作
+
+| 角色 | 是谁 |
+| --- | --- |
+| 产品取舍、美术方向、验收 | [liyangyu001-hue](https://github.com/liyangyu001-hue) |
+| 架构、实现、文档、发布 | DeepSeek Harness Agent（AI 协作者，跑在 DeepSeek Harness 里） |
+
+这个项目由人和 AI 代理结对完成：人决定"做成什么样"，代理负责"怎么做到、以及证明做到了"。
+两者的分工与工作规则写在 [项目说明](docs/GUIDE.md) 里——那不是给使用者看的，是给下一个接手的人。
+

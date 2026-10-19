@@ -174,4 +174,74 @@ inline bool HttpGetJson(const Endpoint& endpoint, const std::wstring& path, std:
   return ok;
 }
 
+/**
+ * 提交一条意图（POST /api/intent）。这是原生层唯一会"改状态"的动作，
+ * 而且它不碰本地状态——状态永远以宿主下一次返回的文档为准。
+ */
+inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, const std::string& payload,
+                         std::string& body, std::string& reason) {
+  URL_COMPONENTS parts = {};
+  parts.dwStructSize = sizeof(parts);
+  parts.dwHostNameLength = static_cast<DWORD>(-1);
+  parts.dwUrlPathLength = static_cast<DWORD>(-1);
+  parts.dwSchemeLength = static_cast<DWORD>(-1);
+
+  const std::wstring full = Widen(endpoint.url) + path;
+  if (!WinHttpCrackUrl(full.c_str(), 0, 0, &parts)) {
+    reason = "url 解析失败";
+    return false;
+  }
+  const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+  const std::wstring request_path(parts.lpszUrlPath, parts.dwUrlPathLength);
+
+  HINTERNET session = WinHttpOpen(L"dsh-work-native/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (session == nullptr) {
+    reason = "WinHttpOpen 失败";
+    return false;
+  }
+  WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000);
+
+  bool ok = false;
+  HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
+  if (connection != nullptr) {
+    HINTERNET request = WinHttpOpenRequest(connection, L"POST", request_path.c_str(), nullptr,
+                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (request != nullptr) {
+      const std::wstring headers = L"x-dsh-work-token: " + Widen(endpoint.token) +
+                                   L"\r\nContent-Type: application/json\r\n";
+      WinHttpAddRequestHeaders(request, headers.c_str(), static_cast<DWORD>(-1),
+                               WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+      if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             const_cast<char*>(payload.data()), static_cast<DWORD>(payload.size()),
+                             static_cast<DWORD>(payload.size()), 0) &&
+          WinHttpReceiveResponse(request, nullptr)) {
+        DWORD status = 0;
+        DWORD size = sizeof(status);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+        body.clear();
+        DWORD available = 0;
+        while (WinHttpQueryDataAvailable(request, &available) && available > 0) {
+          std::string chunk(available, '\0');
+          DWORD read = 0;
+          if (!WinHttpReadData(request, chunk.data(), available, &read)) break;
+          chunk.resize(read);
+          body += chunk;
+        }
+        ok = status >= 200 && status < 300;
+        if (!ok) reason = "HTTP " + std::to_string(status) + " " + body;
+      } else {
+        reason = "请求失败";
+      }
+      WinHttpCloseHandle(request);
+    }
+    WinHttpCloseHandle(connection);
+  } else {
+    reason = "连接失败（DSH 没在跑？）";
+  }
+  WinHttpCloseHandle(session);
+  return ok;
+}
+
 }  // namespace dshwork

@@ -18,6 +18,8 @@
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
+#include <windowsx.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
@@ -31,7 +33,9 @@
 #include <string>
 #include <thread>
 
+#include "doc.h"
 #include "host.h"
+#include "panel.h"
 #include "json.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -43,6 +47,7 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"DSHWorkNativeBar";
 constexpr UINT kMsgModel = WM_APP + 1;
 constexpr UINT kMsgPaint = WM_APP + 2;
+constexpr UINT kMsgKey = WM_APP + 4;
 
 // 几何（DIP，绘制时乘 dpi/96）
 constexpr float kWindowWidth = 640.0f;
@@ -53,14 +58,12 @@ constexpr float kDotRadius = 4.0f;
 constexpr float kDotGap = 10.0f;
 constexpr float kProgressGap = 12.0f;
 
-/** 宿主状态 → 小条要显示的东西。UI 线程只认这个结构。 */
-struct BarModel {
-  enum class State { Offline, Connecting, Online } state = State::Connecting;
-  std::wstring title;
-  int done = 0;
-  int total = 0;
-  std::string note;  // 离线原因，排版时优先显示
-};
+/**
+ * 界面模型来自 doc.h：小条和面板看的是同一份结构。
+ * 早先小条自己解析一遍 JSON，面板又要再解析一遍，两处口径迟早会漂；
+ * 现在只解析一次，两个窗口各取所需。
+ */
+using BarModel = dshwork::WorkModel;
 
 HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
@@ -79,6 +82,31 @@ float g_dpiScale = 1.0f;
 ID2D1DCRenderTarget* g_target = nullptr;
 ID2D1SolidColorBrush* g_brush = nullptr;
 
+// ── 面板 ─────────────────────────────────────────────────
+// 面板是第二个窗口，不是小条的放大版：小条只报"现在这一件事"，
+// 面板承载全部任务与详情，两者共用同一份 WorkModel。
+HWND g_panel = nullptr;
+bool g_panel_open = false;
+int g_focus = -1;  // 面板里选中第几张卡；-1 表示跟随当前任务
+dshwork::WorkModel g_panel_model;
+IDWriteTextFormat* g_formatPanelTitle = nullptr;
+IDWriteTextFormat* g_formatBody = nullptr;
+IDWriteTextFormat* g_formatPanelMeta = nullptr;
+HHOOK g_keyboard_hook = nullptr;
+
+constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
+constexpr UINT kMsgTray = WM_APP + 3;
+constexpr UINT kHotkeyId = 0x51;
+constexpr int kTrayIconId = 1;
+
+// 这几个函数在窗口过程里就要用，定义在下面，先声明
+void RepaintPanel();
+void RefreshPanelModel();
+void DispatchKey(int action);
+void TogglePanel();
+void ShowTrayMenu();
+LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam);
+
 void LogToFile(const std::string& message) {
   wchar_t profile[MAX_PATH] = {};
   if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) == 0) return;
@@ -94,45 +122,6 @@ void LogToFile(const std::string& message) {
   file << "[" << stamp << "] " << message << "\n";
 }
 
-/** 从宿主文档里算出小条要的三样东西。取不到就返回 false，交给上层显示离线。 */
-bool ModelFromDoc(const std::string& body, BarModel& out) {
-  dshwork::JValue root;
-  if (!dshwork::ParseJson(body, root) || !root.IsObject()) return false;
-
-  // /api/state 的外层是 { doc: {...} }，真正的文档在 doc 里；
-  // 但别写死——直接给文档的形态也认，免得宿主改一层就得跟着改。
-  const dshwork::JValue* doc = root.Get("doc");
-  if (doc == nullptr || !doc->IsObject()) doc = &root;
-
-  const dshwork::JValue* nodes = doc->Get("nodes");
-  if (nodes == nullptr || !nodes->IsObject()) return false;
-
-  int done = 0;
-  for (const auto& entry : nodes->object) {
-    const dshwork::JValue* status = entry.second.Get("status");
-    if (status != nullptr && status->IsString() && status->text == "done") ++done;
-  }
-  out.done = done;
-  out.total = static_cast<int>(nodes->object.size());
-
-  const std::string pointer = doc->GetString("pointer");
-  if (pointer.empty()) {
-    out.title = L"全部已完成";
-    out.state = BarModel::State::Online;
-    return true;
-  }
-
-  const dshwork::JValue* node = nodes->Get(pointer);
-  if (node == nullptr) {
-    out.title = L"当前节点不见了";
-    out.state = BarModel::State::Online;
-    return true;
-  }
-  out.title = dshwork::Widen(node->GetString("title"));
-  out.state = BarModel::State::Online;
-  return true;
-}
-
 void PollLoop() {
   using namespace std::chrono_literals;
   std::string last_reason;
@@ -141,21 +130,22 @@ void PollLoop() {
     dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
     BarModel model;
     if (!endpoint.ok) {
-      model.state = BarModel::State::Offline;
+      model.state = dshwork::WorkModel::State::Offline;
       model.note = endpoint.error;
       model.title = L"DSH 未连接";
     } else {
       std::string body;
       std::string reason;
       if (dshwork::HttpGetJson(endpoint, L"/dsh-work/api/state", body, reason)) {
-        if (!ModelFromDoc(body, model)) {
-          model.state = BarModel::State::Offline;
+        model = dshwork::ModelFromDoc(body);
+        if (model.state != dshwork::WorkModel::State::Online) {
+          model.state = dshwork::WorkModel::State::Offline;
           model.note = "状态文档解析失败";
           model.title = L"DSH 数据异常";
         }
         last_reason.clear();
       } else {
-        model.state = BarModel::State::Offline;
+        model.state = dshwork::WorkModel::State::Offline;
         model.note = reason;
         model.title = L"DSH 未连接";
         if (reason != last_reason) {
@@ -249,7 +239,7 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
   // 状态点
   UINT32 dot_color = 0xFF8E8E93;
   if (model.state == BarModel::State::Online) dot_color = 0xFF0A84FF;
-  if (model.state == BarModel::State::Offline) dot_color = 0xFFFF453A;
+  if (model.state == dshwork::WorkModel::State::Offline) dot_color = 0xFFFF453A;
   g_brush->SetColor(ColorOf(dot_color));
   const float dot_cx = pill_left + kPaddingX * scale + kDotRadius * scale;
   const float dot_cy = pill_top + pill_h * 0.5f;
@@ -348,6 +338,23 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       return 0;
     case kMsgModel:
       Repaint();
+      if (g_panel_open) {
+        RefreshPanelModel();
+        RepaintPanel();
+      }
+      return 0;
+    case kMsgKey:
+      DispatchKey(static_cast<int>(wparam));
+      return 0;
+    case WM_HOTKEY:
+      if (wparam == kHotkeyId) TogglePanel();
+      return 0;
+    case kMsgTray:
+      if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
+        ShowTrayMenu();
+      } else if (lparam == WM_LBUTTONUP) {
+        TogglePanel();
+      }
       return 0;
     case WM_DPICHANGED: {
       UpdateDpi();
@@ -359,9 +366,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       PositionWindow();
       Repaint();
       return 0;
-    case WM_DESTROY:
+    case WM_DESTROY: {
+      NOTIFYICONDATAW data = {};
+      data.cbSize = sizeof(data);
+      data.hWnd = g_window;
+      data.uID = kTrayIconId;
+      Shell_NotifyIconW(NIM_DELETE, &data);
+      if (g_keyboard_hook != nullptr) {
+        UnhookWindowsHookEx(g_keyboard_hook);
+        g_keyboard_hook = nullptr;
+      }
+      UnregisterHotKey(g_window, kHotkeyId);
       PostQuitMessage(0);
       return 0;
+    }
     default:
       return DefWindowProcW(window, message, wparam, lparam);
   }
@@ -382,6 +400,25 @@ bool CreateGraphics() {
                                         &g_formatMeta)))
     return false;
 
+  if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.5f, L"zh-CN",
+                                        &g_formatPanelTitle)))
+    return false;
+  if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-CN",
+                                        &g_formatBody)))
+    return false;
+  if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.5f, L"zh-CN",
+                                        &g_formatPanelMeta)))
+    return false;
+  g_formatBody->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+  g_formatPanelTitle->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  g_formatPanelMeta->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  g_formatPanelTitle->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  g_formatPanelMeta->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  g_formatBody->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
   g_formatTitle->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
   g_formatMeta->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
   g_formatTitle->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -395,6 +432,252 @@ bool CreateGraphics() {
   return true;
 }
 
+// ── 面板：位置 / 绘制 / 生命周期 ─────────────────────────
+
+void PositionPanel() {
+  if (g_panel == nullptr) return;
+  MONITORINFO info = {};
+  info.cbSize = sizeof(info);
+  GetMonitorInfoW(MonitorFromWindow(g_panel, MONITOR_DEFAULTTOPRIMARY), &info);
+
+  const int px_w = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
+  const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
+  const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
+  // 小条窗口高 96，药丸占中间 44 左右；62 让面板上沿正好接在药丸下缘
+  const int y = info.rcWork.top + static_cast<int>(78 * g_dpiScale);
+  SetWindowPos(g_panel, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
+}
+
+void RepaintPanel() {
+  if (g_panel == nullptr) return;
+  const int px_w = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
+  const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
+
+  HDC screen = GetDC(nullptr);
+  HDC memory = CreateCompatibleDC(screen);
+  ReleaseDC(nullptr, screen);
+
+  // 必须用 DIB 段：CreateCompatibleBitmap 没有 alpha 通道，
+  // D2D 在上面画会直接返回错误，UpdateLayeredWindow 也拿不到透明度。
+  BITMAPINFO info = {};
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biWidth = px_w;
+  info.bmiHeader.biHeight = -px_h;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+  HGDIOBJ old_bitmap = SelectObject(memory, bitmap);
+
+  RECT bounds = {0, 0, px_w, px_h};
+  g_target->BindDC(memory, &bounds);
+  g_target->BeginDraw();
+  g_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+  dshwork::WorkModel model;
+  {
+    std::lock_guard<std::mutex> lock(g_model_mutex);
+    model = g_panel_model;
+  }
+  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
+  dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats);
+  const HRESULT draw_result = g_target->EndDraw();
+  if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
+
+  POINT source = {0, 0};
+  SIZE size = {px_w, px_h};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  if (!UpdateLayeredWindow(g_panel, nullptr, nullptr, &size, memory, &source, 0, &blend, ULW_ALPHA)) {
+    LogToFile("面板 UpdateLayeredWindow 失败 err=" + std::to_string(GetLastError()));
+  }
+
+  SelectObject(memory, old_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(memory);
+}
+
+/** 意图一律交给宿主判定：本地不改状态，下一次轮询自然会把新状态带回来。 */
+void PostIntent(const std::string& type, const std::string& node_id = std::string()) {
+  dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+  if (!endpoint.ok) {
+    LogToFile("意图 " + type + " 未提交：" + endpoint.error);
+    return;
+  }
+  std::string intent = "{\"type\":\"" + type + "\"";
+  if (!node_id.empty()) intent += ",\"nodeId\":\"" + node_id + "\"";
+  intent += "}";
+  const std::string payload = "{\"intent\":" + intent + ",\"by\":\"human\"}";
+  std::string body;
+  std::string reason;
+  if (dshwork::HttpPostJson(endpoint, L"/dsh-work/api/intent", payload, body, reason)) {
+    LogToFile("意图已提交：" + type);
+  } else {
+    LogToFile("意图失败：" + type + " " + reason);
+  }
+}
+
+void RefreshPanelModel() {
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+  g_panel_model = g_model;
+  if (g_focus < 0 && g_panel_model.current >= 0) g_focus = g_panel_model.current;
+}
+
+void ShowPanel() {
+  if (g_panel == nullptr) return;
+  RefreshPanelModel();
+  PositionPanel();
+  ShowWindow(g_panel, SW_SHOWNOACTIVATE);
+  // 每次显示都重申置顶：Windows 会在一段时间后把置顶窗口降到普通层（lolPing #70）
+  SetWindowPos(g_panel, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  g_panel_open = true;
+  if (g_keyboard_hook == nullptr) {
+    g_keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, g_instance, 0);
+    if (g_keyboard_hook == nullptr) LogToFile("键盘钩子安装失败，面板将收不到按键");
+  }
+  RepaintPanel();
+  RECT panel_rect = {};
+  GetWindowRect(g_panel, &panel_rect);
+  LogToFile("面板打开 rect=" + std::to_string(panel_rect.left) + "," + std::to_string(panel_rect.top) + " " +
+            std::to_string(panel_rect.right - panel_rect.left) + "x" +
+            std::to_string(panel_rect.bottom - panel_rect.top));
+}
+
+void HidePanel() {
+  if (g_panel == nullptr || !g_panel_open) return;
+  ShowWindow(g_panel, SW_HIDE);
+  g_panel_open = false;
+  if (g_keyboard_hook != nullptr) {
+    UnhookWindowsHookEx(g_keyboard_hook);
+    g_keyboard_hook = nullptr;
+  }
+  LogToFile("面板收起");
+}
+
+void TogglePanel() {
+  if (g_panel_open) {
+    HidePanel();
+  } else {
+    ShowPanel();
+  }
+}
+
+void MoveFocus(int delta) {
+  if (g_panel_model.items.empty()) return;
+  const int count = static_cast<int>(g_panel_model.items.size());
+  const int base = g_focus >= 0 ? g_focus : (g_panel_model.current >= 0 ? g_panel_model.current : 0);
+  g_focus = (base + delta + count) % count;
+  RepaintPanel();
+}
+
+LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  switch (message) {
+    case WM_LBUTTONDOWN: {
+      // 只认右上角那个 ×，别的一律忽略（面板不抢焦点，也不需要拖动）
+      const int x = GET_X_LPARAM(lparam);
+      const int width = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
+      if (x > width - static_cast<int>(70 * g_dpiScale) && GET_Y_LPARAM(lparam) < static_cast<int>(60 * g_dpiScale)) {
+        HidePanel();
+      }
+      return 0;
+    }
+    case WM_DESTROY:
+      return 0;
+    default:
+      return DefWindowProcW(window, message, wparam, lparam);
+  }
+}
+
+/** 托盘：右键菜单里至少要有"退出"，否则这进程只能去任务管理器杀。 */
+void CreateTrayIcon() {
+  NOTIFYICONDATAW data = {};
+  data.cbSize = sizeof(data);
+  data.hWnd = g_window;
+  data.uID = kTrayIconId;
+  data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  data.uCallbackMessage = kMsgTray;
+  data.hIcon = LoadIconW(g_instance, IDI_APPLICATION);
+  wcscpy_s(data.szTip, L"DSH Work");
+  if (!Shell_NotifyIconW(NIM_ADD, &data)) LogToFile("托盘图标添加失败");
+}
+
+void ShowTrayMenu() {
+  POINT cursor = {};
+  GetCursorPos(&cursor);
+  HMENU menu = CreatePopupMenu();
+  AppendMenuW(menu, MF_STRING, 1, g_panel_open ? L"收起面板" : L"打开面板");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, 2, L"退出");
+  SetForegroundWindow(g_window);
+  const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, g_window, nullptr);
+  DestroyMenu(menu);
+  if (command == 1) TogglePanel();
+  if (command == 2) {
+    PostQuitMessage(0);
+    PostMessageW(g_window, WM_CLOSE, 0, 0);
+  }
+}
+
+void DispatchKey(int action) {
+  switch (action) {
+    case 1: {  // Enter：选中的就是当前任务就完成它，否则先把指针挪过去
+      if (g_panel_model.items.empty()) break;
+      const int count = static_cast<int>(g_panel_model.items.size());
+      const int index = g_focus >= 0 && g_focus < count ? g_focus : g_panel_model.current;
+      if (index < 0) break;
+      const dshwork::NodeView& node = g_panel_model.items[static_cast<size_t>(index)];
+      if (index == g_panel_model.current) {
+        std::thread(PostIntent, std::string("node.advance"), std::string()).detach();
+      } else if (node.status == "todo") {
+        std::thread(PostIntent, std::string("node.focus"), node.id).detach();
+      }
+      break;
+    }
+    case 2:  // Backspace
+      std::thread(PostIntent, std::string("node.back"), std::string()).detach();
+      break;
+    case 3:  // Esc
+      HidePanel();
+      break;
+    case 4:
+      MoveFocus(-1);
+      break;
+    case 5:
+      MoveFocus(1);
+      break;
+    default:
+      break;
+  }
+}
+
+/** 0 表示不拦，其余是动作号。 */
+int ActionOf(UINT vk) {
+  switch (vk) {
+    case VK_RETURN: return 1;
+    case VK_BACK: return 2;
+    case VK_ESCAPE: return 3;
+    case VK_LEFT: return 4;
+    case VK_RIGHT: return 5;
+    default: return 0;
+  }
+}
+
+/**
+ * 低级键盘钩子：只在这几个键、且面板开着时把它们吃掉。
+ * 这是 lolPing 的做法——面板窗口 WS_EX_NOACTIVATE 收不到键盘，
+ * 与其抢焦点（会打断用户正在打的字），不如在系统层截走并立刻转给面板。
+ */
+LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
+  if (code == HC_ACTION && g_panel_open) {
+    const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
+    const int action = ActionOf(key->vkCode);
+    if (action != 0) {
+      if (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) PostMessageW(g_window, kMsgKey, action, 0);
+      return 1;  // 按下与抬起都吃掉，避免下层程序收到半个手势
+    }
+  }
+  return CallNextHookEx(g_keyboard_hook, code, wparam, lparam);
+}
 }  // namespace
 
 int main() {
@@ -423,8 +706,23 @@ int main() {
     return 1;
   }
 
+  // 面板先建好但藏着：热键按下时才 ShowWindow，省掉每次创建窗口的抖动
+  WNDCLASSEXW panel_class = window_class;
+  panel_class.lpfnWndProc = PanelProc;
+  panel_class.lpszClassName = kPanelClass;
+  if (RegisterClassExW(&panel_class) == 0) LogToFile("面板窗口类注册失败");
+  g_panel = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kPanelClass,
+                            L"DSH Work 面板", WS_POPUP, 0, 0,
+                            static_cast<int>(dshwork::ui::kPanelWidth),
+                            static_cast<int>(dshwork::ui::kPanelHeight), nullptr, nullptr, g_instance, nullptr);
+  if (g_panel == nullptr) LogToFile("面板窗口创建失败");
+
   PositionWindow();
   Repaint();
+  CreateTrayIcon();
+  if (!RegisterHotKey(g_window, kHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE)) {
+    LogToFile("全局热键 Ctrl+Alt+Space 注册失败（可能被别的软件占了）");
+  }
   LogToFile("原生小条启动");
 
   std::thread poller(PollLoop);
