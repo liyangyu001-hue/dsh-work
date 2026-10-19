@@ -1,0 +1,16 @@
+{
+  "name": "@dshwork/companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Work 的伴随层：系统级置顶小条、全局热键、屏幕截取与框选",
+  "license": "MIT",
+  "main": "./src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^38.8.6"
+  }
+}

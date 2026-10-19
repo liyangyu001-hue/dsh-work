@@ -22,11 +22,13 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 ## 现在什么状态
 
-**P0 地基**：协议、数据模型、设计系统已冻结，核心状态机可用。界面与伴随层尚未落地。
+**P0 地基已完成**：三层骨架跑通并互相认得——宿主侧有可回放的任务状态机与持久化，窗口内有玻璃条，桌面上有一条真正置顶、跨应用的玻璃条。
+
+<p align="center"><img src="docs/assets/bar-p0.png" width="560" alt="桌面上方置顶玻璃条" /></p>
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 三层骨架 + 契约冻结 + `core` 状态机 | 🚧 |
+| P0 | 三层骨架 + 契约冻结 + `core` 状态机 + 置顶玻璃条 | ✅ |
 | P1 | 热键 → 截图 → 识别 → 任务树 → 卡片轮播 → 持久化 | ⬜ |
 | P2 | 建议流 · 交给 AI · 任务树编辑 | ⬜ |
 | P3 | 玻璃与动效 · 多屏 · 离线 · 设置 · 托盘 | ⬜ |
@@ -46,7 +48,30 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 pnpm install
 pnpm test        # 直接跑 .ts，无需构建（Node 22.18+ 原生类型擦除）
 pnpm typecheck
+pnpm build       # esbuild 打插件与客户端两个 bundle
+node scripts/shot.mjs   # 用本机 Chrome 无头截图，肉眼验收界面
 ```
+
+把插件挂进一个开发用 profile（不动你日常那个）：
+
+```bash
+dsh dshwork-dev --from-default-profile web     # 首次：建 profile
+pnpm build                                     # 每次改完客户端都要重打
+dsh --profile dshwork-dev --port 64001 --no-open
+```
+
+> 端口被上一次的进程占着时，`dsh` 起不来而日志里看不出原因。先按端口杀：
+> `Get-NetTCPConnection -LocalPort 64001 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`
+
+伴随层（桌面置顶玻璃条）单独跑：
+
+```bash
+cd apps/companion && ./node_modules/electron/dist/electron.exe .
+```
+
+> 在 DSH 的终端里启动前必须 `Remove-Item Env:ELECTRON_RUN_AS_NODE` —— DSH 自己的
+> 诊断环境会带上它，Electron 见到它会退化成纯 Node，窗口一个都不会出现。
+> 排障看 `~/.dsh/dsh-work/companion.log`。
 
 文档索引：[架构](docs/ARCHITECTURE.md) · [协议](docs/PROTOCOL.md) · [数据模型](docs/DATA-MODEL.md) · [设计系统](docs/DESIGN-SYSTEM.md) · [路线图](docs/ROADMAP.md)
 

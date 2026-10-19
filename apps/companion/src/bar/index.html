@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>DSH Work</title>
+    <style>
+      /*
+       * 设计约束（docs/DESIGN-SYSTEM.md）：
+       *   - 玻璃三件套：半透明填充 + 背景模糊 + 0.5px 发丝描边
+       *   - 动效只取动画十二原则里的五条：预备 / 跟随重叠 / 缓入缓出 / 挤压拉伸 / 次要动作
+       *   - 不做粒子、不做光效、不做无信息量的循环动画
+       */
+      :root {
+        --dswork-dur-fast: 120ms;
+        --dswork-dur-base: 200ms;
+        --dswork-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+        --dswork-ink: #1a1a1c;
+        --dswork-ink-dim: rgba(26, 26, 28, 0.55);
+        --dswork-accent: #0a84ff;
+        --dswork-idle: #9a9a9e;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --dswork-ink: #f2f2f4;
+          --dswork-ink-dim: rgba(242, 242, 244, 0.55);
+          --dswork-accent: #4da3ff;
+          --dswork-idle: #6a6a6e;
+        }
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        /* 整窗默认不吃鼠标：点击穿透交给主进程按 hover 开关 */
+        pointer-events: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      /* 上下留白是为了投影不被窗口裁掉（窗口 88px，条 44px） */
+      #stage {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      #bar {
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 44px;
+        max-width: 520px;
+        padding: 0 18px;
+        box-sizing: border-box;
+        border-radius: 22px;
+        font: 500 13px/1.2 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        color: var(--dswork-ink);
+
+        background: rgba(255, 255, 255, 0.72);
+        -webkit-backdrop-filter: blur(24px) saturate(180%);
+        backdrop-filter: blur(24px) saturate(180%);
+        border: 0.5px solid rgba(0, 0, 0, 0.08);
+        box-shadow:
+          0 1px 1px rgba(0, 0, 0, 0.04),
+          0 8px 32px rgba(0, 0, 0, 0.12);
+
+        /* 跟随重叠：状态切换时轻微回弹，而不是硬切 */
+        transition:
+          transform var(--dswork-dur-base) var(--dswork-ease-out),
+          box-shadow var(--dswork-dur-base) var(--dswork-ease-out);
+        will-change: transform;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        #bar {
+          background: rgba(28, 28, 30, 0.72);
+          border-color: rgba(255, 255, 255, 0.1);
+        }
+      }
+
+      /* 预备：按下热键的当下给一次极小的压缩，告诉用户"我收到了" */
+      #bar.pulse {
+        transform: scale(0.97);
+      }
+
+      .dot {
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: var(--dswork-idle);
+        transition:
+          background var(--dswork-dur-base) var(--dswork-ease-out),
+          box-shadow var(--dswork-dur-base) var(--dswork-ease-out);
+      }
+
+      #bar[data-conn="online"] .dot {
+        background: var(--dswork-accent);
+        box-shadow: 0 0 8px rgba(10, 132, 255, 0.55);
+      }
+
+      .title {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .count {
+        flex: 0 0 auto;
+        font-variant-numeric: tabular-nums;
+        font-size: 12px;
+        color: var(--dswork-ink-dim);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #bar,
+        .dot {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="bar" data-conn="offline" role="status" aria-live="polite">
+        <span class="dot"></span>
+        <span class="title" id="title">正在连接 DSH…</span>
+        <span class="count" id="count">—</span>
+      </div>
+    </div>
+
+    <script>
+      const bar = document.getElementById("bar");
+      const titleEl = document.getElementById("title");
+      const countEl = document.getElementById("count");
+
+      /**
+       * 把宿主快照翻成一行字。
+       * 口径与 DSH 窗口内的那条小条保持一致（skipped 不进分母），
+       * 两处若出现分歧，以这里为准再去改客户端 —— 因为伴随层才是用户日常看到的那条。
+       */
+      function render(payload) {
+        const { state, snapshot } = payload || {};
+        bar.dataset.conn = state ?? "offline";
+
+        if (state !== "online" || !snapshot || !snapshot.doc) {
+          titleEl.textContent = state === "connecting" ? "正在连接 DSH…" : "DSH 未连接";
+          countEl.textContent = "—";
+          return;
+        }
+
+        const nodes = Object.values(snapshot.doc.nodes || {});
+        const counted = nodes.filter((n) => n.status !== "skipped");
+        const done = counted.filter((n) => n.status === "done").length;
+        const pointer = snapshot.doc.pointer;
+        const current = pointer ? snapshot.doc.nodes[pointer] : undefined;
+
+        titleEl.textContent = current ? current.title : counted.length > 0 ? "全部已完成" : "还没有任务";
+        countEl.textContent = counted.length > 0 ? `${done}/${counted.length}` : "—";
+      }
+
+      // 点击穿透的开关：只有鼠标真正进到条里才关掉穿透，离开立刻恢复
+      bar.addEventListener("mouseenter", () => window.dshwork.setPointerOver(true));
+      bar.addEventListener("mouseleave", () => window.dshwork.setPointerOver(false));
+
+      window.dshwork.onHostState(render);
+
+      // 次要动作：热键按下时给一次 120ms 的压缩反馈，不阻塞任何事
+      window.dshwork.onHotkey(() => {
+        bar.classList.add("pulse");
+        setTimeout(() => bar.classList.remove("pulse"), 120);
+      });
+
+      window.dshwork.ready();
+    </script>
+  </body>
+</html>
