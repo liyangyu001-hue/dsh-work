@@ -6,6 +6,9 @@
     "moduleResolution": "NodeNext",
     "types": ["node"],
 
+    /* 客户端半边用 React 的自动 JSX 运行时（与宿主提供的种子一致） */
+    "jsx": "react-jsx",
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
