@@ -6,11 +6,15 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 它不是又一个待办清单。它的定位是**办公专注模式**：你在做什么、做到哪儿、下一步该干嘛、这件事该不该交出去——这些本该由人脑维持的状态，现在有一个常驻进程替你维持着，并且它有心跳。
 
+> **要改它、或者要跟它一起工作？** 先读 [项目说明](docs/GUIDE.md)：它写清了项目是什么、每层为什么存在、各自负责什么、工程规则是什么、踩过哪些坑。
+> 只想知道现在做到哪了，读 [接力板](docs/NEXT.md)。
+
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  伴随层（Electron）  热键 · 截图 · 置顶玻璃条 · 托盘          │
+│  伴随层（C++ / Win32，Electron 版保留可回退）                  │
+│  热键 · 截图框选 · 置顶玻璃小条 · 面板 · 托盘                  │
 └───────────────▲──────────────────────┬───────────────────┘
-                │        WS 反连        │
+                │        HTTP / SSE     │
 ┌───────────────┴──────────────────────▼───────────────────┐
 │  插件宿主（Node）   任务状态机 · 持久化 · AI 编排 · 工具      │
 └───────────────▲──────────────────────┬───────────────────┘
@@ -37,8 +41,10 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 |---|---|---|
 | P0 | 三层骨架 + 契约冻结 + `core` 状态机 + 置顶玻璃条 | ✅ |
 | P1 | 热键 → 面板 → 框选截图 → 识别 → 任务树 → 卡片轮播 | 🚧 识别已接，轮播待做 |
+| 原生切片一 | C++ 小条替代 Electron（318 KB vs 210 MB） | ✅ |
+| 原生切片二 | 原生面板 + 托盘 | 🚧 进行中 |
 | P2 | 建议流 · 交给 AI · 任务树编辑 | ⬜ |
-| P3 | 玻璃与动效 · 多屏 · 离线 · 设置 · 托盘 | ⬜ |
+| P3 | 玻璃与动效 · 多屏 · 离线 · 设置 | ⬜ |
 | P4 | 学习模式 · 眼球追踪 · macOS | ⬜ |
 
 ## 设计原则
@@ -80,7 +86,7 @@ cd apps/companion && ./node_modules/electron/dist/electron.exe .
 > 诊断环境会带上它，Electron 见到它会退化成纯 Node，窗口一个都不会出现。
 > 排障看 `~/.dsh/dsh-work/companion.log`。
 
-文档索引：[架构](docs/ARCHITECTURE.md) · [协议](docs/PROTOCOL.md) · [数据模型](docs/DATA-MODEL.md) · [设计系统](docs/DESIGN-SYSTEM.md) · [路线图](docs/ROADMAP.md)
+文档索引：[项目说明](docs/GUIDE.md) · [架构](docs/ARCHITECTURE.md) · [协议](docs/PROTOCOL.md) · [数据模型](docs/DATA-MODEL.md) · [设计系统](docs/DESIGN-SYSTEM.md) · [路线图](docs/ROADMAP.md) · [当前任务](docs/NEXT.md)
 
 ## 许可
 
