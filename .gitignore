@@ -26,3 +26,6 @@ apps/companion/.electron/
 Thumbs.db
 *.log
 npm-debug.log*
+
+native/*/build/
+*.obj

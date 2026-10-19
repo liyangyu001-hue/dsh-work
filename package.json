@@ -22,6 +22,7 @@
     "check:assets": "node scripts/check-assets.mjs",
     "shots": "node scripts/make-shots.mjs",
     "build": "pnpm -r --filter \"./packages/*\" run build",
+    "build:native": "node scripts/build-native.mjs",
     "clean": "node scripts/clean.mjs"
   },
   "devDependencies": {
