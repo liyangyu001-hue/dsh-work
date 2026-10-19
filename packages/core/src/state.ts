@@ -479,6 +479,9 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
   const invalid = validateDoc(draft);
   if (invalid) return fail(`状态校验失败：${invalid}`);
 
+  // 序号由 apply 统一推进：调用方（store / replay）不必各自记得加一。
+  draft.seq = input.seq + 1;
+
   return { ok: true, doc: draft };
 }
 

@@ -1,7 +1,7 @@
 lockfileVersion: '9.0'
 
 settings:
-  autoInstallPeers: true
+  autoInstallPeers: false
   excludeLinksFromLockfile: false
 
 importers:
@@ -19,6 +19,12 @@ importers:
         version: 5.9.2
 
   packages/core: {}
+
+  packages/plugin:
+    devDependencies:
+      '@dshwork/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 

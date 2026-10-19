@@ -216,7 +216,8 @@ test('日志重放的结果与逐条 apply 完全一致', () => {
   const entries: JournalEntry[] = [];
   intents.forEach((intent, index) => {
     sequential = run(sequential, intent, NOW + index);
-    entries.push({ seq: index + 1, at: NOW + index, by: 'human', intent });
+    // 日志序号取「apply 之后」的 seq：这样重放时它与快照天然对齐。
+    entries.push({ seq: sequential.seq, at: NOW + index, by: 'human', intent });
   });
 
   const fromScratch = replay(seed(), entries);
@@ -224,16 +225,17 @@ test('日志重放的结果与逐条 apply 完全一致', () => {
   assert.equal(fromScratch.applied, intents.length);
   assert.deepEqual(fromScratch.doc.nodes, sequential.nodes);
   assert.equal(fromScratch.doc.pointer, sequential.pointer);
-  assert.equal(fromScratch.doc.seq, intents.length);
+  assert.equal(fromScratch.doc.seq, sequential.seq);
 });
 
 test('replay 会跳过 seq 已覆盖的条目（幂等）', () => {
   const doc = seed();
   const entries: JournalEntry[] = [
-    { seq: 1, at: NOW, by: 'human', intent: { type: 'node.advance' } },
+    { seq: doc.seq + 1, at: NOW, by: 'human', intent: { type: 'node.advance' } },
   ];
   const first = replay(doc, entries);
   const second = replay(first.doc, entries);
+  assert.equal(first.applied, 1);
   assert.equal(second.applied, 0);
   assert.deepEqual(second.doc.nodes, first.doc.nodes);
 });

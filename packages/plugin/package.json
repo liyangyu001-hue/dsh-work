@@ -1,0 +1,41 @@
+{
+  "name": "@dshwork/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Work 的 host 半边：任务状态权威、工具、HTTP/SSE 通道与伴随层进程管理",
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-plugin.mjs",
+    "test": "node --test \"src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@dshwork/core": "workspace:*"
+  }
+}
