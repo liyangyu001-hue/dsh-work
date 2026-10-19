@@ -18,7 +18,7 @@
 - [x] 首次 git 提交，提交信息说明改了什么
 
 **P0 实际交付（比计划多的部分）**
-- 系统级置顶玻璃条（Electron 无边框透明窗 + `alwaysOnTop("screen-saver")` + 状态回放），真机截图为证：`docs/assets/bar-p0.png`
+- 系统级置顶玻璃条（Electron 无边框透明窗 + `alwaysOnTop("screen-saver")` + 状态回放），文档配图 `docs/assets/bar.png`（由 `scripts/make-shots.mjs` 用合成数据渲染，不是桌面截图）
 - 宿主侧任务状态机 + 只追加日志 + 快照，**杀进程重启后状态完整**（真机验收）
 - 窗口内玻璃条挂在 `shell.overlay`，走同源 `/dsh-work/api/*`，与伴随层共用同一份状态编排
 - 伴随层日志 `~/.dsh/dsh-work/companion.log`（用户报障唯一凭证，切日志时删一次即可）

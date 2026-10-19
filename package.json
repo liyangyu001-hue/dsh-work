@@ -17,8 +17,10 @@
   "packageManager": "pnpm@11.22.0",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
+    "test": "node scripts/check-assets.mjs && node --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
     "test:watch": "node --test --watch \"packages/*/src/**/*.test.ts\"",
+    "check:assets": "node scripts/check-assets.mjs",
+    "shots": "node scripts/make-shots.mjs",
     "build": "pnpm -r --filter \"./packages/*\" run build",
     "clean": "node scripts/clean.mjs"
   },

@@ -24,11 +24,14 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 **P0 地基已完成**：三层骨架跑通并互相认得——宿主侧有可回放的任务状态机与持久化，窗口内有玻璃条，桌面上有一条真正置顶、跨应用的玻璃条。
 
-<p align="center"><img src="docs/assets/bar-p0.png" width="560" alt="桌面上方置顶玻璃条" /></p>
+<p align="center"><img src="docs/assets/bar.png" width="560" alt="桌面上方置顶玻璃条" /></p>
 
 **P1 进行中**：全局热键唤出**面板**（小条的展开态）——当前节点居中，左右是已完成与待进行；`Enter` 完成并前进、`Backspace` 退一步、`Tab` 进框选。框完即识别：PNG 交给宿主，视觉模型一次调用拆成带目标与验收的任务树，落盘后小条与面板同时看到它。
 
-<p align="center"><img src="docs/assets/panel-p1.png" width="820" alt="面板：热键唤出，浮在任意应用之上" /></p>
+<p align="center"><img src="docs/assets/panel.png" width="820" alt="面板：热键唤出，浮在任意应用之上" /></p>
+
+> 文档里的图都是 `node scripts/make-shots.mjs` 用**合成数据**渲染真实界面得来的，
+> 不是桌面截图——仓库是公开的，桌面截图会把别人窗口里的东西一起带出去。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
