@@ -75,7 +75,7 @@ packages/tokens ───────────┘
 | 任务树与指针 | `core/state.ts` | 纯函数 `apply(doc, intent) → doc`，同一日志必得同一结果 |
 | 持久化 | `plugin/store.ts` | `work.json` 快照 + `journal.ndjson` 追加；写临时文件再 rename |
 | 截图 | `companion/capture` | `desktopCapturer` 取全屏 → 框选层 → 只回传选区 PNG |
-| 识别与拆解 | `plugin/ai/planner` | 视觉模型一次调用完成「读屏 → 理解 → 拆树」 |
+| 识别与拆解 | `plugin/recognize.ts` + `plugin/http.ts` | 视觉模型一次调用完成「读屏 → 理解 → 拆树」。HTTP 只受理作业、结果另取（`/api/recognize`），避免同步路径里挂一个几十秒的模型调用；解析与校验是纯函数，模型永远不直接写文档——产出的 `plan.set` 仍走 `apply` 通道；截图先经 `ctx.attachments` 变成附件引用再进 `ctx.llm.stream` |
 | 建议 | `plugin/ai/advisor` | 直调模型（不进会话日志），按节点内容 hash 缓存 |
 | 交给 AI | `plugin/ai/taker` | 建 agent 会话，`followup` 驱动，结果回写节点 |
 | 心跳 | `plugin/pulse` | `ctx.schedule` 空闲巡检 + `turn/end` 事件驱动即时跟进 |

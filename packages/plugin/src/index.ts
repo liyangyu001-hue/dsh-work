@@ -22,6 +22,8 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
+import type { RecognizeApi, RecognizeJobView } from './http.ts';
+import { planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
@@ -32,14 +34,34 @@ export const name = '@dshwork/plugin';
  * 只声明真正必须的服务。
  * `webServer` 是 web 半边的前提；没有它的 profile（CLI/TUI）不该加载本插件，
  * 这一条本身就是「本插件只面向桌面 Web」的显式声明。
+ *
+ * 识别用到的 `llm` / `attachments` **故意不写进 inject**：它们是可选能力，
+ * 缺了应该只是「识别不可用」，而不是整条插件装不起来。
  */
 export const inject = ['tools', 'webServer'];
+
+/** 没有配置、宿主也没有默认模型时的回落值：DeepSeek-V4-Flash 的正式路由。 */
+const DEFAULT_PROVIDER = 'deepseek-official';
+const DEFAULT_MODEL = 'deepseek-v4-flash';
 
 export interface PluginConfig {
   /** 工作区根目录。缺省用宿主进程的 cwd（即 DSH 当前工作区）。 */
   root?: string;
   /** 是否把发现文件写给伴随层。默认 true。 */
   publishEndpoint?: boolean;
+  /**
+   * 识别用的模型。缺省跟随宿主当前默认模型（GUI 里选的那个），
+   * 再没有就回落到 DeepSeek-V4-Flash。
+   *
+   * 提醒：默认模型若只接受文本，宿主会把图片投影成文字说明，识别结果会很差；
+   * 这种 profile 应当显式指定视觉模型（例如 deepseek-v4-flash-vision-exp）。
+   */
+  llm?: {
+    provider?: string;
+    model?: string;
+    /** 单次模型调用的超时上限（毫秒）。 */
+    timeoutMs?: number;
+  };
 }
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -79,6 +101,105 @@ export function apply(ctx: any, config?: PluginConfig): void {
       newId: () => createId('nd'),
     };
 
+    /**
+     * 识别作业表。
+     *
+     * 为什么要有这一层：一次视觉调用是几十秒的事，不能挂在 HTTP 响应上——任何一层
+     * 超时都会把它掐断，而掐断之后没人知道模型还在不在跑。POST 只负责受理，
+     * 伴随层轮询 GET 拿结果；超时与插件卸载都能通过 AbortController 真正停下来。
+     *
+     * 同一时刻只认一张图：两次识别并发落地就是两条 plan.set，后一条会覆盖前一条。
+     */
+    const jobs = new Map<string, RecognizeJob>();
+    const unload = new AbortController();
+
+    const recognize: RecognizeApi = {
+      start(png: Buffer) {
+        for (const job of jobs.values()) {
+          if (job.view.state === 'running') {
+            return { ok: false, status: 409, reason: '上一张截图还在识别中' };
+          }
+        }
+        sweepRecognizeJobs(jobs);
+        const id = createId('rc');
+        const job: RecognizeJob = {
+          view: { state: 'running' },
+          at: Date.now(),
+          controller: new AbortController(),
+        };
+        jobs.set(id, job);
+        void runRecognize(job, png);
+        return { ok: true, id };
+      },
+      get(id: string): RecognizeJobView | null {
+        const job = jobs.get(id);
+        return job === undefined ? null : job.view;
+      },
+    };
+
+    // 插件卸载时把在跑的识别真正叫停：否则宿主退出后还会有一个请求挂在模型上。
+    disposers.push(() => unload.abort());
+
+    /**
+     * 截图 → 任务树。
+     *
+     * 失败一律以「可读原因」记在作业上、**不写文档**；成功才提交 plan.set
+     * （走既有 apply 校验，与工具建树是同一条落库路径）。
+     * 归因写 `ai`：这是模型替人做的第一次拆解，人后续随时可以改。
+     */
+    async function runRecognize(job: RecognizeJob, png: Buffer): Promise<void> {
+      const signal = AbortSignal.any([unload.signal, job.controller.signal]);
+      try {
+        const llm = readService(ctx, 'llm');
+        if (llm === null) {
+          finishRecognize(job, '宿主没有提供 llm 服务（profile 里没有挂模型适配器）');
+          return;
+        }
+        const attachments = readService(ctx, 'attachments');
+        if (attachments === null) {
+          finishRecognize(job, '宿主没有提供 attachments 服务');
+          return;
+        }
+
+        const selection = resolveLlmSelection(ctx, cfg);
+        const recognized = await recognizePlan(
+          {
+            llm,
+            attachments,
+            provider: selection.provider,
+            model: selection.model,
+            ...(cfg.llm?.timeoutMs === undefined ? {} : { timeoutMs: cfg.llm.timeoutMs }),
+          },
+          png.toString('base64'),
+          { signal },
+        );
+
+        if (recognized.specs.length === 0) {
+          finishRecognize(
+            job,
+            `模型没有给出可解析的任务树（共尝试 ${recognized.attempts} 次）；原文片段：${excerpt(recognized.raw)}`,
+          );
+          return;
+        }
+
+        const intent = planSetFromSpecs(recognized.specs, {
+          now: Date.now(),
+          newId: () => createId('nd'),
+          title: recognized.title,
+        });
+        const result = await store.commit(intent, 'ai');
+        if (!result.ok) {
+          finishRecognize(job, result.reason);
+          return;
+        }
+
+        job.view = { state: 'done', title: recognized.title, count: intent.nodes.length };
+        job.at = Date.now();
+      } catch (error) {
+        finishRecognize(job, describe(error));
+      }
+    }
+
     const http = createHttpHandler({
       runtime: {
         version,
@@ -89,6 +210,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
           store.subscribe((event) => listener(event.doc)),
       },
       authorize: (req) => authorizeRequest(ctx, req),
+      recognize,
     });
 
     // 令牌先就位：伴随层的请求可能在路由注册后几十毫秒内就打进来。
@@ -194,5 +316,98 @@ async function readVersion(): Promise<string> {
     return typeof parsed.version === 'string' ? parsed.version : '0.0.0';
   } catch {
     return '0.0.0';
+  }
+}
+
+/* ─────────────────────────── 识别用的环境读取 ─────────────────────────── */
+
+/** 取一个**可选**服务；没有就返回 null（未 inject 时直接点属性会抛）。 */
+function readService(ctx: any, name: string): any {
+  try {
+    const service = typeof ctx.get === 'function' ? ctx.get(name) : undefined;
+    return service ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 识别用哪个模型：插件配置 → 宿主当前默认模型 → DeepSeek-V4-Flash。
+ *
+ * 中间那一档是刻意的：用户在 GUI 里换了模型，识别应当跟着换，而不是被
+ * 一个写死的路由钉住；完全没配置的机器才回落到常量。
+ */
+function resolveLlmSelection(ctx: any, cfg: PluginConfig): { provider: string; model: string } {
+  const wanted = cfg.llm ?? {};
+  const hostDefault = readHostDefaultModel(ctx);
+  return {
+    provider: pick(wanted.provider) ?? pick(hostDefault.provider) ?? DEFAULT_PROVIDER,
+    model: pick(wanted.model) ?? pick(hostDefault.model) ?? DEFAULT_MODEL,
+  };
+}
+
+function readHostDefaultModel(ctx: any): { provider?: string; model?: string } {
+  try {
+    const service = readService(ctx, 'agentDefaultModel');
+    const selection = service?.currentSelection?.() as { provider?: unknown; model?: unknown } | undefined;
+    const provider = pick(selection?.provider);
+    const model = pick(selection?.model);
+    return {
+      ...(provider === null ? {} : { provider }),
+      ...(model === null ? {} : { model }),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function pick(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text === '' ? null : text;
+}
+
+/** 报错里附一小段模型原文：没有它，用户只会看到「解析失败」而无从下手。 */
+function excerpt(raw: string): string {
+  const text = raw.trim().replace(/\s+/g, ' ');
+  return text === '' ? '(空)' : text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/* ─────────────────────────── 识别作业 ─────────────────────────── */
+
+interface RecognizeJob {
+  view: RecognizeJobView;
+  /** 最后一次状态变化时刻，用于回收过期作业。 */
+  at: number;
+  /** 预留：将来要「手动取消识别」时，abort 这一个即可。 */
+  controller: AbortController;
+}
+
+/** 失败的作业统一走这里：状态与原因一起落定，调用方无需重复写。 */
+function finishRecognize(job: RecognizeJob, reason: string): void {
+  job.view = { state: 'error', reason };
+  job.at = Date.now();
+}
+
+/** 已结束的作业留 5 分钟给伴随层来取；最多留 8 个，多了就丢最旧的。 */
+const JOB_TTL_MS = 5 * 60_000;
+const JOB_KEEP = 8;
+
+function sweepRecognizeJobs(jobs: Map<string, RecognizeJob>): void {
+  const cutoff = Date.now() - JOB_TTL_MS;
+  for (const [id, job] of jobs) {
+    if (job.view.state !== 'running' && job.at < cutoff) jobs.delete(id);
+  }
+  while (jobs.size > JOB_KEEP) {
+    const oldest = jobs.keys().next();
+    if (oldest.done) break;
+    const job = jobs.get(oldest.value);
+    // 在跑的作业永远不回收：轮询到一半把它删掉，用户就再也拿不到结果了。
+    if (job !== undefined && job.view.state === 'running') break;
+    jobs.delete(oldest.value);
   }
 }

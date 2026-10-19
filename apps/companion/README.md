@@ -28,14 +28,35 @@ DSH 插件跑在宿主进程里，拿不到 `globalShortcut` / `desktopCapturer`
 
 ```
 src/
-  main.cjs        主进程：窗口、热键、点击穿透、状态回放
-  config.cjs      ~/.dsh/dsh-work/config.json 的读取与校验（坏配置不致命）
-  paths.cjs       ~/.dsh/dsh-work 目录口径（端点/配置/日志三个文件共用）
-  host-link.cjs   与宿主的 SSE 连接 + 退避重连（纯 Node，可脱离 Electron 测）
-  preload.cjs     唯一的桥：contextBridge 暴露四个方法，不给渲染进程任何 Node
-  bar/index.html  玻璃条本体（无框架，单文件，含设计 token 与动效）
-  log.cjs         ~/.dsh/dsh-work/companion.log，常驻进程唯一的排障出口
+  main.cjs            主进程：窗口、热键、点击穿透、状态回放、识别请求
+  config.cjs          ~/.dsh/dsh-work/config.json 的读取与校验（坏配置不致命）
+  paths.cjs           ~/.dsh/dsh-work 目录口径（端点/配置/日志三个文件共用）
+  host-link.cjs       与宿主的 SSE 连接 + 退避重连（纯 Node，可脱离 Electron 测）
+  capture.cjs         截图冻结与框选层（overlay 窗口、裁剪、落盘）
+  capture-geometry.cjs 拖拽坐标 → 裁剪矩形（纯函数，有单测与 .d.cts 声明）
+  backdrop.cjs        抓背后桌面给面板当毛玻璃底（CSS blur 拿不到别进程表面）
+  log.cjs             ~/.dsh/dsh-work/companion.log，常驻进程唯一的排障出口
+  preload.cjs         小条的桥：contextBridge 暴露固定方法，不给渲染进程任何 Node
+  bar/index.html      玻璃条本体（收起态；无框架，单文件，含设计 token 与动效）
+  panel/index.html    面板本体（展开态：任务卡带 + 详情 + 页脚键位）
+  panel/preload.cjs   面板的桥（与小条分开，少给一个方法就少一份权限）
 ```
+
+## 识别（P1-3）
+
+框选完成即自动识别，不用再按键。链路刻意绕开渲染进程：
+
+```
+panel「框完了」 ──IPC──▶ main.cjs 读 PNG ──POST 原始字节──▶ 宿主 /dsh-work/api/recognize
+                                              │
+                                        受理后轮询 GET /api/recognize/<jobId>（800ms 一次，封顶 150s）
+                                              │
+            小条与面板「识别中…」◀──IPC── 状态 done{count} / error{reason}
+```
+
+- **模型只在宿主里跑**：密钥与 `ctx.llm` 都在宿主进程，伴随层只搬运字节。
+- **为什么轮询而不是等长响应**：识别要几十秒，长响应会被任何一层超时掐断；掐断后既拿不到结果，也不知道宿主还在不在跑。作业化以后，失败总能说清原因。
+- 识别成功时宿主已经把任务树写进 `work.json`，伴随层不需要、也不允许自己改状态——它只是下一个 SSE 帧到达后重画。
 
 ## 跑起来
 

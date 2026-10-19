@@ -442,6 +442,8 @@
       let focused = null;
       /** 最近一次框选结果，留给"解构任务"用 */
       let lastCapture = null;
+      /** 最近一次识别进度：{ phase: "start" | "done" | "error", count?, title?, message? } */
+      let recognize = null;
 
       const LABELS = { active: "进行中", done: "已完成", todo: "待进行", skipped: "已跳过" };
 
@@ -572,11 +574,41 @@
         }
 
         if (lastCapture) {
-          const wrap = document.createElement("div");
-          wrap.className = "advice";
-          wrap.innerHTML = `<div class="section-name">已框选</div><p>${lastCapture.width} × ${lastCapture.height} px，按 <kbd>Enter</kbd> 据此拆解（P1-3 接入）</p>`;
-          detailEl.appendChild(wrap);
+          const block = recognizeBlock();
+          if (block) detailEl.appendChild(block);
         }
+      }
+
+      /**
+       * 「刚才那张截图现在怎么样了」。
+       *
+       * 三种状态必须分开写清楚：识别中给不出结果时，用户要知道是还在等还是坏了；
+       * 失败要给出原因，因为「没反应」是这类后台动作最糟的反馈。
+       */
+      function recognizeBlock() {
+        if (!recognize) return null;
+
+        const wrap = document.createElement("div");
+        wrap.className = "advice";
+        const nameEl = document.createElement("div");
+        nameEl.className = "section-name";
+        const p = document.createElement("p");
+
+        if (recognize.phase === "start") {
+          nameEl.textContent = "识别中";
+          // 面板可能比截图晚起来（热键刚按就重载），没有尺寸就不硬编一个
+          const size = lastCapture ? `（${lastCapture.width} × ${lastCapture.height} px）` : "";
+          p.textContent = `正在读这张截图${size}…`;
+        } else if (recognize.phase === "done") {
+          nameEl.textContent = "已拆解";
+          p.textContent = `生成了 ${recognize.count} 个任务${recognize.title ? `，整体是「${recognize.title}」` : ""}`;
+        } else {
+          nameEl.textContent = "识别失败";
+          p.textContent = `${recognize.message || "未知原因"}（计划没有改动）`;
+        }
+
+        wrap.append(nameEl, p);
+        return wrap;
       }
 
       /* ── 键盘 ───────────────────────────────────────────── */
@@ -623,6 +655,15 @@
 
       window.dshworkPanel.onCapture((result) => {
         lastCapture = result;
+        // 新一张图进来，上一张的识别结论就过期了
+        recognize = null;
+        if (lastPayload) render(lastPayload);
+      });
+
+      // 识别结果由主进程推来；计划本身不在这里接收 —— 落地后走 SSE 更新整棵树
+      window.dshworkPanel.onRecognize((message) => {
+        if (!message) return;
+        recognize = message;
         if (lastPayload) render(lastPayload);
       });
 

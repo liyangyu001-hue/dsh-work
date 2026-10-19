@@ -187,12 +187,14 @@
       let lastPayload = null;
       let noticeTimer = 0;
 
-      function showNotice(text) {
+      function showNotice(text, sticky = false) {
         console.log(`提示：${text}`);
         titleEl.textContent = text;
         countEl.textContent = "";
         bar.classList.add("notice");
         clearTimeout(noticeTimer);
+        // 「识别中…」要一直挂着（可能要等几十秒），直到 done / error 把它顶掉
+        if (sticky) return;
         noticeTimer = setTimeout(() => {
           bar.classList.remove("notice");
           if (lastPayload) render(lastPayload);
@@ -211,6 +213,19 @@
       window.dshwork.onCaptureCancel((reason) => {
         if (reason === "escape" || reason === "contextmenu" || reason === "hotkey-toggle") {
           showNotice("已取消");
+        }
+      });
+
+      /* 识别进度。小条只回答一句话：正在认 / 认出来了几个 / 为什么没认出来。
+       * 结果本身不在这里显示 —— 计划落地后 SSE 会把当前节点推过来。 */
+      window.dshwork.onRecognize((message) => {
+        if (!message) return;
+        if (message.phase === "start") {
+          showNotice("识别中…", true);
+        } else if (message.phase === "done") {
+          showNotice(`已拆成 ${message.count} 个任务`);
+        } else if (message.phase === "error") {
+          showNotice(`识别失败：${message.message}`);
         }
       });
 

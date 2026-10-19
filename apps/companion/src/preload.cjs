@@ -30,6 +30,12 @@ contextBridge.exposeInMainWorld("dshwork", {
     ipcRenderer.on("capture:cancel", handler);
     return () => ipcRenderer.removeListener("capture:cancel", handler);
   },
+  /** 识别进度：{ phase: "start" | "done" | "error", ... } */
+  onRecognize(callback) {
+    const handler = (_event, message) => callback(message);
+    ipcRenderer.on("recognize", handler);
+    return () => ipcRenderer.removeListener("recognize", handler);
+  },
   setPointerOver(over) {
     ipcRenderer.send("bar:pointer", Boolean(over));
   },

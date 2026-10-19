@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld("dshworkPanel", {
     return () => ipcRenderer.removeAllListeners("capture:result");
   },
 
+  /** 识别进度：{ phase: "start" | "done" | "error", ... } */
+  onRecognize(callback) {
+    ipcRenderer.on("recognize", (_event, message) => callback(message));
+    return () => ipcRenderer.removeAllListeners("recognize");
+  },
+
   /** 背景底图（桌面截图，data URL）—— 玻璃的"底" */
   onBackdrop(callback) {
     ipcRenderer.on("panel:backdrop", (_event, url) => callback(url));

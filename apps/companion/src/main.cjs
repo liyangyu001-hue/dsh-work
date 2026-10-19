@@ -17,6 +17,7 @@
 "use strict";
 
 const { app, BrowserWindow, globalShortcut, Menu, screen, ipcMain } = require("electron");
+const fs = require("node:fs/promises");
 const path = require("node:path");
 const { HostLink, readEndpoint } = require("./host-link.cjs");
 const capture = require("./capture.cjs");
@@ -270,6 +271,82 @@ async function postIntent(intent) {
  * 做成"再按一次就取消"而不是"按了没反应"：框选层盖住整个桌面，
  * 用户中途反悔时最自然的动作就是再按一次刚才那个键。
  */
+/** 识别进度的唯一出口：小条只要一句话，面板要能显示细节。 */
+function notifyRecognize(phase, payload) {
+  const message = { phase, ...payload };
+  sendBar("recognize", message);
+  if (panel && !panel.isDestroyed()) panel.webContents.send("recognize", message);
+}
+
+/** 识别是宿主侧的异步作业：POST 只受理，结果靠轮询拿。 */
+const RECOGNIZE_POLL_MS = 800;
+const RECOGNIZE_MAX_MS = 150_000;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 把刚框出来的 PNG 交给宿主识别。
+ *
+ * 为什么由伴随层上传、而不是面板页面：截图落在伴随层的 captures 目录里，
+ * 只有主进程读得到；页面不该有文件系统权限，更不该拿到宿主的令牌。
+ *
+ * 为什么轮询而不是等一个长响应：识别要几十秒，长响应会被任何一层超时掐断，
+ * 掐断后既拿不到结果也不知道宿主还在不在跑。作业化以后失败总是能说清原因。
+ */
+async function recognizeCapture(result) {
+  if (!result || !result.file) return;
+  notifyRecognize("start", { width: result.width, height: result.height });
+
+  const endpoint = await readEndpoint();
+  if (!endpoint) {
+    notifyRecognize("error", { message: "DSH 未连接，截图没有交给任何模型" });
+    return;
+  }
+
+  try {
+    const png = await fs.readFile(result.file);
+    const started = await fetch(`${endpoint.url}/dsh-work/api/recognize`, {
+      method: "POST",
+      headers: { "content-type": "image/png", "x-dsh-work-token": endpoint.token },
+      body: png,
+    });
+    const accepted = await started.json().catch(() => ({}));
+    if (!started.ok || accepted.ok !== true || !accepted.jobId) {
+      notifyRecognize("error", { message: accepted.error || `HTTP ${started.status}` });
+      return;
+    }
+
+    const deadline = Date.now() + RECOGNIZE_MAX_MS;
+    while (Date.now() < deadline) {
+      await delay(RECOGNIZE_POLL_MS);
+      const res = await fetch(
+        `${endpoint.url}/dsh-work/api/recognize/${encodeURIComponent(accepted.jobId)}`,
+        { headers: { "x-dsh-work-token": endpoint.token } },
+      );
+      const job = await res.json().catch(() => ({}));
+      if (!res.ok || job.ok !== true) {
+        notifyRecognize("error", { message: job.error || `HTTP ${res.status}` });
+        return;
+      }
+      if (job.state === "running") continue;
+      if (job.state === "done") {
+        log.log(`识别完成：${job.count} 个节点`);
+        notifyRecognize("done", { count: job.count, title: job.title || "" });
+        return;
+      }
+      notifyRecognize("error", { message: job.reason || "识别失败" });
+      return;
+    }
+    notifyRecognize("error", { message: `等了 ${Math.round(RECOGNIZE_MAX_MS / 1000)} 秒还没有结果` });
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    log.warn(`识别请求失败：${message}`);
+    notifyRecognize("error", { message });
+  }
+}
+
 function triggerCapture() {
   if (capture.isActive()) {
     capture.cancel("hotkey-toggle");
@@ -292,6 +369,8 @@ function triggerCapture() {
       sendBar("capture:result", result);
       if (panel && !panel.isDestroyed()) panel.webContents.send("capture:result", result);
       sendBar("hotkey", null);
+      // 截完立刻识别：产品的前提就是「截一张图，接下来的事有人接」
+      void recognizeCapture(result);
     },
     onCancel: (reason) => sendBar("capture:cancel", reason),
   });

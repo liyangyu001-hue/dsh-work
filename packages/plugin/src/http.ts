@@ -6,10 +6,17 @@
  * 读快照、提交意图、订阅变更——用普通 HTTP + SSE 表达最直接，任何语言都能对接。
  *
  * 路由表（全部挂在 `/dsh-work` 前缀下）：
- *   GET  /api/health   探活 + 版本
- *   GET  /api/state    整个快照
- *   POST /api/intent   提交一条意图
- *   GET  /api/events   SSE：快照 + 增量
+ *   GET  /api/health    探活 + 版本
+ *   GET  /api/state     整个快照
+ *   POST /api/intent    提交一条意图
+ *   POST /api/recognize 一张 PNG → 提交识别作业（立即返回 jobId）
+ *   GET  /api/recognize/<jobId> 查询识别进度 / 结果
+ *   GET  /api/events    SSE：快照 + 增量
+ *
+ * 识别**不**走同步响应：一次视觉模型调用要几十秒，挂在 HTTP 上会被任何一层
+ * 超时（浏览器、代理、宿主）掐断，而且掐断后没法知道模型还在不在跑。
+ * 作业化以后，POST 立刻返回，伴随层按需轮询；超时与取消在作业内部用
+ * AbortController 兜住（见 index.ts 的 runRecognize）。
  *
  * 鉴权不在这里做：调用方通过 `options.authorize` 注入宿主的信任判定，
  * 让本文件可以脱离宿主单测（见 http.test.ts）。
@@ -23,6 +30,9 @@ export const ROUTE_PREFIX = '/dsh-work';
 
 /** 请求体上限：意图报文很小，超过这个数一定是走错了。 */
 const MAX_BODY_BYTES = 64 * 1024;
+
+/** 截图上限：框选区域最大也就几 MB，超过说明发错了东西。 */
+const MAX_PNG_BYTES = 12 * 1024 * 1024;
 
 /** SSE 心跳间隔：中间设备与浏览器都会掐掉长期静默的连接。 */
 const HEARTBEAT_MS = 25_000;
@@ -38,6 +48,23 @@ export interface HttpOptions {
   runtime: WorkRuntime;
   /** 返回 null 放行；返回数字则作为拒绝状态码。 */
   authorize?: (req: IncomingMessage) => number | null;
+  /** 识别作业：没注入时该路由回 503，本文件因此可以脱离宿主单测。 */
+  recognize?: RecognizeApi;
+}
+
+/** 识别作业的对外视图：状态 + 一句人话，不含模型原文与图片。 */
+export interface RecognizeJobView {
+  state: 'running' | 'done' | 'error';
+  title?: string;
+  count?: number;
+  reason?: string;
+}
+
+export interface RecognizeApi {
+  /** 提交一张截图。同一时刻只允许一个作业在跑。 */
+  start(png: Buffer): { ok: true; id: string } | { ok: false; status: number; reason: string };
+  /** 查询作业；不存在（含已过期）返回 null。 */
+  get(id: string): RecognizeJobView | null;
 }
 
 export function createHttpHandler(options: HttpOptions) {
@@ -148,6 +175,55 @@ export function createHttpHandler(options: HttpOptions) {
       return;
     }
 
+    if (pathname === '/api/recognize' && req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+
+    if (pathname === '/api/recognize' && req.method === 'POST') {
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const body = await readBinaryBody(req, MAX_PNG_BYTES);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      if (!looksLikePng(body.value)) {
+        sendJson(res, 400, { ok: false, error: '请求体不是 PNG' });
+        return;
+      }
+
+      const started = options.recognize.start(body.value);
+      if (!started.ok) {
+        sendJson(res, started.status, { ok: false, error: started.reason });
+        return;
+      }
+      // 202：作业已受理，结果要另行来拿
+      sendJson(res, 202, { ok: true, jobId: started.id });
+      return;
+    }
+
+    if (pathname.startsWith('/api/recognize/')) {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const id = decodeURIComponent(pathname.slice('/api/recognize/'.length));
+      const job = options.recognize.get(id);
+      if (job === null) {
+        sendJson(res, 404, { ok: false, error: '没有这个识别作业（可能已过期）' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, ...job });
+      return;
+    }
+
     if (pathname === '/api/events') {
       openStream(req, res);
       return;
@@ -216,6 +292,40 @@ function isIntentLike(value: unknown): value is Intent {
     typeof value === 'object' &&
     value !== null &&
     typeof (value as { type?: unknown }).type === 'string'
+  );
+}
+
+/** 原样读二进制体（截图），不做任何解码 —— 解码失败的原因在这里没有意义。 */
+async function readBinaryBody(req: IncomingMessage, limit: number): Promise<BodyBinaryResult> {
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > limit) {
+    return { ok: false, status: 413, reason: '截图过大' };
+  }
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+    total += buffer.length;
+    if (total > limit) return { ok: false, status: 413, reason: '截图过大' };
+    chunks.push(buffer);
+  }
+  if (total === 0) return { ok: false, status: 400, reason: '请求体为空' };
+  return { ok: true, value: Buffer.concat(chunks) };
+}
+
+type BodyBinaryResult =
+  | { ok: true; value: Buffer }
+  | { ok: false; status: number; reason: string };
+
+/** PNG 的八字节签名。挡掉「路径/JSON 被误发到这里」这类错误，比让模型去猜便宜。 */
+function looksLikePng(buffer: Buffer): boolean {
+  return (
+    buffer.length > 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
   );
 }
 

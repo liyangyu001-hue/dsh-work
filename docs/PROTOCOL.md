@@ -12,6 +12,8 @@
 | WebSocket | 主通道：状态、意图、采集、提示 | `ws://127.0.0.1:<hostPort>/dsh-work/channel` |
 | HTTP GET | 静态资源：截图、缩略图 | `/dsh-work/asset/<assetId>` |
 | HTTP GET | 健康检查 | `/dsh-work/health` |
+| HTTP POST | 提交识别作业（一张 PNG） | `/dsh-work/api/recognize` |
+| HTTP GET | 查询识别作业 | `/dsh-work/api/recognize/<jobId>` |
 
 - `hostPort` 由 DSH 宿主分配（`ctx.webServer.port`），**不得硬编码**。
 - 连接方向：**Companion 主动反连** Host。Host 不主动拨号，避免防火墙与端口发现问题。
@@ -109,6 +111,30 @@ Companion                               Host
 | `overlay.hide` | H→C | `{mode}` |
 | `notice` | H→C | `{level:"info"\|"warn"\|"error", text, ttlMs?}` |
 
+### 4.6 识别（P1-3，HTTP 侧，不进信封）
+
+识别是**异步作业**：模型调用要几十秒，长响应会被任何一层超时掐断，
+因此请求只受理、结果另取。两条路由都要求伴随层令牌。
+
+```
+POST /dsh-work/api/recognize          Content-Type: image/png，body 为 PNG 原始字节
+  202 {ok:true, jobId:"rc_…"}
+  409 {ok:false, error:"上一张截图还在识别中"}     同一时刻只允许一个作业
+  413 / 400 / 503                                 过大 / 不是 PNG / 宿主没有识别能力
+
+GET  /dsh-work/api/recognize/<jobId>
+  200 {ok:true, state:"running"}
+  200 {ok:true, state:"done", title:"…", count:12}
+  200 {ok:true, state:"error", reason:"可读原因"}
+  404 {ok:false, error:"没有这个识别作业（可能已过期）"}
+```
+
+- 成功的判定标准是**状态文档真的变了**：宿主先解析模型输出，再走 `plan.set`
+  的常规 `apply` 通道落库（`by:"ai"`），失败时文档一个字节都不改。
+- 作业在内存里保留 5 分钟、最多 8 个（在跑的不回收）；过期后再问就是 404。
+- 识别进度通过伴随层自己的 IPC 呈现（小条「识别中…」/「已拆成 N 个任务」），
+  不属于协议层。
+
 ## 5. 错误码
 
 | code | 含义 | 处理 |
@@ -142,3 +168,4 @@ Companion                               Host
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1 | 2026-10 | 初版冻结：握手、状态同步、意图、采集、呈现 |
+| v1.1 | 2026-10 | 新增 §4.6 识别作业（两条 HTTP 路由，仅新增，不改旧语义） |

@@ -26,14 +26,14 @@ DSH Work 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 <p align="center"><img src="docs/assets/bar-p0.png" width="560" alt="桌面上方置顶玻璃条" /></p>
 
-**P1 进行中**：全局热键唤出**面板**（小条的展开态）——当前节点居中，左右是已完成与待进行；`Enter` 完成并前进、`Backspace` 退一步、`Tab` 进框选，框选结果落成 PNG 落在 `~/.dsh/dsh-work/captures/`。
+**P1 进行中**：全局热键唤出**面板**（小条的展开态）——当前节点居中，左右是已完成与待进行；`Enter` 完成并前进、`Backspace` 退一步、`Tab` 进框选。框完即识别：PNG 交给宿主，视觉模型一次调用拆成带目标与验收的任务树，落盘后小条与面板同时看到它。
 
 <p align="center"><img src="docs/assets/panel-p1.png" width="820" alt="面板：热键唤出，浮在任意应用之上" /></p>
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 三层骨架 + 契约冻结 + `core` 状态机 + 置顶玻璃条 | ✅ |
-| P1 | 热键 → 面板 → 框选截图 → 识别 → 任务树 → 卡片轮播 | 🚧 框选已完成，识别待接 |
+| P1 | 热键 → 面板 → 框选截图 → 识别 → 任务树 → 卡片轮播 | 🚧 识别已接，轮播待做 |
 | P2 | 建议流 · 交给 AI · 任务树编辑 | ⬜ |
 | P3 | 玻璃与动效 · 多屏 · 离线 · 设置 · 托盘 | ⬜ |
 | P4 | 学习模式 · 眼球追踪 · macOS | ⬜ |
