@@ -29,6 +29,8 @@ DSH 插件跑在宿主进程里，拿不到 `globalShortcut` / `desktopCapturer`
 ```
 src/
   main.cjs        主进程：窗口、热键、点击穿透、状态回放
+  config.cjs      ~/.dsh/dsh-work/config.json 的读取与校验（坏配置不致命）
+  paths.cjs       ~/.dsh/dsh-work 目录口径（端点/配置/日志三个文件共用）
   host-link.cjs   与宿主的 SSE 连接 + 退避重连（纯 Node，可脱离 Electron 测）
   preload.cjs     唯一的桥：contextBridge 暴露四个方法，不给渲染进程任何 Node
   bar/index.html  玻璃条本体（无框架，单文件，含设计 token 与动效）
@@ -48,6 +50,21 @@ cd apps/companion
    Electron 见到它就退化成纯 Node 进程，不建任何窗口，也不报错。
 2. **`electron` 的 postinstall 可能被墙**。二进制下不下来时，`node_modules/electron/dist`
    会是空的；`npm_config_mirror` 对 pnpm 无效，直接下镜像包解压到该目录即可。
+
+## 热键与配置
+
+默认 `Control+Alt+Space`。要换键，写 `~/.dsh/dsh-work/config.json`（可选文件，改完重启伴随层）：
+
+```json
+{
+  "hotkey": "Control+Alt+Space",
+  "allowBareTab": false
+}
+```
+
+- `hotkey` 用 Electron accelerator 写法（`Control` / `Alt` / `Shift` / `Super` + 键名）。文件坏了或字段不合法会退回默认值，原因写进 `companion.log`；伴随层不会因为配置起不来。
+- 裸 `Tab` 默认不注册：它是所有输入框与键盘导航的公共键。确需占用必须同时写 `"allowBareTab": true`（只认布尔 `true`，写字符串 `"true"` 不算）。
+- 按下热键时小条做一次 120ms 的压缩反馈，并在 `companion.log` 留一行「热键按下」——这条日志是确认"按键真的到了伴随层"的第一步。
 
 ## 状态机
 

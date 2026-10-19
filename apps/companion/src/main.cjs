@@ -19,6 +19,7 @@
 const { app, BrowserWindow, globalShortcut, Menu, screen, ipcMain } = require("electron");
 const path = require("node:path");
 const { HostLink } = require("./host-link.cjs");
+const { readConfig, resolveHotkey } = require("./config.cjs");
 const log = require("./log.cjs");
 
 /** 小条窗口尺寸：高度留出上下各 22px 给投影，宽度按设计系统上限 520 + 边距。 */
@@ -27,8 +28,7 @@ const BAR_HEIGHT = 88;
 /** 距屏幕顶部的偏移（贴着标题栏下沿，但不压系统拖拽带）。 */
 const TOP_OFFSET = 6;
 
-/** 全局热键。裸 Tab 需要用户在设置里显式开启（见 docs/ADR 与 PROTOCOL 的 WorkConfig）。 */
-const DEFAULT_HOTKEY = "Control+Alt+Space";
+/** 全局热键的默认值在 config.cjs 里；这里只关心"注没注册上"。 */
 
 /** @type {BrowserWindow | null} */
 let win = null;
@@ -108,20 +108,52 @@ function createWindow() {
   });
 }
 
-function registerHotkey() {
-  const ok = globalShortcut.register(DEFAULT_HOTKEY, () => send("hotkey", DEFAULT_HOTKEY));
-  if (!ok) console.warn(`[companion] 热键注册失败（可能被占用）：${DEFAULT_HOTKEY}`);
+/**
+ * 注册全局热键。
+ *
+ * 失败一定要留痕：热键被别的软件占用是常态，用户只会看到"按了没反应"，
+ * 日志是唯一能区分"没注册上"和"注册上了但窗口没显示"的证据。
+ *
+ * @param {{ hotkey: string, allowBareTab: boolean }} config
+ */
+function registerHotkey(config) {
+  const resolved = resolveHotkey(config);
+  if (!resolved.ok) {
+    log.warn(`热键未注册：${resolved.reason}`);
+    return;
+  }
+
+  try {
+    const ok = globalShortcut.register(resolved.combo, () => {
+      log.log(`热键按下：${resolved.combo}`);
+      send("hotkey", resolved.combo);
+    });
+    if (!ok) {
+      log.warn(`热键注册失败（可能被其他软件占用）：${resolved.combo}`);
+      return;
+    }
+    log.log(`热键已注册：${resolved.combo}`);
+  } catch (err) {
+    // 非法 accelerator 在部分 Electron 版本上直接抛异常，不能让它带崩整个伴随层
+    log.error(`热键注册异常：${resolved.combo} ${err && err.message ? err.message : String(err)}`);
+  }
 }
 
 app.whenReady().then(() => {
   log.log(`伴随层启动 pid=${process.pid} electron=${process.versions.electron}`);
+
+  // 配置先读：热键注册失败的原因（文件坏了 / 裸 Tab / 被占用）要按顺序都能在日志里看到
+  const { config, problems, file, exists } = readConfig();
+  for (const problem of problems) log.warn(`配置：${problem}`);
+  log.log(`配置 ${file} ${exists ? "已读取" : "不存在，使用默认值"}`);
+
   const display = screen.getPrimaryDisplay();
   log.log(
     `display bounds=${JSON.stringify(display.bounds)} workArea=${JSON.stringify(display.workArea)} scale=${display.scaleFactor}`,
   );
   createWindow();
   log.log(`window bounds=${JSON.stringify(win?.getBounds())}`);
-  registerHotkey();
+  registerHotkey(config);
 
   link = new HostLink((payload) => {
     lastPayload = payload;

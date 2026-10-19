@@ -173,10 +173,13 @@
 
       window.dshwork.onHostState(render);
 
-      // 次要动作：热键按下时给一次 120ms 的压缩反馈，不阻塞任何事
+      // 次要动作：热键按下时给一次 120ms 的压缩反馈，不阻塞任何事。
+      // 连按时重置计时器：反馈窗口从"最后一次按下"算起，而不是被前一次的收尾提前掐掉。
+      let pulseTimer = 0;
       window.dshwork.onHotkey(() => {
         bar.classList.add("pulse");
-        setTimeout(() => bar.classList.remove("pulse"), 120);
+        clearTimeout(pulseTimer);
+        pulseTimer = setTimeout(() => bar.classList.remove("pulse"), 120);
       });
 
       window.dshwork.ready();

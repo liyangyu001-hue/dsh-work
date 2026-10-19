@@ -11,16 +11,14 @@
 "use strict";
 
 const { appendFile, mkdir, readFile, writeFile } = require("node:fs/promises");
-const os = require("node:os");
 const path = require("node:path");
+
+const { workDir } = require("./paths.cjs");
 
 const MAX_LINES = 800;
 
 function logFile() {
-  const home = typeof process.env["DSH_HOME"] === "string" && process.env["DSH_HOME"].trim() !== ""
-    ? process.env["DSH_HOME"].trim()
-    : path.join(os.homedir(), ".dsh");
-  return path.join(home, "dsh-work", "companion.log");
+  return path.join(workDir(), "companion.log");
 }
 
 /** 串行化写入：并发 append 在 Windows 上偶发 EBUSY。 */

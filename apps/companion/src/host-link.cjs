@@ -14,8 +14,9 @@
 "use strict";
 
 const { readFile } = require("node:fs/promises");
-const os = require("node:os");
 const path = require("node:path");
+
+const { workDir } = require("./paths.cjs");
 
 /** 与 packages/plugin/src/endpoint.ts 保持同构；改一处必须改两处（有测试兜底）。 */
 const ENDPOINT_VERSION = 1;
@@ -39,14 +40,8 @@ const ENDPOINT_VERSION = 1;
  * @typedef {(payload: { state: ConnState, snapshot: HostSnapshot | null }) => void} Listener
  */
 
-function dshHome() {
-  const fromEnv = process.env["DSH_HOME"];
-  if (typeof fromEnv === "string" && fromEnv.trim() !== "") return fromEnv.trim();
-  return path.join(os.homedir(), ".dsh");
-}
-
 function endpointFile() {
-  return path.join(dshHome(), "dsh-work", "endpoint.json");
+  return path.join(workDir(), "endpoint.json");
 }
 
 /**
