@@ -20,6 +20,16 @@ contextBridge.exposeInMainWorld("dshwork", {
     ipcRenderer.on("hotkey", handler);
     return () => ipcRenderer.removeListener("hotkey", handler);
   },
+  onCaptureResult(callback) {
+    const handler = (_event, result) => callback(result);
+    ipcRenderer.on("capture:result", handler);
+    return () => ipcRenderer.removeListener("capture:result", handler);
+  },
+  onCaptureCancel(callback) {
+    const handler = (_event, reason) => callback(reason);
+    ipcRenderer.on("capture:cancel", handler);
+    return () => ipcRenderer.removeListener("capture:cancel", handler);
+  },
   setPointerOver(over) {
     ipcRenderer.send("bar:pointer", Boolean(over));
   },

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>DSH Work · 框选</title>
+    <style>
+      /*
+       * 设计约束（docs/DESIGN-SYSTEM.md）：
+       *   - 覆盖层不是主角，用户的眼睛在选框里；所以变灰只压 45%，不过度压暗。
+       *   - 选框内部保持原亮度（把冻结图再画一遍），让人确认"我框的是这块"。
+       *   - 动效只保留"缓入缓出"：变灰 120ms 淡入，不做缩放、不做延迟。
+       */
+      :root {
+        --dswork-dur-fast: 120ms;
+        --dswork-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        cursor: crosshair;
+        -webkit-user-select: none;
+        user-select: none;
+        font: 500 12px/1.2 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+
+      #stage {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+      }
+
+      /* 冻结的整屏图：铺满窗口，不做 object-fit: contain，否则边缘会出现留白 */
+      #shot {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: fill;
+        pointer-events: none;
+      }
+
+      #dim {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        opacity: 0;
+        transition: opacity var(--dswork-dur-fast) var(--dswork-ease-out);
+        pointer-events: none;
+      }
+
+      body.armed #dim {
+        opacity: 1;
+      }
+
+      /* 选框内部：把同一张图偏移回去，得到"没变暗"的局部 */
+      #hole {
+        position: absolute;
+        overflow: hidden;
+        display: none;
+        pointer-events: none;
+      }
+
+      #holeImg {
+        position: absolute;
+        width: 100vw;
+        height: 100vh;
+        object-fit: fill;
+        pointer-events: none;
+      }
+
+      #box {
+        position: absolute;
+        display: none;
+        pointer-events: none;
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.95),
+          0 0 0 3px rgba(0, 0, 0, 0.25),
+          0 8px 32px rgba(0, 0, 0, 0.35);
+      }
+
+      #size {
+        position: absolute;
+        right: -1px;
+        bottom: 100%;
+        margin-bottom: 6px;
+        padding: 3px 7px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.78);
+        color: #f2f2f4;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      #hint {
+        position: absolute;
+        top: 18px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 8px 16px;
+        border-radius: 999px;
+        color: #f2f2f4;
+        background: rgba(28, 28, 30, 0.72);
+        -webkit-backdrop-filter: blur(24px) saturate(180%);
+        backdrop-filter: blur(24px) saturate(180%);
+        border: 0.5px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
+        opacity: 0;
+        transition: opacity var(--dswork-dur-fast) var(--dswork-ease-out);
+        pointer-events: none;
+      }
+
+      body.armed #hint {
+        opacity: 1;
+      }
+
+      body.dragging #hint {
+        opacity: 0;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #dim,
+        #hint {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <img id="shot" alt="" />
+      <div id="dim"></div>
+      <div id="hole"><img id="holeImg" alt="" /></div>
+      <div id="box"><span id="size">0 × 0</span></div>
+      <div id="hint">拖拽框选 · Esc 取消</div>
+    </div>
+
+    <script>
+      const shot = document.getElementById("shot");
+      const holeImg = document.getElementById("holeImg");
+      const hole = document.getElementById("hole");
+      const box = document.getElementById("box");
+      const sizeEl = document.getElementById("size");
+
+      let displayId = null;
+      let dragging = false;
+      let start = { x: 0, y: 0 };
+      let current = { x: 0, y: 0 };
+
+      function rect() {
+        const x = Math.min(start.x, current.x);
+        const y = Math.min(start.y, current.y);
+        return {
+          x,
+          y,
+          width: Math.abs(current.x - start.x),
+          height: Math.abs(current.y - start.y),
+        };
+      }
+
+      function paint() {
+        const r = rect();
+        if (r.width < 1 && r.height < 1) {
+          hole.style.display = "none";
+          box.style.display = "none";
+          return;
+        }
+
+        hole.style.display = "block";
+        hole.style.left = `${r.x}px`;
+        hole.style.top = `${r.y}px`;
+        hole.style.width = `${r.width}px`;
+        hole.style.height = `${r.height}px`;
+        holeImg.style.left = `${-r.x}px`;
+        holeImg.style.top = `${-r.y}px`;
+
+        box.style.display = "block";
+        box.style.left = `${r.x}px`;
+        box.style.top = `${r.y}px`;
+        box.style.width = `${r.width}px`;
+        box.style.height = `${r.height}px`;
+        sizeEl.textContent = `${Math.round(r.width)} × ${Math.round(r.height)}`;
+      }
+
+      window.dshworkOverlay.onInit((payload) => {
+        displayId = payload.displayId;
+        shot.src = payload.imageUrl;
+        holeImg.src = payload.imageUrl;
+        document.body.classList.add("armed");
+      });
+
+      window.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
+        dragging = true;
+        start = { x: event.clientX, y: event.clientY };
+        current = { ...start };
+        document.body.classList.add("dragging");
+        paint();
+      });
+
+      window.addEventListener("mousemove", (event) => {
+        if (!dragging) return;
+        current = { x: event.clientX, y: event.clientY };
+        paint();
+      });
+
+      window.addEventListener("mouseup", (event) => {
+        if (!dragging || event.button !== 0) return;
+        dragging = false;
+        document.body.classList.remove("dragging");
+        const r = rect();
+        if (r.width < 8 || r.height < 8) return; // 误触：留在原地重来
+        window.dshworkOverlay.select(displayId, r);
+      });
+
+      // 右键取消（Windows 用户的习惯），Esc 由主进程与这里双保险
+      window.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        window.dshworkOverlay.cancel("contextmenu");
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") window.dshworkOverlay.cancel("escape");
+      });
+
+      // 监听器全部挂好之后再去要数据：这样无论主进程多快、页面重载多少次，
+      // overlay:init 都一定有听众（推送式的经典丢消息问题在这里彻底回避）。
+      window.dshworkOverlay.ready();
+    </script>
+  </body>
+</html>

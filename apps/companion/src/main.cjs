@@ -19,6 +19,7 @@
 const { app, BrowserWindow, globalShortcut, Menu, screen, ipcMain } = require("electron");
 const path = require("node:path");
 const { HostLink } = require("./host-link.cjs");
+const capture = require("./capture.cjs");
 const { readConfig, resolveHotkey } = require("./config.cjs");
 const log = require("./log.cjs");
 
@@ -109,6 +110,31 @@ function createWindow() {
 }
 
 /**
+ * 热键按下后的唯一出口。
+ *
+ * 做成"再按一次就取消"而不是"按了没反应"：框选层盖住整个桌面，
+ * 用户中途反悔时最自然的动作就是再按一次刚才那个键。
+ */
+function triggerCapture() {
+  if (capture.isActive()) {
+    capture.cancel("hotkey-toggle");
+    return;
+  }
+
+  void capture.begin({
+    // 先把自己藏起来：小条也在截屏范围内，不藏就会被拍进静态图，
+    // 用户框选时看到自己框里有一块"幽灵小条"
+    hideBar: () => win?.hide(),
+    showBar: () => win?.showInactive(),
+    onResult: (result) => {
+      send("capture:result", result);
+      send("hotkey", null);
+    },
+    onCancel: (reason) => send("capture:cancel", reason),
+  });
+}
+
+/**
  * 注册全局热键。
  *
  * 失败一定要留痕：热键被别的软件占用是常态，用户只会看到"按了没反应"，
@@ -127,6 +153,7 @@ function registerHotkey(config) {
     const ok = globalShortcut.register(resolved.combo, () => {
       log.log(`热键按下：${resolved.combo}`);
       send("hotkey", resolved.combo);
+      triggerCapture();
     });
     if (!ok) {
       log.warn(`热键注册失败（可能被其他软件占用）：${resolved.combo}`);
@@ -169,6 +196,14 @@ app.whenReady().then(() => {
   });
 
   // 渲染进程挂载完成后回放当前状态，避免"永远停在正在连接"
+  // 小条页面的 console 转发到日志文件：这个窗口没有 devtools 可开，
+  // 出问题时"页面里到底发生了什么"只能靠这条缝看出去。
+  win.webContents.on("console-message", (_event, ...args) => {
+    const details = args[0] && typeof args[0] === "object" ? args[0] : null;
+    const message = details ? details.message : args[1];
+    log.log(`[bar] ${message}`);
+  });
+
   ipcMain.on("bar:ready", () => send("host:state", lastPayload));
 
   app.on("activate", () => { if (!win) createWindow(); });

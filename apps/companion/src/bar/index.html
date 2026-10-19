@@ -120,6 +120,12 @@
         color: var(--dswork-ink-dim);
       }
 
+      /* 临时提示（已截取 / 已取消）：稍微提亮文字，表示这是"刚刚发生的事"，
+         不是持久状态。不换底色，避免整条闪烁。 */
+      #bar.notice .title {
+        color: var(--dswork-accent);
+      }
+
       @media (prefers-reduced-motion: reduce) {
         #bar,
         .dot {
@@ -171,7 +177,39 @@
       bar.addEventListener("mouseenter", () => window.dshwork.setPointerOver(true));
       bar.addEventListener("mouseleave", () => window.dshwork.setPointerOver(false));
 
-      window.dshwork.onHostState(render);
+      /* ── 临时提示 ──────────────────────────────────────────────
+       * 框选完要有一声"收到了"。用一条覆盖在标题上的短句，2.4 秒后自动退回
+       * 真实状态；不弹窗、不改连接状态，避免打断用户手上正在做的事。
+       */
+      let lastPayload = null;
+      let noticeTimer = 0;
+
+      function showNotice(text) {
+        console.log(`提示：${text}`);
+        titleEl.textContent = text;
+        countEl.textContent = "";
+        bar.classList.add("notice");
+        clearTimeout(noticeTimer);
+        noticeTimer = setTimeout(() => {
+          bar.classList.remove("notice");
+          if (lastPayload) render(lastPayload);
+        }, 2400);
+      }
+
+      window.dshwork.onHostState((payload) => {
+        lastPayload = payload;
+        if (!bar.classList.contains("notice")) render(payload);
+      });
+
+      window.dshwork.onCaptureResult((result) => {
+        if (result) showNotice(`已截取 ${result.width} × ${result.height}`);
+      });
+
+      window.dshwork.onCaptureCancel((reason) => {
+        if (reason === "escape" || reason === "contextmenu" || reason === "hotkey-toggle") {
+          showNotice("已取消");
+        }
+      });
 
       // 次要动作：热键按下时给一次 120ms 的压缩反馈，不阻塞任何事。
       // 连按时重置计时器：反馈窗口从"最后一次按下"算起，而不是被前一次的收尾提前掐掉。
