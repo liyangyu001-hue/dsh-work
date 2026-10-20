@@ -22,6 +22,20 @@
 
 namespace dshwork::capture {
 
+/**
+ * 诊断日志出口。
+ *
+ * 为什么不在这个头里直接写文件：capture 要能在任何宿主里跑（包括单测），
+ * 不该自己决定日志去哪。宿主启动时 SetLog 一下即可。
+ * 切片三被杀软掐掉的那几次，就是靠这几行日志定位到"死在 BitBlt 之后"的。
+ */
+using LogFn = void (*)(const std::string&);
+inline LogFn g_log = nullptr;
+inline void SetLog(LogFn fn) { g_log = fn; }
+inline void CapLog(const std::string& text) {
+  if (g_log != nullptr) g_log(text);
+}
+
 constexpr wchar_t kCaptureClass[] = L"DSHWorkNativeCapture";
 constexpr UINT kMsgCaptureDone = WM_APP + 5;  // 发给主窗口：0=取消，1=完成
 
@@ -366,6 +380,40 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
   }
 }
 
+/** 抓屏的方式，可用 DSHWORK_CAPTURE_MODE 切（默认 bitblt）。 */
+inline int CaptureMode() {
+  static int mode = -1;
+  if (mode >= 0) return mode;
+  char buf[32] = {};
+  mode = 0;
+  if (GetEnvironmentVariableA("DSHWORK_CAPTURE_MODE", buf, 32) > 0) {
+    if (lstrcmpiA(buf, "plain") == 0) mode = 1;
+    else if (lstrcmpiA(buf, "printwindow") == 0) mode = 2;
+  }
+  return mode;
+}
+
+/**
+ * 取一整块虚拟桌面。
+ *
+ * 为什么写成可切换：BitBlt + CAPTUREBLT 是窃屏木马的典型指纹，杀软会当场掐掉
+ * 进程（本机卡巴斯基：VHO:Trojan-PSW.Win32.Convagent.gen）。三种取法留一手，
+ * 出了事能立刻换一条路验证，而不是改代码重编。
+ */
+inline bool GrabScreen(HDC src, int vx, int vy, int vw, int vh, HDC dst) {
+  switch (CaptureMode()) {
+    case 1:
+      CapLog("capture: grab=plain");
+      return BitBlt(dst, 0, 0, vw, vh, src, vx, vy, SRCCOPY) != 0;
+    case 2:
+      CapLog("capture: grab=printwindow");
+      return PrintWindow(GetDesktopWindow(), dst, 2 /* PW_RENDERFULLCONTENT */) != 0;
+    default:
+      CapLog("capture: grab=bitblt+captureblt");
+      return BitBlt(dst, 0, 0, vw, vh, src, vx, vy, SRCCOPY | CAPTUREBLT) != 0;
+  }
+}
+
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -376,6 +424,7 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   State& s = S();
   if (s.active) return false;
 
+  CapLog("capture: begin");
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   s.owner = owner;
@@ -401,7 +450,8 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   if (CreateSurface(s.screen, s.vw, s.vh, &s.work_bitmap, &s.work) == nullptr) return false;
 
   // 冻结帧：一次 BitBlt 把整块虚拟桌面拿到手
-  if (!BitBlt(s.shot, 0, 0, s.vw, s.vh, s.screen, s.vx, s.vy, SRCCOPY | CAPTUREBLT)) {
+  CapLog("capture: surfaces ready " + std::to_string(s.vw) + "x" + std::to_string(s.vh));
+  if (!GrabScreen(s.screen, s.vx, s.vy, s.vw, s.vh, s.shot)) {
     Teardown(0);
     return false;
   }
@@ -426,6 +476,7 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   cls.lpszClassName = kCaptureClass;
   RegisterClassExW(&cls);
 
+  CapLog("capture: snapshot ok");
   s.window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                              kCaptureClass, L"DSH Work · 框选", WS_POPUP, s.vx, s.vy, s.vw, s.vh,
                              nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);

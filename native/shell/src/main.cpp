@@ -841,6 +841,7 @@ void StartRegionCapture() {
   HidePanel();
   g_panel_by_hover = false;
   ShowWindow(g_window, SW_HIDE);
+  dshwork::capture::SetLog(&LogToFile);
   if (!dshwork::capture::Begin(g_window, &g_capture_path, &g_capture_w, &g_capture_h)) {
     ShowWindow(g_window, SW_SHOWNOACTIVATE);
     ShowNotice(L"框选启动失败", 2000);
