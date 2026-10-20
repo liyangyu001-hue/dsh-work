@@ -50,13 +50,19 @@ constexpr UINT kMsgPaint = WM_APP + 2;
 constexpr UINT kMsgKey = WM_APP + 4;
 
 // 几何（DIP，绘制时乘 dpi/96）
-constexpr float kWindowWidth = 640.0f;
+// 窗口比药丸宽得多，是为了让"左边已完成的、右边还没做的"能挂在两侧；
+// 窗口本身是穿透的，多出来的透明区域不会挡住任何点击。
+constexpr float kWindowWidth = 1040.0f;
 constexpr float kWindowHeight = 96.0f;
 constexpr float kPillHeight = 44.0f;
 constexpr float kPaddingX = 18.0f;
 constexpr float kDotRadius = 4.0f;
 constexpr float kDotGap = 10.0f;
 constexpr float kProgressGap = 12.0f;
+constexpr float kSideChipWidth = 132.0f;  // 两侧那张半透明的卡片宽度
+constexpr float kSideChipGap = 8.0f;
+constexpr int kSideChipCount = 2;         // 每侧最多挂两张：再多就糊成一片
+constexpr UINT kHoverTimerId = 0x77;
 
 /**
  * 界面模型来自 doc.h：小条和面板看的是同一份结构。
@@ -87,6 +93,19 @@ ID2D1SolidColorBrush* g_brush = nullptr;
 // 面板承载全部任务与详情，两者共用同一份 WorkModel。
 HWND g_panel = nullptr;
 bool g_panel_open = false;
+/** 面板是被鼠标悬停带出来的（而不是热键按出来的）——离开时要跟着收回去 */
+bool g_panel_by_hover = false;
+/** 鼠标是否停在小条上。小条是穿透窗口收不到 WM_MOUSEMOVE，只能轮询光标。 */
+bool g_bar_hovered = false;
+/** 上一次绘制出来的可悬停范围（DIP，相对窗口左上角）。药丸宽度跟着文字变，只能画完才知道。 */
+float g_hit_left_dip = 0.0f;
+float g_hit_right_dip = 0.0f;
+float g_hit_top_dip = 0.0f;
+float g_hit_bottom_dip = 0.0f;
+
+void Repaint();
+void ShowPanel();
+void HidePanel();
 int g_focus = -1;  // 面板里选中第几张卡；-1 表示跟随当前任务
 dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
@@ -104,6 +123,7 @@ void RepaintPanel();
 void RefreshPanelModel();
 void DispatchKey(int action);
 void TogglePanel();
+void UpdateHover();
 void ShowTrayMenu();
 LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam);
 
@@ -213,6 +233,61 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
   const float pill_w = content_w;
   const float pill_left = (width - pill_w) * 0.5f;
 
+  // 悬停命中区：药丸本身 + 两侧挂出来的卡片。画的时候顺手记下来，
+  // 因为药丸宽度是量完文字才知道的，外面没法预先算。
+  float hit_left = pill_left;
+  float hit_right = pill_left + pill_w;
+
+  // ── 两侧的"邻居"：不做 hover 时挂出来，一旦鼠标上来就收回去让位给面板 ──
+  // 左边 = 已经走过的（淡淡地退到后面），右边 = 还没到的（提醒还有多少）。
+  // 注意：不管画不画，命中区都按"挂出来"的尺寸算，否则鼠标一进来卡片消失、
+  // 命中区跟着缩小，就变成自己把自己踢出去的抖动。
+  if (model.current >= 0) {
+    const int count = static_cast<int>(model.items.size());
+    const float chip_h = pill_h * 0.78f;
+    const float chip_top = (height - chip_h) * 0.5f;
+    const float chip_w = kSideChipWidth * scale;
+    const float gap = kSideChipGap * scale;
+
+    for (int side = -1; side <= 1; side += 2) {
+      int drawn = 0;
+      for (int step = 1; step <= kSideChipCount; ++step) {
+        const int index = model.current + side * step;
+        if (index < 0 || index >= count) break;
+        // 逐层后退：越远越矮、越淡
+        const float shrink = static_cast<float>(drawn) * 6.0f * scale;
+        const float left = (side < 0) ? pill_left - gap - chip_w - shrink - static_cast<float>(drawn) * (chip_w * 0.55f)
+                                      : pill_left + pill_w + gap + shrink + static_cast<float>(drawn) * (chip_w * 0.55f);
+        const D2D1_RECT_F chip = D2D1::RectF(left, chip_top + shrink * 0.5f, left + chip_w,
+                                             chip_top + chip_h - shrink * 0.5f);
+        const float alpha = 0.055f - static_cast<float>(drawn) * 0.015f;
+        g_brush->SetColor(D2D1::ColorF(1, 1, 1, alpha));
+        // 鼠标一上来就不画了：不是删掉，是让位。面板会把同样的事讲得更清楚。
+        if (!g_bar_hovered) {
+          target->FillRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.42f, chip_h * 0.42f), g_brush);
+        }
+
+        const dshwork::NodeView& node = model.items[static_cast<size_t>(index)];
+        if (left < hit_left) hit_left = left;
+        if (left + chip_w > hit_right) hit_right = left + chip_w;
+        if (g_bar_hovered) {
+          ++drawn;
+          continue;
+        }
+        IDWriteTextLayout* chip_layout = nullptr;
+        g_dwrite->CreateTextLayout(node.title.c_str(), static_cast<UINT32>(node.title.size()), g_formatMeta,
+                                   chip_w - 16.0f * scale, chip_h, &chip_layout);
+        if (chip_layout != nullptr) {
+          g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.22f));
+          target->DrawTextLayout(D2D1::Point2F(left + 10.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
+                                 chip_layout, g_brush);
+          chip_layout->Release();
+        }
+        ++drawn;
+      }
+    }
+  }
+
   // 阴影：三层同心圆角矩形叠出柔和感（没有 GPU 模糊时的老办法，够用且零依赖）
   const float radius = pill_h * 0.5f;
   for (int i = 6; i >= 1; --i) {
@@ -264,6 +339,11 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
 
   if (title_layout != nullptr) title_layout->Release();
   if (progress_layout != nullptr) progress_layout->Release();
+
+  g_hit_left_dip = hit_left / scale;
+  g_hit_right_dip = hit_right / scale;
+  g_hit_top_dip = pill_top / scale;
+  g_hit_bottom_dip = (pill_top + pill_h) / scale;
 }
 
 void Repaint() {
@@ -349,6 +429,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_HOTKEY:
       if (wparam == kHotkeyId) TogglePanel();
       return 0;
+    case WM_TIMER:
+      if (wparam == kHoverTimerId) {
+        UpdateHover();
+        return 0;
+      }
+      break;
     case kMsgTray:
       if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
         ShowTrayMenu();
@@ -554,16 +640,67 @@ void HidePanel() {
   LogToFile("面板收起");
 }
 
+/**
+ * 鼠标是否停在药丸（或面板）上。
+ *
+ * 小条是 WS_EX_TRANSPARENT 的穿透窗口：它不接收任何鼠标消息，所以"悬停"只能
+ * 轮询光标自己算。120ms 一次，人察觉不到，CPU 也几乎不花。
+ *
+ * 命中区用"画出来的尺寸"而不是窗口尺寸——窗口比药丸宽得多，拿窗口算的话
+ * 鼠标飘到屏幕中间偏上一点就会莫名其妙展开面板。
+ */
+void UpdateHover() {
+  if (g_window == nullptr) return;
+  RECT window_rect = {};
+  GetWindowRect(g_window, &window_rect);
+  POINT cursor = {};
+  GetCursorPos(&cursor);
+
+  const int left = window_rect.left + static_cast<int>(g_hit_left_dip * g_dpiScale);
+  const int right = window_rect.left + static_cast<int>(g_hit_right_dip * g_dpiScale);
+  const int top = window_rect.top + static_cast<int>(g_hit_top_dip * g_dpiScale);
+  const int bottom = window_rect.top + static_cast<int>(g_hit_bottom_dip * g_dpiScale);
+  const bool on_bar = cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom;
+
+  bool on_panel = false;
+  if (g_panel_open) {
+    RECT panel_rect = {};
+    GetWindowRect(g_panel, &panel_rect);
+    on_panel = cursor.x >= panel_rect.left && cursor.x <= panel_rect.right && cursor.y >= panel_rect.top &&
+               cursor.y <= panel_rect.bottom;
+  }
+
+  const bool hovered = on_bar || on_panel;
+  static int tick = 0;
+  if (++tick % 20 == 0) {
+    LogToFile("hover 探测 tick=" + std::to_string(tick) + " cursor=" + std::to_string(cursor.x) + "," +
+              std::to_string(cursor.y) + " bar=[" + std::to_string(left) + "," + std::to_string(top) + "-" +
+              std::to_string(right) + "," + std::to_string(bottom) + "] on_bar=" + std::to_string(on_bar));
+  }
+  if (hovered == g_bar_hovered) return;
+  g_bar_hovered = hovered;
+  LogToFile(std::string("hover 变化 → ") + (hovered ? "进入" : "离开"));
+  Repaint();
+
+  if (hovered && !g_panel_open) {
+    ShowPanel();
+    g_panel_by_hover = true;
+  } else if (!hovered && g_panel_open && g_panel_by_hover) {
+    HidePanel();
+    g_panel_by_hover = false;
+  }
+}
+
 void TogglePanel() {
   if (g_panel_open) {
     HidePanel();
   } else {
     ShowPanel();
   }
+  g_panel_by_hover = false;  // 手动开关一次，就归手动管
 }
 
-void MoveFocus(int delta) {
-  if (g_panel_model.items.empty()) return;
+void MoveFocus(int delta) {  if (g_panel_model.items.empty()) return;
   const int count = static_cast<int>(g_panel_model.items.size());
   const int base = g_focus >= 0 ? g_focus : (g_panel_model.current >= 0 ? g_panel_model.current : 0);
   g_focus = (base + delta + count) % count;
@@ -724,6 +861,9 @@ int main() {
     LogToFile("全局热键 Ctrl+Alt+Space 注册失败（可能被别的软件占了）");
   }
   LogToFile("原生小条启动");
+
+  // 悬停轮询：小条是穿透窗口，收不到鼠标消息，只能自己看光标
+  SetTimer(g_window, kHoverTimerId, 120, nullptr);
 
   std::thread poller(PollLoop);
 
