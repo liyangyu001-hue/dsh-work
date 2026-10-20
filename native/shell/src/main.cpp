@@ -69,7 +69,11 @@ constexpr UINT kOpenTimerId = 0x79;
 // 动效时长（毫秒）：改手感只改这里，别散落到各处
 constexpr DWORD kSquashMs = 420;    // 药丸挤压回弹的整段时长
 constexpr DWORD kOpenDelayMs = 150; // 弹起来之后再展开面板
-constexpr DWORD kPanelSlideMs = 170; // 面板自己从上方落位
+// 面板展开/收起：从药丸的矩形长成整条，或缩回去。
+// 参考 BrimDeck——表面先变形，内容随后淡入，而不是两个窗口硬切。
+constexpr DWORD kPanelOpenMs = 300;
+constexpr DWORD kPanelCloseMs = 220;
+constexpr float kPanelTopDip = 10.0f;
 constexpr DWORD kChipFadeMs = 140;   // 邻居卡收进/挂出的过渡
 
 /**
@@ -190,13 +194,24 @@ void StartChipFade(float target) {
   g_chip_fade_active = true;
 }
 
-bool g_panel_slide_active = false;
-ULONGLONG g_panel_slide_start = 0;
+/** 面板的一次变形：从 from 矩形长到 to 矩形，矩形本身在每一帧被插值。 */
+struct PanelMorph {
+  bool active = false;
+  bool opening = false;
+  ULONGLONG start = 0;
+  RECT from = {};
+  RECT to = {};
+  float ms = static_cast<float>(kPanelOpenMs);
+};
+PanelMorph g_morph;
+float g_panel_dip_w = 0.0f;   // 长条的逻辑宽度（随任务数变）
+float g_panel_dip_h = dshwork::ui::kStripHeight;
 
 void Repaint();
 void ShowPanel();
-void HidePanel();
-void PositionPanel();
+void HidePanel(bool animated = true);
+void UpdatePanelMorph();
+float PanelContentAlpha();
 int g_focus = -1;  // 面板里选中第几张卡；-1 表示跟随当前任务
 dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
@@ -286,6 +301,17 @@ float EaseOutCubic(float t) {
   const float inv = 1.0f - t;
   return 1.0f - inv * inv * inv;
 }
+
+/** 两头慢中间快：收起用它，像被吸回去，而不是"啪"地消失。 */
+float EaseInOutCubic(float t) {
+  if (t < 0.5f) return 4.0f * t * t * t;
+  const float f = -2.0f * t + 2.0f;
+  return 1.0f - f * f * f * 0.5f;
+}
+
+inline float LerpF(float a, float b, float t) { return a + (b - a) * t; }
+
+inline int LerpI(int a, int b, float t) { return static_cast<int>(static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t); }
 
 /**
  * 挤压回弹。
@@ -627,8 +653,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (wparam == kAnimTimerId) {
         UpdateChipFade();
         Repaint();
-        if (g_panel_open && g_panel_slide_active) PositionPanel();
-        if (!g_squash_active && !g_panel_slide_active && !g_chip_fade_active) {
+        if (g_morph.active) UpdatePanelMorph();
+        if (!g_squash_active && !g_chip_fade_active && !g_morph.active) {
           KillTimer(g_window, kAnimTimerId);
         }
         return 0;
@@ -730,36 +756,83 @@ bool CreateGraphics() {
 
 // ── 面板：位置 / 绘制 / 生命周期 ─────────────────────────
 
-void PositionPanel() {
-  if (g_panel == nullptr) return;
+/** 药丸当前占的矩形（物理像素）：展开动画的起点，也是收起的终点。 */
+RECT PillRectPx() {
+  RECT window_rect = {};
+  GetWindowRect(g_window, &window_rect);
+  RECT r = {};
+  r.left = window_rect.left + static_cast<LONG>(g_hit_left_dip * g_dpiScale);
+  r.top = window_rect.top + static_cast<LONG>(g_hit_top_dip * g_dpiScale);
+  r.right = window_rect.left + static_cast<LONG>(g_hit_right_dip * g_dpiScale);
+  r.bottom = window_rect.top + static_cast<LONG>(g_hit_bottom_dip * g_dpiScale);
+  return r;
+}
+
+/** 长条落位：横向居中，贴在屏幕上沿往下一点。 */
+RECT PanelTargetRect() {
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(MonitorFromWindow(g_panel, MONITOR_DEFAULTTOPRIMARY), &info);
+  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
+  const int px_w = static_cast<int>(g_panel_dip_w * g_dpiScale);
+  const int px_h = static_cast<int>(g_panel_dip_h * g_dpiScale);
+  RECT r = {};
+  r.left = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
+  r.top = info.rcWork.top + static_cast<int>(kPanelTopDip * g_dpiScale);
+  r.right = r.left + px_w;
+  r.bottom = r.top + px_h;
+  return r;
+}
 
-  const int px_w = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
-  const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
-  const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
-  // 小条窗口高 96，药丸占中间 44 左右；82 让面板上沿正好接在药丸下缘
-  int y = info.rcWork.top + static_cast<int>(82 * g_dpiScale);
-
-  // 面板自己也要有出场：从上面 14 DIP 处滑下来，缓出收尾。
-  // 它和药丸的挤压是先后关系——药丸先弹（预备），面板随后落位（跟随）。
-  if (g_panel_slide_active) {
-    const float t = static_cast<float>(GetTickCount64() - g_panel_slide_start) /
-                    (static_cast<float>(kPanelSlideMs) * g_motion_scale);
-    if (t >= 1.0f) {
-      g_panel_slide_active = false;
-    } else {
-      y -= static_cast<int>((1.0f - EaseOutCubic(t)) * 14.0f * g_dpiScale);
-    }
+/** 内容的不透明度：表面先长出来，字后跟上来（跟随动作，别一起糊上去）。 */
+float PanelContentAlpha() {
+  if (!g_morph.active) return 1.0f;
+  const float t = static_cast<float>(GetTickCount64() - g_morph.start) /
+                  (g_morph.ms * g_motion_scale);
+  const float p = t >= 1.0f ? 1.0f : t;
+  if (g_morph.opening) {
+    const float v = (p - 0.34f) / 0.50f;
+    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
   }
-  SetWindowPos(g_panel, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
+  const float v = 1.0f - p / 0.45f;
+  return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+/** 推进变形：每一帧把窗口矩形朝目标插值，并重画（尺寸变了，布局得跟着重排）。 */
+void UpdatePanelMorph() {
+  if (!g_morph.active || g_panel == nullptr) return;
+  const float t = static_cast<float>(GetTickCount64() - g_morph.start) /
+                  (g_morph.ms * g_motion_scale);
+  const float p = t >= 1.0f ? 1.0f : t;
+  const float e = g_morph.opening ? EaseOutCubic(p) : EaseInOutCubic(p);
+
+  const int left = LerpI(g_morph.from.left, g_morph.to.left, e);
+  const int top = LerpI(g_morph.from.top, g_morph.to.top, e);
+  const int right = LerpI(g_morph.from.right, g_morph.to.right, e);
+  const int bottom = LerpI(g_morph.from.bottom, g_morph.to.bottom, e);
+  SetWindowPos(g_panel, HWND_TOPMOST, left, top, right - left, bottom - top, SWP_NOACTIVATE);
+  RepaintPanel();
+
+  if (p < 1.0f) return;
+  g_morph.active = false;
+  if (!g_morph.opening) {
+    // 缩回药丸大小 → 面板让位，小条重新出现
+    ShowWindow(g_panel, SW_HIDE);
+    ShowWindow(g_window, SW_SHOWNOACTIVATE);
+    g_panel_open = false;
+    DisarmPanelKeys();
+    LogToFile("面板收起");
+  } else {
+    LogToFile("面板展开完成");
+  }
 }
 
 void RepaintPanel() {
   if (g_panel == nullptr) return;
-  const int px_w = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
-  const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
+  RECT panel_rect = {};
+  GetWindowRect(g_panel, &panel_rect);
+  const int px_w = panel_rect.right - panel_rect.left;
+  const int px_h = panel_rect.bottom - panel_rect.top;
+  if (px_w <= 0 || px_h <= 0) return;
 
   HDC screen = GetDC(nullptr);
   HDC memory = CreateCompatibleDC(screen);
@@ -789,7 +862,9 @@ void RepaintPanel() {
     model = g_panel_model;
   }
   dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
-  dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats);
+  dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats,
+                         static_cast<float>(px_w) / g_dpiScale, static_cast<float>(px_h) / g_dpiScale,
+                         PanelContentAlpha());
   const HRESULT draw_result = g_target->EndDraw();
   if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
 
@@ -829,6 +904,16 @@ void RefreshPanelModel() {
   std::lock_guard<std::mutex> lock(g_model_mutex);
   g_panel_model = g_model;
   if (g_focus < 0 && g_panel_model.current >= 0) g_focus = g_panel_model.current;
+  // 长条宽度取决于任务数：开着的当口任务变了，窗口要跟着变宽变窄
+  const float wanted = dshwork::ui::StripWidth(static_cast<int>(g_panel_model.items.size()));
+  if (wanted != g_panel_dip_w) {
+    g_panel_dip_w = wanted;
+    if (g_panel_open && g_panel != nullptr && !g_morph.active) {
+      const RECT target = PanelTargetRect();
+      SetWindowPos(g_panel, HWND_TOPMOST, target.left, target.top, target.right - target.left,
+                   target.bottom - target.top, SWP_NOACTIVATE);
+    }
+  }
 }
 
 /**
@@ -838,7 +923,7 @@ void RefreshPanelModel() {
  * 结束后由 kMsgCaptureDone 把该露出来的露回来。
  */
 void StartRegionCapture() {
-  HidePanel();
+  HidePanel(false);
   g_panel_by_hover = false;
   ShowWindow(g_window, SW_HIDE);
   dshwork::capture::SetLog(&LogToFile);
@@ -854,26 +939,50 @@ void StartRegionCapture() {
 void ShowPanel() {
   if (g_panel == nullptr) return;
   RefreshPanelModel();
-  g_panel_slide_active = true;
-  g_panel_slide_start = GetTickCount64();
-  SetTimer(g_window, kAnimTimerId, 16, nullptr);
-  PositionPanel();
+  const RECT target = PanelTargetRect();
+  const RECT from = PillRectPx();
+
+  // 药丸让位：展开动画从它自己的矩形长出去，两个窗口同时可见就会看到两坨东西
+  ShowWindow(g_window, SW_HIDE);
   ShowWindow(g_panel, SW_SHOWNOACTIVATE);
   // 每次显示都重申置顶：Windows 会在一段时间后把置顶窗口降到普通层（lolPing #70）
-  SetWindowPos(g_panel, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  SetWindowPos(g_panel, HWND_TOPMOST, from.left, from.top, from.right - from.left, from.bottom - from.top,
+               SWP_NOACTIVATE);
+
+  g_morph.active = true;
+  g_morph.opening = true;
+  g_morph.start = GetTickCount64();
+  g_morph.from = from;
+  g_morph.to = target;
+  g_morph.ms = static_cast<float>(kPanelOpenMs);
   g_panel_open = true;
   ArmPanelKeys();
+  SetTimer(g_window, kAnimTimerId, 16, nullptr);
   RepaintPanel();
-  RECT panel_rect = {};
-  GetWindowRect(g_panel, &panel_rect);
-  LogToFile("面板打开 rect=" + std::to_string(panel_rect.left) + "," + std::to_string(panel_rect.top) + " " +
-            std::to_string(panel_rect.right - panel_rect.left) + "x" +
-            std::to_string(panel_rect.bottom - panel_rect.top));
+  LogToFile("面板打开 from=" + std::to_string(from.right - from.left) + "x" +
+            std::to_string(from.bottom - from.top) + " to=" + std::to_string(target.right - target.left) + "x" +
+            std::to_string(target.bottom - target.top));
 }
 
-void HidePanel() {
+void HidePanel(bool animated) {
   if (g_panel == nullptr || !g_panel_open) return;
+  if (animated) {
+    if (g_morph.active && !g_morph.opening) return;  // 正在收，别打断
+    RECT from = {};
+    GetWindowRect(g_panel, &from);
+    g_morph.active = true;
+    g_morph.opening = false;
+    g_morph.start = GetTickCount64();
+    g_morph.from = from;
+    g_morph.to = PillRectPx();
+    g_morph.ms = static_cast<float>(kPanelCloseMs);
+    DisarmPanelKeys();
+    SetTimer(g_window, kAnimTimerId, 16, nullptr);
+    return;
+  }
   ShowWindow(g_panel, SW_HIDE);
+  ShowWindow(g_window, SW_SHOWNOACTIVATE);
+  g_morph.active = false;
   g_panel_open = false;
   DisarmPanelKeys();
   LogToFile("面板收起");
@@ -961,11 +1070,35 @@ void MoveFocus(int delta) {  if (g_panel_model.items.empty()) return;
 LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   switch (message) {
     case WM_LBUTTONDOWN: {
-      // 只认右上角那个 ×，别的一律忽略（面板不抢焦点，也不需要拖动）
+      // 整条都是几块可点的区域，点空白处不做事（面板不抢焦点，也不需要拖动）
+      RECT rect = {};
+      GetWindowRect(window, &rect);
+      const int width = rect.right - rect.left;
       const int x = GET_X_LPARAM(lparam);
-      const int width = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
-      if (x > width - static_cast<int>(70 * g_dpiScale) && GET_Y_LPARAM(lparam) < static_cast<int>(60 * g_dpiScale)) {
+      const int y = GET_Y_LPARAM(lparam);
+      // 右上角 × 收起
+      if (x > width - static_cast<int>(34 * g_dpiScale) && y < static_cast<int>(34 * g_dpiScale)) {
         HidePanel();
+        return 0;
+      }
+      // 卡片行：点哪张就把焦点挪过去，双击语义先不做
+      const int count = static_cast<int>(g_panel_model.items.size());
+      if (count > 0) {
+        const float scale = g_dpiScale;
+        const float cards_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
+        const float step = (dshwork::ui::kCardW + dshwork::ui::kCardGap) * scale;
+        int visible = dshwork::ui::VisibleCards(g_panel_dip_w);
+        if (visible > count) visible = count;
+        const int current = g_panel_model.current >= 0 ? g_panel_model.current : 0;
+        const int first = dshwork::ui::CardStart(count, current, visible);
+        for (int slot = 0; slot < visible; ++slot) {
+          const float left = cards_x + static_cast<float>(slot) * step;
+          if (x >= left && x <= left + dshwork::ui::kCardW * scale) {
+            g_focus = first + slot;
+            RepaintPanel();
+            break;
+          }
+        }
       }
       return 0;
     }
@@ -1147,8 +1280,8 @@ int main() {
   if (RegisterClassExW(&panel_class) == 0) LogToFile("面板窗口类注册失败");
   g_panel = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kPanelClass,
                             L"DSH Work 面板", WS_POPUP, 0, 0,
-                            static_cast<int>(dshwork::ui::kPanelWidth),
-                            static_cast<int>(dshwork::ui::kPanelHeight), nullptr, nullptr, g_instance, nullptr);
+                            static_cast<int>(dshwork::ui::StripWidth(1) * 1.0),
+                            static_cast<int>(dshwork::ui::kStripHeight), nullptr, nullptr, g_instance, nullptr);
   if (g_panel == nullptr) LogToFile("面板窗口创建失败");
 
   PositionWindow();
