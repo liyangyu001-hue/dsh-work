@@ -63,6 +63,13 @@ constexpr float kSideChipWidth = 132.0f;  // 两侧那张半透明的卡片宽�
 constexpr float kSideChipGap = 8.0f;
 constexpr int kSideChipCount = 2;         // 每侧最多挂两张：再多就糊成一片
 constexpr UINT kHoverTimerId = 0x77;
+constexpr UINT kAnimTimerId = 0x78;
+constexpr UINT kOpenTimerId = 0x79;
+// 动效时长（毫秒）：改手感只改这里，别散落到各处
+constexpr DWORD kSquashMs = 420;    // 药丸挤压回弹的整段时长
+constexpr DWORD kOpenDelayMs = 150; // 弹起来之后再展开面板
+constexpr DWORD kPanelSlideMs = 170; // 面板自己从上方落位
+constexpr DWORD kChipFadeMs = 140;   // 邻居卡收进/挂出的过渡
 
 /**
  * 界面模型来自 doc.h：小条和面板看的是同一份结构。
@@ -98,14 +105,72 @@ bool g_panel_by_hover = false;
 /** 鼠标是否停在小条上。小条是穿透窗口收不到 WM_MOUSEMOVE，只能轮询光标。 */
 bool g_bar_hovered = false;
 /** 上一次绘制出来的可悬停范围（DIP，相对窗口左上角）。药丸宽度跟着文字变，只能画完才知道。 */
+/** 上一次绘制出来的可悬停范围（DIP，相对窗口左上角）。药丸宽度跟着文字变，只能画完才知道。 */
 float g_hit_left_dip = 0.0f;
 float g_hit_right_dip = 0.0f;
 float g_hit_top_dip = 0.0f;
 float g_hit_bottom_dip = 0.0f;
 
+/**
+ * 动效状态。
+ *
+ * 按下/悬停那一下不是直接"变大小"，而是先被压扁、再弹回来、余震收敛——
+ * 这就是动画十二原则里的挤压拉伸 + 跟随动作。全部用毫秒时间戳现算，
+ * 没有补间表也没有依赖，120fps 都撑得住。
+ */
+bool g_squash_active = false;
+ULONGLONG g_squash_start = 0;
+float g_squash_scale_x = 1.0f;
+float g_squash_scale_y = 1.0f;
+float g_squash_min_y = 1.0f;  // 这一趟弹动的最小/最大缩放，收尾时写日志自检
+float g_squash_max_y = 1.0f;
+
+/**
+ * 动效整体放慢倍数，只给调试和审查用（DSHWORK_SLOWMO=8 就是八倍慢放）。
+ * 正常运行时恒为 1；所有时长都乘它，方便逐帧看清曲线。
+ */
+float g_motion_scale = 1.0f;
+
+/**
+ * 邻居卡的显隐进度（0=全藏着，1=全挂出）。
+ *
+ * 为什么要它：悬停瞬间卡片如果"啪"地消失，药丸的挤压就被这个突变盖住了。
+ * 让卡片在 140ms 里收进去，挤压叠在这段收拢之上，动作才连成一句。
+ */
+float EaseOutCubic(float t);  // 定义在下面，这里先用
+float g_chip_fade = 1.0f;
+float g_chip_fade_from = 1.0f;
+float g_chip_fade_to = 1.0f;
+ULONGLONG g_chip_fade_start = 0;
+bool g_chip_fade_active = false;
+
+void UpdateChipFade() {
+  if (!g_chip_fade_active) return;
+  const float t = static_cast<float>(GetTickCount64() - g_chip_fade_start) /
+                  static_cast<float>(kChipFadeMs);
+  if (t >= 1.0f) {
+    g_chip_fade = g_chip_fade_to;
+    g_chip_fade_active = false;
+    return;
+  }
+  g_chip_fade = g_chip_fade_from + (g_chip_fade_to - g_chip_fade_from) * EaseOutCubic(t);
+}
+
+void StartChipFade(float target) {
+  if (target == g_chip_fade_to && g_chip_fade_active) return;
+  g_chip_fade_from = g_chip_fade;
+  g_chip_fade_to = target;
+  g_chip_fade_start = GetTickCount64();
+  g_chip_fade_active = true;
+}
+
+bool g_panel_slide_active = false;
+ULONGLONG g_panel_slide_start = 0;
+
 void Repaint();
 void ShowPanel();
 void HidePanel();
+void PositionPanel();
 int g_focus = -1;  // 面板里选中第几张卡；-1 表示跟随当前任务
 dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
@@ -187,8 +252,52 @@ void PollLoop() {
   }
 }
 
-D2D1_COLOR_F ColorOf(UINT32 argb) {
-  return D2D1::ColorF(static_cast<float>((argb >> 16) & 0xFF) / 255.0f,
+/** 缓出曲线：先快后慢，收尾不拖泥带水。t 已经是 0..1。 */
+float EaseOutCubic(float t) {
+  const float inv = 1.0f - t;
+  return 1.0f - inv * inv * inv;
+}
+
+/**
+ * 挤压回弹。
+ *
+ * 一条衰减振荡：先把药丸压扁（横向略微撑开，保持体积感），再弹过头一点，
+ * 幅度按 e^(-4.5t) 收掉，约 420ms 静止。这是"预备 → 挤压 → 跟随动作"的
+ * 最小实现，一条曲线同时给出速度和停止感。
+ */
+void UpdateSquash() {
+  if (!g_squash_active) {
+    g_squash_scale_x = 1.0f;
+    g_squash_scale_y = 1.0f;
+    return;
+  }
+  const float span = static_cast<float>(kSquashMs) * g_motion_scale;
+  const float t = static_cast<float>(GetTickCount64() - g_squash_start) / span;
+  if (t >= 1.0f) {
+    // 收尾时把这一趟的极值记下来：没有过冲（<1 再 >1）就说明曲线写坏了
+    LogToFile("挤压回弹 y∈[" + std::to_string(g_squash_min_y).substr(0, 6) + "," +
+              std::to_string(g_squash_max_y).substr(0, 6) + "]");
+    g_squash_active = false;
+    g_squash_min_y = 1.0f;
+    g_squash_max_y = 1.0f;
+    g_squash_scale_x = 1.0f;
+    g_squash_scale_y = 1.0f;
+    return;
+  }
+  const float amplitude = 0.15f * std::exp(-4.5f * t);
+  const float wave = std::sin(18.0f * t);
+  g_squash_scale_y = 1.0f - amplitude * wave;
+  g_squash_scale_x = 1.0f + amplitude * wave * 0.75f;  // 压扁时横向补偿
+  if (g_squash_scale_y < g_squash_min_y) g_squash_min_y = g_squash_scale_y;
+  if (g_squash_scale_y > g_squash_max_y) g_squash_max_y = g_squash_scale_y;
+}
+
+void StartSquash() {
+  g_squash_active = true;
+  g_squash_start = GetTickCount64();
+}
+
+D2D1_COLOR_F ColorOf(UINT32 argb) {  return D2D1::ColorF(static_cast<float>((argb >> 16) & 0xFF) / 255.0f,
                       static_cast<float>((argb >> 8) & 0xFF) / 255.0f,
                       static_cast<float>(argb & 0xFF) / 255.0f,
                       static_cast<float>((argb >> 24) & 0xFF) / 255.0f);
@@ -260,28 +369,27 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
                                       : pill_left + pill_w + gap + shrink + static_cast<float>(drawn) * (chip_w * 0.55f);
         const D2D1_RECT_F chip = D2D1::RectF(left, chip_top + shrink * 0.5f, left + chip_w,
                                              chip_top + chip_h - shrink * 0.5f);
-        const float alpha = 0.055f - static_cast<float>(drawn) * 0.015f;
+        // 透明度整体乘上显隐进度：鼠标上来时卡片是"收进去"，不是"跳没了"
+        const float fade = g_chip_fade;
+        const float alpha = (0.055f - static_cast<float>(drawn) * 0.015f) * fade;
         g_brush->SetColor(D2D1::ColorF(1, 1, 1, alpha));
-        // 鼠标一上来就不画了：不是删掉，是让位。面板会把同样的事讲得更清楚。
-        if (!g_bar_hovered) {
+        if (fade > 0.01f) {
           target->FillRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.42f, chip_h * 0.42f), g_brush);
         }
 
         const dshwork::NodeView& node = model.items[static_cast<size_t>(index)];
         if (left < hit_left) hit_left = left;
         if (left + chip_w > hit_right) hit_right = left + chip_w;
-        if (g_bar_hovered) {
-          ++drawn;
-          continue;
-        }
-        IDWriteTextLayout* chip_layout = nullptr;
-        g_dwrite->CreateTextLayout(node.title.c_str(), static_cast<UINT32>(node.title.size()), g_formatMeta,
-                                   chip_w - 16.0f * scale, chip_h, &chip_layout);
-        if (chip_layout != nullptr) {
-          g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.22f));
-          target->DrawTextLayout(D2D1::Point2F(left + 10.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
-                                 chip_layout, g_brush);
-          chip_layout->Release();
+        if (fade > 0.01f) {
+          IDWriteTextLayout* chip_layout = nullptr;
+          g_dwrite->CreateTextLayout(node.title.c_str(), static_cast<UINT32>(node.title.size()), g_formatMeta,
+                                     chip_w - 16.0f * scale, chip_h, &chip_layout);
+          if (chip_layout != nullptr) {
+            g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.22f * fade));
+            target->DrawTextLayout(D2D1::Point2F(left + 10.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
+                                   chip_layout, g_brush);
+            chip_layout->Release();
+          }
         }
         ++drawn;
       }
@@ -290,6 +398,11 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
 
   // 阴影：三层同心圆角矩形叠出柔和感（没有 GPU 模糊时的老办法，够用且零依赖）
   const float radius = pill_h * 0.5f;
+
+  // 挤压回弹：围绕药丸中心做各向异性缩放。只影响观感，不影响命中区。
+  UpdateSquash();
+  const D2D1_POINT_2F squash_center = D2D1::Point2F(pill_left + pill_w * 0.5f, pill_top + pill_h * 0.5f);
+  target->SetTransform(D2D1::Matrix3x2F::Scale(g_squash_scale_x, g_squash_scale_y, squash_center));
   for (int i = 6; i >= 1; --i) {
     const float spread = static_cast<float>(i) * 1.15f * scale;
     g_brush->SetColor(D2D1::ColorF(0, 0, 0, 0.016f));
@@ -339,6 +452,8 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
 
   if (title_layout != nullptr) title_layout->Release();
   if (progress_layout != nullptr) progress_layout->Release();
+
+  target->SetTransform(D2D1::Matrix3x2F::Identity());
 
   g_hit_left_dip = hit_left / scale;
   g_hit_right_dip = hit_right / scale;
@@ -432,6 +547,23 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_TIMER:
       if (wparam == kHoverTimerId) {
         UpdateHover();
+        return 0;
+      }
+      if (wparam == kAnimTimerId) {
+        UpdateChipFade();
+        Repaint();
+        if (g_panel_open && g_panel_slide_active) PositionPanel();
+        if (!g_squash_active && !g_panel_slide_active && !g_chip_fade_active) {
+          KillTimer(g_window, kAnimTimerId);
+        }
+        return 0;
+      }
+      if (wparam == kOpenTimerId) {
+        KillTimer(g_window, kOpenTimerId);
+        if (g_bar_hovered && !g_panel_open) {
+          ShowPanel();
+          g_panel_by_hover = true;
+        }
         return 0;
       }
       break;
@@ -529,8 +661,20 @@ void PositionPanel() {
   const int px_w = static_cast<int>(dshwork::ui::kPanelWidth * g_dpiScale);
   const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
   const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
-  // 小条窗口高 96，药丸占中间 44 左右；62 让面板上沿正好接在药丸下缘
-  const int y = info.rcWork.top + static_cast<int>(82 * g_dpiScale);
+  // 小条窗口高 96，药丸占中间 44 左右；82 让面板上沿正好接在药丸下缘
+  int y = info.rcWork.top + static_cast<int>(82 * g_dpiScale);
+
+  // 面板自己也要有出场：从上面 14 DIP 处滑下来，缓出收尾。
+  // 它和药丸的挤压是先后关系——药丸先弹（预备），面板随后落位（跟随）。
+  if (g_panel_slide_active) {
+    const float t = static_cast<float>(GetTickCount64() - g_panel_slide_start) /
+                    (static_cast<float>(kPanelSlideMs) * g_motion_scale);
+    if (t >= 1.0f) {
+      g_panel_slide_active = false;
+    } else {
+      y -= static_cast<int>((1.0f - EaseOutCubic(t)) * 14.0f * g_dpiScale);
+    }
+  }
   SetWindowPos(g_panel, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
 }
 
@@ -612,6 +756,9 @@ void RefreshPanelModel() {
 void ShowPanel() {
   if (g_panel == nullptr) return;
   RefreshPanelModel();
+  g_panel_slide_active = true;
+  g_panel_slide_start = GetTickCount64();
+  SetTimer(g_window, kAnimTimerId, 16, nullptr);
   PositionPanel();
   ShowWindow(g_panel, SW_SHOWNOACTIVATE);
   // 每次显示都重申置顶：Windows 会在一段时间后把置顶窗口降到普通层（lolPing #70）
@@ -682,12 +829,24 @@ void UpdateHover() {
   LogToFile(std::string("hover 变化 → ") + (hovered ? "进入" : "离开"));
   Repaint();
 
-  if (hovered && !g_panel_open) {
-    ShowPanel();
-    g_panel_by_hover = true;
-  } else if (!hovered && g_panel_open && g_panel_by_hover) {
-    HidePanel();
-    g_panel_by_hover = false;
+  if (hovered) {
+    if (!g_panel_open) {
+      // 先弹一下（预备），弹完再展开（跟随动作）——
+      // 两件事分开做，才有"先有反应、再出东西"的层次。
+      StartSquash();
+      StartChipFade(0.0f);
+      SetTimer(g_window, kAnimTimerId, 16, nullptr);
+      SetTimer(g_window, kOpenTimerId, static_cast<UINT>(kOpenDelayMs * g_motion_scale), nullptr);
+    }
+  } else {
+    // 还没弹完就走了：把待开的那一下撤掉，别让面板自己跳出来
+    KillTimer(g_window, kOpenTimerId);
+    StartChipFade(1.0f);
+    SetTimer(g_window, kAnimTimerId, 16, nullptr);
+    if (g_panel_open && g_panel_by_hover) {
+      HidePanel();
+      g_panel_by_hover = false;
+    }
   }
 }
 
@@ -820,6 +979,15 @@ LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
 int main() {
   // 逐显示器 DPI 感知：不然 150% 缩放下整条会画成模糊的
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  // 调试用：把动效整体放慢，方便逐帧看曲线（正常运行时这个环境变量不存在）
+  {
+    wchar_t slowmo[16] = {};
+    if (GetEnvironmentVariableW(L"DSHWORK_SLOWMO", slowmo, 16) > 0) {
+      const int factor = _wtoi(slowmo);
+      if (factor > 0) g_motion_scale = static_cast<float>(factor);
+    }
+  }
 
   g_instance = GetModuleHandleW(nullptr);
 
