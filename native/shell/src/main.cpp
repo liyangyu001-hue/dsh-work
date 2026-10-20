@@ -1085,7 +1085,27 @@ void DisarmPanelKeys() {
 }
 }  // namespace
 
+/**
+ * 崩溃兜底：把异常地址写进日志。
+ *
+ * 被杀软掐掉和"自己段错误"在外部看起来一模一样（进程无声消失），
+ * 有这一句就能分清是哪一种：有日志=我们的 bug，没日志=被杀。
+ */
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
+  char text[160] = {};
+  const void* address = (info != nullptr && info->ExceptionRecord != nullptr)
+                            ? info->ExceptionRecord->ExceptionAddress
+                            : nullptr;
+  const DWORD code = (info != nullptr && info->ExceptionRecord != nullptr)
+                         ? info->ExceptionRecord->ExceptionCode
+                         : 0;
+  sprintf_s(text, "崩溃 code=0x%08lX addr=%p", code, address);
+  LogToFile(text);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int main() {
+  SetUnhandledExceptionFilter(CrashFilter);
   // 逐显示器 DPI 感知：不然 150% 缩放下整条会画成模糊的
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 

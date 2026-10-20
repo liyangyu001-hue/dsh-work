@@ -20,7 +20,7 @@ const projects = [
   // 输入助手是父进程的管道对端，必须有控制台（stdin/stdout）
   { name: "dshwork-input", srcDir: join(root, "native", "input-helper", "src"), subsystem: "CONSOLE", libs: "user32.lib" },
   // 小条是纯窗口程序，带控制台会闪一个黑框
-  { name: "dshwork-shell", srcDir: join(root, "native", "shell", "src"), subsystem: "WINDOWS", libs: "user32.lib gdi32.lib shell32.lib d2d1.lib dwrite.lib winhttp.lib" },
+  { name: "dshwork-shell", srcDir: join(root, "native", "shell", "src"), subsystem: "WINDOWS", libs: "user32.lib gdi32.lib shell32.lib d2d1.lib dwrite.lib winhttp.lib d3d11.lib dxgi.lib" },
 ];
 
 const VC_VARS_CANDIDATES = [

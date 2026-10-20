@@ -12,6 +12,7 @@
 #pragma once
 
 #include <windows.h>
+#include "grab_dxgi.h"
 #include <objidl.h>
 #include <wincodec.h>
 
@@ -385,10 +386,11 @@ inline int CaptureMode() {
   static int mode = -1;
   if (mode >= 0) return mode;
   char buf[32] = {};
-  mode = 0;
+  mode = 0;  // 0 = dxgi（默认），3 = bitblt
   if (GetEnvironmentVariableA("DSHWORK_CAPTURE_MODE", buf, 32) > 0) {
     if (lstrcmpiA(buf, "plain") == 0) mode = 1;
     else if (lstrcmpiA(buf, "printwindow") == 0) mode = 2;
+    else if (lstrcmpiA(buf, "bitblt") == 0) mode = 3;
   }
   return mode;
 }
@@ -402,6 +404,33 @@ inline int CaptureMode() {
  */
 inline bool GrabScreen(HDC src, int vx, int vy, int vw, int vh, HDC dst) {
   switch (CaptureMode()) {
+    case 0: {
+      // 默认走 DXGI 桌面复制：不碰 GDI，杀软不把它当窃屏木马
+      CapLog("capture: grab=dxgi");
+      dshwork::grab::SetLog(g_log);
+      RECT virtual_rect = {vx, vy, vx + vw, vy + vh};
+      dshwork::grab::Shot shot;
+      std::string reason;
+      if (!dshwork::grab::GrabVirtualScreen(virtual_rect, &shot, &reason)) {
+        CapLog("capture: dxgi 失败 → " + reason);
+        return false;
+      }
+      // 搬到 GDI 的位图上，后面绘制逻辑一行都不用改
+      BITMAPINFO bmi = {};
+      bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      bmi.bmiHeader.biWidth = shot.width;
+      bmi.bmiHeader.biHeight = -shot.height;  // 负数 = 自上而下
+      bmi.bmiHeader.biPlanes = 1;
+      bmi.bmiHeader.biBitCount = 32;
+      bmi.bmiHeader.biCompression = BI_RGB;
+      CapLog("capture: pixels=" + std::to_string(shot.pixels.size()));
+      const int blit = SetDIBitsToDevice(dst, 0, 0, static_cast<DWORD>(shot.width),
+                                         static_cast<DWORD>(shot.height), 0, 0, 0,
+                                         static_cast<UINT>(shot.height), shot.pixels.data(), &bmi,
+                                         DIB_RGB_COLORS);
+      CapLog("capture: blit=" + std::to_string(blit));
+      return blit != 0;
+    }
     case 1:
       CapLog("capture: grab=plain");
       return BitBlt(dst, 0, 0, vw, vh, src, vx, vy, SRCCOPY) != 0;
@@ -445,15 +474,30 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   s.screen = GetDC(nullptr);
   if (s.screen == nullptr) return false;
 
-  if (CreateSurface(s.screen, s.vw, s.vh, &s.shot_bitmap, &s.shot) == nullptr) return false;
-  if (CreateSurface(s.screen, s.vw, s.vh, &s.dim_bitmap, &s.dim) == nullptr) return false;
-  if (CreateSurface(s.screen, s.vw, s.vh, &s.work_bitmap, &s.work) == nullptr) return false;
+  // CreateSurface 返回的是 DIB 的像素指针——必须接住，否则后面的压暗/裁剪
+  // 全是空指针解引用（这个坑让切片三的进程每次框选都段错误，还一度被当成杀软拦截）
+  s.shot_bits = CreateSurface(s.screen, s.vw, s.vh, &s.shot_bitmap, &s.shot);
+  s.dim_bits = CreateSurface(s.screen, s.vw, s.vh, &s.dim_bitmap, &s.dim);
+  s.work_bits = CreateSurface(s.screen, s.vw, s.vh, &s.work_bitmap, &s.work);
+  if (s.shot_bits == nullptr || s.dim_bits == nullptr || s.work_bits == nullptr) {
+    Teardown(0);
+    return false;
+  }
 
   // 冻结帧：一次 BitBlt 把整块虚拟桌面拿到手
   CapLog("capture: surfaces ready " + std::to_string(s.vw) + "x" + std::to_string(s.vh));
   if (!GrabScreen(s.screen, s.vx, s.vy, s.vw, s.vh, s.shot)) {
     Teardown(0);
     return false;
+  }
+
+  // 抓到的画面是不是全黑？三个取样点够判断了（调试用，正常路径开销可忽略）
+  {
+    const auto* probe = static_cast<const BYTE*>(s.shot_bits);
+    const size_t total = static_cast<size_t>(s.vw) * static_cast<size_t>(s.vh);
+    const size_t at = (total / 2) * 4;
+    CapLog("capture: probe b=" + std::to_string(probe[at]) + " g=" + std::to_string(probe[at + 1]) +
+           " r=" + std::to_string(probe[at + 2]) + " a=" + std::to_string(probe[at + 3]));
   }
 
   // 压暗底图：逐像素乘 kDim，alpha 保持 255（分层窗口要预乘，255 时两者相等）
