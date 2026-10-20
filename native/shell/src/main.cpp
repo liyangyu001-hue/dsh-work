@@ -36,6 +36,7 @@
 #include "doc.h"
 #include "host.h"
 #include "panel.h"
+#include "capture.h"
 #include "json.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -131,6 +132,31 @@ float g_squash_max_y = 1.0f;
  */
 float g_motion_scale = 1.0f;
 
+/** 最近一次框选的结果，成功后由 kMsgCaptureDone 读出来做提示。 */
+std::wstring g_capture_path;
+int g_capture_w = 0;
+int g_capture_h = 0;
+
+/**
+ * 小条上的一次性提示（"已截取 800×600"这类）。
+ *
+ * 不做独立窗口：小条本来就常驻顶部，借它显示 2 秒最省事，
+ * 也不会多一个窗口要管理位置和层级。
+ */
+std::wstring g_notice;
+ULONGLONG g_notice_until = 0;
+constexpr UINT kNoticeTimerId = 0x7A;
+
+/** 重绘整条小条（分层窗口走 UpdateLayeredWindow，见 Repaint 定义）。 */
+void Repaint();
+
+void ShowNotice(const std::wstring& text, DWORD ms) {
+  g_notice = text;
+  g_notice_until = GetTickCount64() + ms;
+  SetTimer(g_window, kNoticeTimerId, ms + 40, nullptr);
+  Repaint();
+}
+
 /**
  * 邻居卡的显隐进度（0=全藏着，1=全挂出）。
  *
@@ -190,6 +216,8 @@ void DispatchKey(int action);
 void TogglePanel();
 void UpdateHover();
 void ShowTrayMenu();
+void Repaint();
+void StartRegionCapture();
 void ArmPanelKeys();
 void DisarmPanelKeys();
 
@@ -312,7 +340,8 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
   const float pill_top = (height - pill_h) * 0.5f;
 
   // 先量文字，长度决定药丸多宽——小条要跟着内容走，不能写死
-  std::wstring title = model.title.empty() ? L"正在连接 DSH…" : model.title;
+  const bool showing_notice = !g_notice.empty() && GetTickCount64() < g_notice_until;
+  std::wstring title = showing_notice ? g_notice : (model.title.empty() ? L"正在连接 DSH…" : model.title);
   wchar_t progress[64] = {};
   if (model.total > 0) {
     swprintf_s(progress, L"%d/%d", model.done, model.total);
@@ -459,9 +488,13 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
   target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dot_cx, dot_cy), kDotRadius * scale, kDotRadius * scale),
                       g_brush);
 
-  // 标题
+  // 标题（提示态用强调色，让人一眼看出这不是任务名）
   const float text_x = dot_cx + kDotRadius * scale + kDotGap * scale;
-  g_brush->SetColor(D2D1::ColorF(0.96f, 0.96f, 0.97f, 1.0f));
+  if (showing_notice) {
+    g_brush->SetColor(ColorOf(0xFF0A84FF));
+  } else {
+    g_brush->SetColor(D2D1::ColorF(0.96f, 0.96f, 0.97f, 1.0f));
+  }
   if (title_layout != nullptr) {
     target->DrawTextLayout(D2D1::Point2F(text_x, pill_top), title_layout,
                            g_brush);
@@ -563,6 +596,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         RepaintPanel();
       }
       return 0;
+    case dshwork::capture::kMsgCaptureDone:
+      ShowWindow(g_window, SW_SHOWNOACTIVATE);
+      if (wparam != 0) {
+        wchar_t text[64];
+        swprintf_s(text, L"已截取 %d × %d", g_capture_w, g_capture_h);
+        ShowNotice(text, 2400);
+        LogToFile("框选完成");
+      } else {
+        ShowNotice(L"已取消", 1600);
+        LogToFile("框选取消");
+      }
+      return 0;
     case kMsgKey:
       DispatchKey(static_cast<int>(wparam));
       return 0;
@@ -586,6 +631,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (!g_squash_active && !g_panel_slide_active && !g_chip_fade_active) {
           KillTimer(g_window, kAnimTimerId);
         }
+        return 0;
+      }
+      if (wparam == kNoticeTimerId) {
+        KillTimer(g_window, kNoticeTimerId);
+        g_notice.clear();
+        Repaint();
         return 0;
       }
       if (wparam == kOpenTimerId) {
@@ -780,6 +831,25 @@ void RefreshPanelModel() {
   if (g_focus < 0 && g_panel_model.current >= 0) g_focus = g_panel_model.current;
 }
 
+/**
+ * 进入框选：先把我们自己藏干净，再让覆盖层拍屏。
+ *
+ * 顺序不能反——先把小条和面板收起来，冻结帧里才不会有自己的影子。
+ * 结束后由 kMsgCaptureDone 把该露出来的露回来。
+ */
+void StartRegionCapture() {
+  HidePanel();
+  g_panel_by_hover = false;
+  ShowWindow(g_window, SW_HIDE);
+  if (!dshwork::capture::Begin(g_window, &g_capture_path, &g_capture_w, &g_capture_h)) {
+    ShowWindow(g_window, SW_SHOWNOACTIVATE);
+    ShowNotice(L"框选启动失败", 2000);
+    LogToFile("框选启动失败");
+    return;
+  }
+  LogToFile("进入框选");
+}
+
 void ShowPanel() {
   if (g_panel == nullptr) return;
   RefreshPanelModel();
@@ -962,8 +1032,8 @@ void DispatchKey(int action) {
     case 5:
       MoveFocus(1);
       break;
-    case 6:  // Tab：交给框选（切片三接上之前，只做日志）
-      LogToFile("面板按键 Tab → 框选（待接）");
+    case 6:  // Tab：进入框选
+      StartRegionCapture();
       break;
     default:
       break;
