@@ -21,12 +21,28 @@
 - 阶段：**P1 · 闭环**
 - 已完成：P1-1 全局热键 ✅ `4870b3f` ｜ P1-2 截屏框选 ✅ ｜ P1-2b 面板 ✅ `4a0877e` ｜ **P1-3 视觉识别 ✅ `7e53a78`（真机待验）** ｜ P1-2c 面板输入模型 ✅（不抢焦点 + 打开期间独占按键）
 - 上一轮收工：按 lolPing 的原理重做面板的输入方式——面板 `focusable:false` + `showInactive()`，键盘靠"打开期间用 globalShortcut 独占 Enter/Backspace/Tab/Esc/←/→"，关面板立刻释放；实测前台一直是 Edge，按 Enter 照样推进任务。
-- 下一轮从：**P1-4 卡片轮播** 开始（开工第一步：重启一次宿主，把 P1-3 的真机端到端补验）
+- 下一轮从：**切片三 · 原生框选覆盖层** 开始
+- 最近一次远端 sha：`c66753a`
 
 ## 进度
 
 - 切片一（原生小条）：✅ `4c06d87`
-- 切片二（原生面板 + 托盘 + 全局热键 + 键盘钩子）：✅ 本提交
+- 切片二（原生面板 + 托盘 + 全局热键 + 键盘钩子）：✅ `719779b`
+- 切片二b（面板改叠放卡片、缩到 660x318）：✅ 见本提交
+
+## 推送方式（重要，每天都用得上）
+
+本机 github.com:443 不通、pi.github.com 通（Clash 没开时也是如此）。
+所以 **git push 一定会失败**，改走 GitHub Git Data API 逐提交重放：
+
+`
+node scripts/push-via-api.mjs <远端当前 sha>
+`
+
+它会读 ~/.dsh/dsh-work/gh-token，把 <sha>..HEAD 的每个提交按原消息、原作者、原日期重建，
+最后把 efs/heads/main 指过去。**远端 sha 与本地不同，但 tree 完全一致**（可用
+git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
+推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
 ## 当前任务（只做一个，做完就停）
 
