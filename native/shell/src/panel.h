@@ -158,10 +158,14 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
       for (int side = -1; side <= 1; side += 2) {
         const int index = current + side * step;
         if (index < 0 || index >= count) continue;
-        const D2D1_RECT_F card = D2D1::RectF(cx - (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
-                                             card_cy - (kCardH / 2.0f) * scale,
-                                             cx + (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
-                                             card_cy + (kCardH / 2.0f) * scale);
+        // 往后退的每一层都矮一点、往里缩一点，叠起来才像一摞牌，
+        // 否则三张同样的高度叠在一起只会变成一条发灰的死板矩形。
+        const float inset = static_cast<float>(step) * 5.0f * scale;
+        const D2D1_RECT_F card = D2D1::RectF(
+            cx - (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
+            card_cy - (kCardH / 2.0f) * scale + inset,
+            cx + (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
+            card_cy + (kCardH / 2.0f) * scale - inset);
         const float fade = 0.30f - 0.05f * static_cast<float>(step - 1);
         FillRound(target, fmt.brush, card, kRadius * scale, Fade(0x12FFFFFF, fade));
       }
