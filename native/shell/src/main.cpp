@@ -222,7 +222,7 @@ constexpr int kArmedKeyIdBase = 0x60;  // 0x60..0x66 给面板按键用
 constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
 constexpr UINT kMsgTray = WM_APP + 3;
 constexpr UINT kHotkeyId = 0x51;
-constexpr UINT kTabHotkeyId = 0x70;   // 悬停期独占的 Tab（面板打开时用另一套 id）
+constexpr UINT kTabHotkeyId = 0x70;   // Tab 常驻热键：开着 DSH Work 就一直监听
 bool g_hover_tab_armed = false;
 bool g_keys_armed = false;  // 面板打开期间那 6 个键被独占着
 constexpr int kTrayIconId = 1;
@@ -591,8 +591,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       ShowWindow(g_window, SW_SHOWNOACTIVATE);
       if (wparam != 0) {
         wchar_t text[96];
-        if (wparam == 1 && lparam == 1) {
+        const int action = static_cast<int>(lparam);
+        if (action == 2) {
           swprintf_s(text, L"已截取 %d × %d · 解构待接", g_capture_w, g_capture_h);
+        } else if (action == 6) {
+          swprintf_s(text, L"已截取 %d × %d · 自动后续待接", g_capture_w, g_capture_h);
+        } else if (action == 3) {
+          swprintf_s(text, L"已收下 %d × %d", g_capture_w, g_capture_h);
         } else {
           swprintf_s(text, L"已截取 %d × %d", g_capture_w, g_capture_h);
         }
@@ -942,8 +947,6 @@ void StartRegionCapture() {
     LogToFile("框选启动失败");
     return;
   }
-  // 一进来就把轮盘摆在鼠标上：按 Tab 之后手不用先挪过去，菜单就在指针底下
-  dshwork::capture::ShowWheelAtCursor();
   LogToFile("进入框选");
 }
 
@@ -1154,15 +1157,17 @@ int HitTestDot(int px, int py) {
   return -1;
 }
 
-/** 悬停期独占 Tab：手一搭上小条，Tab 就是"框选"；手一离开立刻还回去。
+/**
+ * Tab 常驻：只要伴随层活着就注册着，随时按都能进框选。
  *
- * 为什么不常驻：Tab 是输入框、终端、表格的公共键，常驻等于把整个系统的
- * 键盘导航弄坏。lolPing 也是同一个思路——只在自己的手势期间接管。
+ * 只有覆盖层自己开着时才让给它（覆盖层要用 Tab 当『就它了』），收摊后立刻还回来。
+ *
+ * 代价说清楚：RegisterHotKey 是独占的，注册期间别的程序收不到 Tab。
  */
 void ArmHoverTab() {
   if (g_hover_tab_armed || g_keys_armed) return;
   if (!RegisterHotKey(g_window, kTabHotkeyId, MOD_NOREPEAT, VK_TAB)) {
-    LogToFile("悬停 Tab 注册失败");
+    LogToFile("Tab 常驻注册失败（多半被别的程序占了）");
     return;
   }
   g_hover_tab_armed = true;

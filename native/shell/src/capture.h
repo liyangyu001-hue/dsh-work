@@ -214,71 +214,62 @@ inline float ScaleOf() {
   return s.window ? static_cast<float>(GetDpiForWindow(s.window)) / 96.0f : 1.0f;
 }
 
-// ── 轮盘条目 ───────────────────────────────────────────────────────────────────
-// Tab 按下去不一定有截图：没有就问"要干什么"，有截图才问"这块拿去做什么"。
-// 两层条目数不同，扇区一律按 360/n 均分，第 0 瓣永远指向正上方。
-enum MenuKind { kMenuCancel = 0, kMenuCrop = 1, kMenuDeconstruct = 2, kMenuPanel = 4, kMenuFolder = 5 };
+// ── 像素工具 ───────────────────────────────────────────────────────────────────
+// 这个覆盖层没有 D2D，只有一张 32bpp 的 DIB。所以每个像素都得自己对，
+// 好处是不用引任何渲染库，坏处是抗锯齿要自己数——圆环那边用 2x2 采样。
 
-inline int MenuItems() { return S().pending_path.empty() ? 3 : 4; }
+/** 把源色按 a 叠到 (x,y)，结果 alpha 记 255。 */
+inline void BlendPixel(int x, int y, int r, int g, int b, float a) {
+  State& s = S();
+  if (s.vw <= 0 || s.vh <= 0) return;
+  if (x < 0 || y < 0 || x >= s.vw || y >= s.vh) return;
+  if (a <= 0.0f) return;
+  if (a > 1.0f) a = 1.0f;
+  const long stride = static_cast<long>(s.vw) * 4;
+  BYTE* p = static_cast<BYTE*>(s.work_bits) + static_cast<size_t>(y) * static_cast<size_t>(stride) +
+            static_cast<size_t>(x) * 4;
+  const float inv = 1.0f - a;
+  p[0] = static_cast<BYTE>(p[0] * inv + b * a);
+  p[1] = static_cast<BYTE>(p[1] * inv + g * a);
+  p[2] = static_cast<BYTE>(p[2] * inv + r * a);
+  p[3] = 255;
+}
+
+/**
+ * GDI 往 DIB 上写字时会把 alpha 通道一起写坏（全 0 → 字变成透明洞）。
+ * 所以每块文字画完，把它占的矩形补回不透明。
+ */
+inline void OpaqueRect(const RECT& r) {
+  State& s = S();
+  if (s.work_bits == nullptr) return;
+  const long stride = static_cast<long>(s.vw) * 4;
+  const int x0 = r.left < 0 ? 0 : r.left;
+  const int x1 = r.right > s.vw ? s.vw : r.right;
+  const int y0 = r.top < 0 ? 0 : r.top;
+  const int y1 = r.bottom > s.vh ? s.vh : r.bottom;
+  for (int y = y0; y < y1; ++y) {
+    BYTE* row = static_cast<BYTE*>(s.work_bits) + static_cast<size_t>(y) * static_cast<size_t>(stride);
+    for (int x = x0; x < x1; ++x) row[x * 4 + 3] = 255;
+  }
+}
+// ── 轮盘条目 ───────────────────────────────────────────────────────────────────
+// Tab 先进框选，框好了才摆这一圈——它问的是同一件事："这块拿去做什么"。
+// 顺序照最初构思：解构 / 继续框选 / 自动后续 / 直接收下。
+enum MenuKind { kMenuCancel = 0, kMenuCrop = 1, kMenuDeconstruct = 2, kMenuAccept = 3, kMenuAuto = 6 };
+
+inline int MenuItems() { return 4; }
 
 inline const wchar_t* MenuLabel(int index) {
-  static const wchar_t* level0[] = {L"框选", L"面板", L"取消"};
-  static const wchar_t* level1[] = {L"解构这块", L"重新框选", L"打开文件夹", L"取消"};
-  const int n = MenuItems();
-  if (index < 0 || index >= n) return L"";
-  return S().pending_path.empty() ? level0[index] : level1[index];
+  static const wchar_t* items[] = {L"解构这块", L"继续框选", L"自动后续", L"直接收下"};
+  if (index < 0 || index >= 4) return L"";
+  return items[index];
 }
 
 inline int MenuAction(int index) {
-  static const int level0[] = {kMenuCrop, kMenuPanel, kMenuCancel};
-  static const int level1[] = {kMenuDeconstruct, kMenuCrop, kMenuFolder, kMenuCancel};
-  const int n = MenuItems();
-  if (index < 0 || index >= n) return kMenuCancel;
-  return S().pending_path.empty() ? level0[index] : level1[index];
+  static const int actions[] = {kMenuDeconstruct, kMenuCrop, kMenuAuto, kMenuAccept};
+  if (index < 0 || index >= 4) return kMenuCancel;
+  return actions[index];
 }
-
-/** 0=框选 1=面板 2=解构 3=文件夹 4=叉 */
-inline int MenuIcon(int index) {
-  switch (MenuAction(index)) {
-    case kMenuCrop:
-      return 0;
-    case kMenuPanel:
-      return 1;
-    case kMenuDeconstruct:
-      return 2;
-    case kMenuFolder:
-      return 3;
-    default:
-      return 4;
-  }
-}
-
-/** 往画布上按 alpha 混一个像素；ULW_ALPHA 要的是逐像素 alpha，所以每次都写满 255。 */
-inline void BlendPixel(int x, int y, BYTE rr, BYTE gg, BYTE bb, float a) {
-  State& s = S();
-  if (x < 0 || y < 0 || x >= s.vw || y >= s.vh || a <= 0.0f) return;
-  if (a > 1.0f) a = 1.0f;
-  BYTE* px = static_cast<BYTE*>(s.work_bits) +
-             (static_cast<size_t>(y) * static_cast<size_t>(s.vw) + x) * 4;
-  px[0] = static_cast<BYTE>(px[0] * (1.0f - a) + bb * a);
-  px[1] = static_cast<BYTE>(px[1] * (1.0f - a) + gg * a);
-  px[2] = static_cast<BYTE>(px[2] * (1.0f - a) + rr * a);
-  px[3] = 255;
-}
-
-/** 把一块矩形的 alpha 拉满：GDI 写字不写 alpha，会在这块戳出透明的洞。 */
-inline void OpaqueRect(RECT r) {
-  State& s = S();
-  for (int y = r.top; y < r.bottom; ++y) {
-    if (y < 0 || y >= s.vh) continue;
-    auto* row = static_cast<BYTE*>(s.work_bits) + static_cast<size_t>(y) * static_cast<size_t>(s.vw) * 4;
-    for (int x = r.left; x < r.right; ++x) {
-      if (x < 0 || x >= s.vw) continue;
-      row[x * 4 + 3] = 255;
-    }
-  }
-}
-
 inline float SegDist(float px, float py, float ax, float ay, float bx, float by) {
   const float vx = bx - ax, vy = by - ay;
   const float wx = px - ax, wy = py - ay;
@@ -400,20 +391,17 @@ inline void DrawWheel() {
   const float step = 360.0f / static_cast<float>(n);
   const float inner = 44.0f * sc * grow;
   const float outer = 104.0f * sc * grow;
-  const float shadow_w = 30.0f * sc * grow;
-  const float ext = outer + shadow_w;
   const float cx = static_cast<float>(s.wheel_cx);
   const float cy = static_cast<float>(s.wheel_cy);
 
-  const int x0 = static_cast<int>(cx - ext) - 2;
-  const int x1 = static_cast<int>(cx + ext) + 2;
-  const int y0 = static_cast<int>(cy - ext) - 2;
-  const int y1 = static_cast<int>(cy + ext) + 2;
+  const int x0 = static_cast<int>(cx - outer) - 2;
+  const int x1 = static_cast<int>(cx + outer) + 2;
+  const int y0 = static_cast<int>(cy - outer) - 2;
+  const int y1 = static_cast<int>(cy + outer) + 2;
 
   for (int y = y0; y <= y1; ++y) {
     for (int x = x0; x <= x1; ++x) {
-      float a_shadow = 0, a_disc = 0, a_hot = 0, a_sep = 0;
-      float a_ring_o = 0, a_ring_i = 0, a_arc = 0, a_hub = 0;
+      float a_disc = 0, a_hot = 0, a_sep = 0, a_ring_o = 0, a_ring_i = 0, a_arc = 0, a_hub = 0;
       int total = 0;
       for (int sy = 0; sy < 2; ++sy) {
         for (int sx = 0; sx < 2; ++sx) {
@@ -421,15 +409,7 @@ inline void DrawWheel() {
           const float dy = static_cast<float>(y) + (sy + 0.5f) * 0.5f - cy;
           const float d = std::sqrt(dx * dx + dy * dy);
           ++total;
-          if (d > ext) continue;
-
-          if (d > outer) {
-            const float k = (d - outer) / shadow_w;
-            const float off = (dy - 3.0f * sc) / shadow_w;
-            const float bias = off > 0.0f ? 1.0f : 0.55f;
-            a_shadow += 0.42f * bias * (1.0f - k) * (1.0f - k);
-            continue;
-          }
+          if (d > outer) continue;
 
           if (d < inner) {
             a_hub += 1.0f;
@@ -438,7 +418,6 @@ inline void DrawWheel() {
           }
 
           a_disc += 1.0f;
-          // 从正上方顺时针量角度，第 0 瓣居中在正上方
           float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / pi);
           deg += 90.0f;
           while (deg < 0.0f) deg += 360.0f;
@@ -448,12 +427,10 @@ inline void DrawWheel() {
           if (sec < 0) sec = 0;
           if (s.menu_index >= 0 && sec == s.menu_index) a_hot += 1.0f;
 
-          // 分界线：角向距离换算成像素宽度，远处同样 1px 粗
           float rel = std::fmod(deg + step * 0.5f, step);
           if (rel < 0.0f) rel += step;
           const float da = rel < step * 0.5f ? rel : step - rel;
-          const float ang_px = da * pi / 180.0f * d;
-          if (ang_px < 0.55f * sc) a_sep += 1.0f;
+          if (da * pi / 180.0f * d < 0.55f * sc) a_sep += 1.0f;
 
           if (std::fabs(d - outer) < 0.60f * sc) a_ring_o += 1.0f;
           if (s.menu_index >= 0 && sec == s.menu_index && d > outer - 2.2f * sc) a_arc += 1.0f;
@@ -462,7 +439,6 @@ inline void DrawWheel() {
       if (total == 0) continue;
       const float inv = 1.0f / static_cast<float>(total);
 
-      if (a_shadow > 0.0f) BlendPixel(x, y, 0, 0, 0, a_shadow * inv);
       if (a_disc > 0.0f) {
         const float g = (static_cast<float>(y) - (cy - outer)) / (2.0f * outer);
         const float k = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
@@ -479,36 +455,43 @@ inline void DrawWheel() {
     }
   }
 
-  // 每一瓣只放图标，名字留给中心——扇形里塞中文会挤成一团，lolPing 也是这么办的
+  HDC dc = s.work;
+  SetBkMode(dc, TRANSPARENT);
+  HFONT font = CreateFontW(-static_cast<int>(13.0f * sc), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                           L"Microsoft YaHei UI");
+  HFONT font_hot = CreateFontW(-static_cast<int>(14.0f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+  HGDIOBJ old_font = SelectObject(dc, font);
+
+  // 名字直接写在每一瓣的中间半径上，横排——四个词而已，转着读反而慢
   const float label_r = (inner + outer) * 0.5f;
   for (int i = 0; i < n; ++i) {
     const float mid = -90.0f + static_cast<float>(i) * step;
     const float rad = mid * pi / 180.0f;
-    const float ix = cx + label_r * std::cos(rad);
-    const float iy = cy + label_r * std::sin(rad);
+    const int lx = static_cast<int>(cx + label_r * std::cos(rad));
+    const int ly = static_cast<int>(cy + label_r * std::sin(rad));
+    const int half_w = static_cast<int>(48.0f * sc);
+    RECT r = {lx - half_w, ly - static_cast<int>(11.0f * sc), lx + half_w, ly + static_cast<int>(11.0f * sc)};
     const bool is_hot = (i == s.menu_index);
-    const float size = (is_hot ? 27.0f : 23.0f) * sc * grow;
-    if (is_hot) {
-      StampIcon(MenuIcon(i), ix, iy, size, 255, 255, 255);
-    } else {
-      StampIcon(MenuIcon(i), ix, iy, size, 206, 213, 230);
-    }
+    SelectObject(dc, is_hot ? font_hot : font);
+    SetTextColor(dc, is_hot ? RGB(255, 255, 255) : RGB(176, 182, 196));
+    DrawTextW(dc, MenuLabel(i), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    OpaqueRect(r);
   }
 
-  HDC dc = s.work;
-  SetBkMode(dc, TRANSPARENT);
-  HFONT font_hub = CreateFontW(-static_cast<int>(14.5f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  HGDIOBJ old_font = SelectObject(dc, font_hub);
+  SelectObject(dc, font_hot);
   SetTextColor(dc, s.menu_index >= 0 ? RGB(255, 255, 255) : RGB(158, 164, 178));
   RECT hub_r = {static_cast<int>(cx - inner * 0.92f), static_cast<int>(cy - 13.0f * sc),
                 static_cast<int>(cx + inner * 0.92f), static_cast<int>(cy + 13.0f * sc)};
   const wchar_t* hub_text = s.menu_index >= 0 ? MenuLabel(s.menu_index) : L"取消";
   DrawTextW(dc, hub_text, -1, &hub_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   OpaqueRect(hub_r);
+
   SelectObject(dc, old_font);
-  DeleteObject(font_hub);
+  DeleteObject(font);
+  DeleteObject(font_hot);
 }
 inline void Compose() {
   State& s = S();
@@ -665,29 +648,25 @@ inline void Teardown(int result) {
 inline void ActivateMenu(int index) {
   State& s = S();
   switch (MenuAction(index)) {
-    case kMenuCrop:  // 开始/重新拖框
+    case kMenuCrop:  // 回去重框：只清选区，图还在
       s.stage = 0;
       s.dragging = false;
       s.selection = {0, 0, 0, 0};
       s.wheel_anim = false;
       Paint();
       break;
-    case kMenuDeconstruct:  // 交给宿主拆任务树
-      s.pending_action = 1;
+    case kMenuDeconstruct:  // 交给宿主拆任务树（宿主那侧还没接上）
+      s.pending_action = 2;
       Teardown(1);
       break;
-    case kMenuPanel:  // 收起截图，让宿主把长条面板展开
-      Teardown(2);
+    case kMenuAuto:  // 自动后续：同样是宿主的活，先占位
+      s.pending_action = 6;
+      Teardown(1);
       break;
-    case kMenuFolder: {  // 直接把截图所在目录打开，人自己去看
-      const std::wstring dir = CapturesDir();
-      if (!dir.empty()) {
-        ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-      }
-      PrepareWheelAt(s.wheel_cx, s.wheel_cy);
-      Paint();
+    case kMenuAccept:  // 直接收下：只留文件
+      s.pending_action = 3;
+      Teardown(1);
       break;
-    }
     default:
       s.dragging = false;
       Teardown(0);
@@ -773,24 +752,22 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       if (wparam == 0x71) {  // Esc：随时收摊
         s.dragging = false;
         Teardown(0);
-      } else if (s.stage == 1 && (wparam == 0x73 || wparam == 0x74)) {  // Enter / 空格：落子
-        if (s.menu_index >= 0) {
-          s.pending_action = s.menu_index == 1 ? 1 : 2;
-          if (s.menu_index == 0) {
-            s.stage = 0;
-            s.dragging = false;
-            s.selection = {0, 0, 0, 0};
-            s.wheel_anim = false;
-            Paint();
-          } else if (s.menu_index == 3) {
-            Teardown(0);
-          } else {
-            Finish();
-          }
+      } else if (s.stage == 1) {
+        // 菜单开着：Enter / 空格 / Tab 都是"就它了"
+        if ((wparam == 0x73 || wparam == 0x74 || wparam == 0x72) && s.menu_index >= 0) {
+          ActivateMenu(s.menu_index);
+        }
+      } else {
+        // 还在框选：Tab / Enter / 空格 = "框好了，下一步"；没框就当作取消
+        const bool ready = (s.selection.right - s.selection.left) >= kMinSide &&
+                           (s.selection.bottom - s.selection.top) >= kMinSide;
+        if (ready) {
+          Finish();
+        } else if (wparam == 0x72) {
+          Teardown(0);
         }
       }
-      return 0;
-    case WM_TIMER:
+      return 0;    case WM_TIMER:
       if (wparam == kWheelTimerId) {
         // 张开动画：走完就停表，别一直空转
         s.wheel_t += 0.09f;
