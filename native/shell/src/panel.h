@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "doc.h"
@@ -24,20 +26,28 @@ struct PanelFormats {
 
 namespace ui {
 
-constexpr float kPanelWidth = 760.0f;
-constexpr float kPanelHeight = 396.0f;
-constexpr float kPad = 20.0f;
-constexpr float kHeaderH = 50.0f;
-constexpr float kFooterH = 44.0f;
-constexpr float kCardW = 132.0f;
-constexpr float kCardH = 76.0f;
-constexpr float kCardGap = 10.0f;
-constexpr float kRadius = 14.0f;
+constexpr float kPanelWidth = 660.0f;
+constexpr float kPanelHeight = 318.0f;
+constexpr float kPad = 18.0f;
+constexpr float kHeaderH = 46.0f;
+constexpr float kFooterH = 40.0f;
+constexpr float kCardW = 228.0f;
+constexpr float kCardH = 92.0f;
+// 卡片是叠起来的：层与层之间只露出这么多，不是并排
+constexpr float kStackStep = 26.0f;
+constexpr int kStackDepth = 3;
+constexpr float kRadius = 12.0f;
 
 constexpr UINT32 kText = 0xFFF5F5F7;
 constexpr UINT32 kTextDim = 0xFF9A9AA0;
 constexpr UINT32 kAccent = 0xFF0A84FF;
 constexpr UINT32 kSurface = 0xFF1C1C20;
+
+/** 按比例压暗一个颜色（含 alpha）——完成的任务靠这个往前退。 */
+inline UINT32 Fade(UINT32 argb, float factor) {
+  const UINT32 alpha = static_cast<UINT32>(static_cast<float>((argb >> 24) & 0xFF) * factor);
+  return (alpha << 24) | (argb & 0x00FFFFFFu);
+}
 
 inline D2D1_COLOR_F Color(UINT32 argb, float alpha = -1.0f) {
   return D2D1::ColorF(static_cast<float>((argb >> 16) & 0xFF) / 255.0f,
@@ -79,8 +89,8 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   const float h = kPanelHeight * scale;
 
   // 面板下面的阴影：分层叠出柔边（D2D 没有高斯模糊）
-  for (int i = 6; i >= 1; --i) {
-    const float spread = static_cast<float>(i) * 2.2f * scale;
+  for (int i = 5; i >= 1; --i) {
+    const float spread = static_cast<float>(i) * 1.6f * scale;
     fmt.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.02f));
     target->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(spread, spread * 1.4f, w - spread, h - spread * 0.6f), 22.0f * scale,
@@ -121,7 +131,7 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   // ── 主体 ─────────────────────────────────────────────
   const float body_top = (kPad + kHeaderH + 14.0f) * scale;
   const float body_bottom = h - (kPad + kFooterH) * scale;
-  const float split = w * 0.58f;
+  const float split = w * 0.62f;
   const float card_cy = (body_top + body_bottom) / 2.0f;
 
   int center = model.current >= 0 ? model.current : 0;
@@ -133,53 +143,71 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
          D2D1::RectF(kPad * scale, card_cy, split, card_cy + 40.0f * scale), fmt.brush, kTextDim);
   } else {
     const int count = static_cast<int>(model.items.size());
-    const int center = focus >= 0 && focus < count ? focus : (model.current >= 0 ? model.current : 0);
-    // 卡片带只在自己的列里画：相邻卡露半张是设计，但绝不能压进右边的详情栏
+    const int current = model.current >= 0 ? model.current : 0;
+    const int focus_index = focus >= 0 && focus < count ? focus : current;
+    const float cx = split / 2.0f;
+
     target->PushAxisAlignedClip(
-        D2D1::RectF(kPad * scale, body_top - 8.0f * scale, split - 8.0f * scale, body_bottom + 8.0f * scale),
+        D2D1::RectF(kPad * scale, body_top - 10.0f * scale, split - 10.0f * scale, body_bottom + 10.0f * scale),
         D2D1_ANTIALIAS_MODE_ALIASED);
-    // 只画光标附近三张：再远的看不见，画了只是浪费
-    for (int offset = -1; offset <= 1; ++offset) {
-      const int index = center + offset;
-      if (index < 0 || index >= count) continue;
-      const NodeView& node = model.items[static_cast<size_t>(index)];
-      const bool selected = index == center;
-      // split 已经是像素，别再乘 scale —— 之前这里乘了两次，卡片被推到右边缘
-      const float cx = split / 2.0f + static_cast<float>(offset) * (kCardW + kCardGap) * scale;
-      const D2D1_RECT_F card = CardRect(cx, card_cy, selected, scale);
 
-      FillRound(target, fmt.brush, card, kRadius * scale, selected ? 0x2EFFFFFF : 0x10FFFFFF);
-      // 选中框跟着光标走，和"进行中"这个状态分开：状态说的是任务，框说的是你现在指着谁
-      if (selected) StrokeRound(target, fmt.brush, card, kRadius * scale, kAccent);
-
-      const D2D1_RECT_F pad_rect = D2D1::RectF(card.left + 12.0f * scale, card.top + 10.0f * scale,
-                                               card.right - 12.0f * scale, card.top + 30.0f * scale);
-      const wchar_t* label = L"待进行";
-      UINT32 label_color = kTextDim;
-      if (node.status == "done") {
-        label = L"已完成";
-      } else if (node.status == "active") {
-        label = L"进行中";
-        label_color = kAccent;
-      } else if (node.status == "skipped") {
-        label = L"已跳过";
+    // 一叠卡片：当前这张在最上面、百分百显示；
+    // 左右两侧是叠在它下面的同尺寸卡，只露出一条边，而且越远越淡。
+    // 这样眼睛只会被"现在这件事"占住，两侧仍然提示"前面做过什么、后面还有什么"。
+    for (int step = kStackDepth; step >= 1; --step) {
+      for (int side = -1; side <= 1; side += 2) {
+        const int index = current + side * step;
+        if (index < 0 || index >= count) continue;
+        const D2D1_RECT_F card = D2D1::RectF(cx - (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
+                                             card_cy - (kCardH / 2.0f) * scale,
+                                             cx + (kCardW / 2.0f) * scale + static_cast<float>(side * step) * kStackStep * scale,
+                                             card_cy + (kCardH / 2.0f) * scale);
+        const float fade = 0.30f - 0.05f * static_cast<float>(step - 1);
+        FillRound(target, fmt.brush, card, kRadius * scale, Fade(0x12FFFFFF, fade));
       }
-      Text(target, label, fmt.meta, pad_rect, fmt.brush, label_color);
+    }
 
-      const D2D1_RECT_F title_rect = D2D1::RectF(card.left + 12.0f * scale, card.top + 30.0f * scale,
-                                                 card.right - 12.0f * scale, card.bottom - 8.0f * scale);
-      Text(target, node.title, fmt.body, title_rect, fmt.brush,
-           node.status == "done" ? kTextDim : kText);
+    // 最上面这张：当前任务
+    const D2D1_RECT_F card = D2D1::RectF(cx - (kCardW / 2.0f) * scale, card_cy - (kCardH / 2.0f) * scale,
+                                         cx + (kCardW / 2.0f) * scale, card_cy + (kCardH / 2.0f) * scale);
+    FillRound(target, fmt.brush, card, kRadius * scale, 0x24FFFFFF);
+    StrokeRound(target, fmt.brush, card, kRadius * scale, kAccent);
+
+    const NodeView& node = model.items[static_cast<size_t>(current)];
+    Text(target, L"进行中", fmt.meta,
+         D2D1::RectF(card.left + 14.0f * scale, card.top + 10.0f * scale, card.right - 14.0f * scale,
+                     card.top + 30.0f * scale),
+         fmt.brush, kAccent);
+    Text(target, node.title, fmt.title,
+         D2D1::RectF(card.left + 14.0f * scale, card.top + 32.0f * scale, card.right - 14.0f * scale,
+                     card.bottom - 10.0f * scale),
+         fmt.brush, kText);
+
+    // 光标落在侧边卡上时，在它露出的那条边上加一点高亮，提示"你现在指着它"
+    if (focus_index != current) {
+      const int side = focus_index > current ? 1 : -1;
+      const int distance = focus_index > current ? focus_index - current : current - focus_index;
+      const int step = (distance < kStackDepth) ? distance : kStackDepth;
+      const int index = current + side * step;
+      if (index >= 0 && index < count) {
+        const float edge = cx + static_cast<float>(side) * (kCardW / 2.0f) * scale +
+                           static_cast<float>(side * step) * kStackStep * scale;
+        const float x = side > 0 ? edge - 3.0f * scale : edge;
+        FillRound(target, fmt.brush,
+                  D2D1::RectF(x, card_cy - 18.0f * scale, x + 3.0f * scale, card_cy + 18.0f * scale), 1.5f * scale,
+                  kAccent);
+      }
     }
     target->PopAxisAlignedClip();
   }
-
   // 竖向分隔线
   FillRound(target, fmt.brush,
             D2D1::RectF(split, body_top, split + 0.5f * scale, body_bottom), 0.0f, 0x14FFFFFF);
 
   // ── 右侧详情 ──────────────────────────────────────────
-  const int detail_index = center >= 0 && center < static_cast<int>(model.items.size()) ? center : -1;
+  const int detail_index = focus >= 0 && focus < static_cast<int>(model.items.size())
+                             ? focus
+                             : (model.current >= 0 && model.current < static_cast<int>(model.items.size()) ? model.current : -1);
   const float dx = split + 18.0f * scale;
   if (detail_index >= 0) {
     const NodeView& node = model.items[static_cast<size_t>(detail_index)];

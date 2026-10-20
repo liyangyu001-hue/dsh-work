@@ -444,7 +444,7 @@ void PositionPanel() {
   const int px_h = static_cast<int>(dshwork::ui::kPanelHeight * g_dpiScale);
   const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
   // 小条窗口高 96，药丸占中间 44 左右；62 让面板上沿正好接在药丸下缘
-  const int y = info.rcWork.top + static_cast<int>(78 * g_dpiScale);
+  const int y = info.rcWork.top + static_cast<int>(82 * g_dpiScale);
   SetWindowPos(g_panel, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
 }
 
