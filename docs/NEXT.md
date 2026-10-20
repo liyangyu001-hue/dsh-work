@@ -22,7 +22,7 @@
 - 已完成：P1-1 全局热键 ✅ `4870b3f` ｜ P1-2 截屏框选 ✅ ｜ P1-2b 面板 ✅ `4a0877e` ｜ **P1-3 视觉识别 ✅ `7e53a78`（真机待验）** ｜ P1-2c 面板输入模型 ✅（不抢焦点 + 打开期间独占按键）
 - 上一轮收工：按 lolPing 的原理重做面板的输入方式——面板 `focusable:false` + `showInactive()`，键盘靠"打开期间用 globalShortcut 独占 Enter/Backspace/Tab/Esc/←/→"，关面板立刻释放；实测前台一直是 Edge，按 Enter 照样推进任务。
 - 下一轮从：**切片三 · 原生框选覆盖层** 开始
-- 最近一次远端 sha：`c66753a`
+- 最近一次远端 sha：`5f6b72b`（每推一次都会变，别当常量；对账用本地 `git rev-parse HEAD^{tree}` 与远端提交的 `.tree.sha` 比对）
 
 ## 进度
 
