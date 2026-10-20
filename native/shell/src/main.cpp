@@ -176,7 +176,7 @@ dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
 IDWriteTextFormat* g_formatBody = nullptr;
 IDWriteTextFormat* g_formatPanelMeta = nullptr;
-HHOOK g_keyboard_hook = nullptr;
+constexpr int kArmedKeyIdBase = 0x60;  // 0x60..0x66 给面板按键用
 
 constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
 constexpr UINT kMsgTray = WM_APP + 3;
@@ -190,7 +190,8 @@ void DispatchKey(int action);
 void TogglePanel();
 void UpdateHover();
 void ShowTrayMenu();
-LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam);
+void ArmPanelKeys();
+void DisarmPanelKeys();
 
 void LogToFile(const std::string& message) {
   wchar_t profile[MAX_PATH] = {};
@@ -542,7 +543,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       DispatchKey(static_cast<int>(wparam));
       return 0;
     case WM_HOTKEY:
-      if (wparam == kHotkeyId) TogglePanel();
+      if (wparam == kHotkeyId) {
+        TogglePanel();
+      } else if (wparam >= static_cast<WPARAM>(kArmedKeyIdBase)) {
+        // 动作号和 id 一一对应，差值就是面板认的那个动作
+        DispatchKey(static_cast<int>(wparam) - kArmedKeyIdBase);
+      }
       return 0;
     case WM_TIMER:
       if (wparam == kHoverTimerId) {
@@ -590,10 +596,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       data.hWnd = g_window;
       data.uID = kTrayIconId;
       Shell_NotifyIconW(NIM_DELETE, &data);
-      if (g_keyboard_hook != nullptr) {
-        UnhookWindowsHookEx(g_keyboard_hook);
-        g_keyboard_hook = nullptr;
-      }
+      DisarmPanelKeys();
       UnregisterHotKey(g_window, kHotkeyId);
       PostQuitMessage(0);
       return 0;
@@ -764,10 +767,7 @@ void ShowPanel() {
   // 每次显示都重申置顶：Windows 会在一段时间后把置顶窗口降到普通层（lolPing #70）
   SetWindowPos(g_panel, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   g_panel_open = true;
-  if (g_keyboard_hook == nullptr) {
-    g_keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, g_instance, 0);
-    if (g_keyboard_hook == nullptr) LogToFile("键盘钩子安装失败，面板将收不到按键");
-  }
+  ArmPanelKeys();
   RepaintPanel();
   RECT panel_rect = {};
   GetWindowRect(g_panel, &panel_rect);
@@ -780,10 +780,7 @@ void HidePanel() {
   if (g_panel == nullptr || !g_panel_open) return;
   ShowWindow(g_panel, SW_HIDE);
   g_panel_open = false;
-  if (g_keyboard_hook != nullptr) {
-    UnhookWindowsHookEx(g_keyboard_hook);
-    g_keyboard_hook = nullptr;
-  }
+  DisarmPanelKeys();
   LogToFile("面板收起");
 }
 
@@ -941,38 +938,55 @@ void DispatchKey(int action) {
     case 5:
       MoveFocus(1);
       break;
+    case 6:  // Tab：交给框选（切片三接上之前，只做日志）
+      LogToFile("面板按键 Tab → 框选（待接）");
+      break;
     default:
       break;
   }
 }
 
-/** 0 表示不拦，其余是动作号。 */
-int ActionOf(UINT vk) {
-  switch (vk) {
-    case VK_RETURN: return 1;
-    case VK_BACK: return 2;
-    case VK_ESCAPE: return 3;
-    case VK_LEFT: return 4;
-    case VK_RIGHT: return 5;
-    default: return 0;
-  }
-}
+
 
 /**
- * 低级键盘钩子：只在这几个键、且面板开着时把它们吃掉。
- * 这是 lolPing 的做法——面板窗口 WS_EX_NOACTIVATE 收不到键盘，
- * 与其抢焦点（会打断用户正在打的字），不如在系统层截走并立刻转给面板。
+ * 面板按键：用 RegisterHotKey 临时独占，而不是全局低级键盘钩子。
+ *
+ * lolPing 走的是 WH_KEYBOARD_LL——那是"吞掉手势"最贴切的做法，但它的行为
+ * 和键盘记录器一模一样，卡巴斯基会把整个 exe 拦掉（实测：读都读不了）。
+ * 面板本来就只在鼠标停上去那几秒存在，用 RegisterHotKey 独占同样几个键
+ * 代价更小：申请的是"这个键归我"，不是"所有键都给我看一眼"。
+ *
+ * 代价说清楚：面板开着的时候，这几个键在全系统都被我们接管（比如你在别的
+ * 窗口按 Enter 也会进面板）。所以面板一收，立刻全部释放。
  */
-LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
-  if (code == HC_ACTION && g_panel_open) {
-    const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
-    const int action = ActionOf(key->vkCode);
-    if (action != 0) {
-      if (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) PostMessageW(g_window, kMsgKey, action, 0);
-      return 1;  // 按下与抬起都吃掉，避免下层程序收到半个手势
+struct ArmedKey {
+  UINT vk;
+  int action;
+};
+constexpr ArmedKey kArmedKeys[] = {
+    {VK_RETURN, 1}, {VK_BACK, 2}, {VK_ESCAPE, 3}, {VK_LEFT, 4}, {VK_RIGHT, 5}, {VK_TAB, 6},
+};
+bool g_keys_armed = false;
+
+void ArmPanelKeys() {
+  if (g_keys_armed) return;
+  int ok = 0;
+  for (const ArmedKey& key : kArmedKeys) {
+    // MOD_NOREPEAT 关掉连发：按住 Enter 不该一路推进到底
+    if (RegisterHotKey(g_window, kArmedKeyIdBase + key.action, MOD_NOREPEAT, key.vk)) {
+      ++ok;
+    } else {
+      LogToFile("面板按键注册失败 vk=" + std::to_string(key.vk));
     }
   }
-  return CallNextHookEx(g_keyboard_hook, code, wparam, lparam);
+  g_keys_armed = true;
+  LogToFile("面板按键已独占 " + std::to_string(ok) + "/6");
+}
+
+void DisarmPanelKeys() {
+  if (!g_keys_armed) return;
+  for (const ArmedKey& key : kArmedKeys) UnregisterHotKey(g_window, kArmedKeyIdBase + key.action);
+  g_keys_armed = false;
 }
 }  // namespace
 

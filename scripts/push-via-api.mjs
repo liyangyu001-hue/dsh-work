@@ -14,6 +14,8 @@ if (!REMOTE_SHA) {
 }
 const CWD = process.cwd();
 
+// 不用 keep-alive：Node 24 在退出阶段回收 undici 连接池会触发 libuv 断言，
+// 表现为"活干完了但进程崩"，而 Connection: close 让每个请求自成一体。
 const api = async (path, init = {}) => {
   const res = await fetch(`https://api.github.com${path}`, {
     ...init,
@@ -22,6 +24,7 @@ const api = async (path, init = {}) => {
       Accept: "application/vnd.github+json",
       "User-Agent": "dsh-work-push",
       "Content-Type": "application/json",
+      Connection: "close",
       ...(init.headers ?? {}),
     },
   });
@@ -110,3 +113,4 @@ await api(`/repos/${OWNER}/${REPO}/git/refs/heads/main`, {
   body: JSON.stringify({ sha: parentSha, force: false }),
 });
 console.log(`\n远端 main 已指向 ${parentSha}`);
+process.exitCode = 0;
