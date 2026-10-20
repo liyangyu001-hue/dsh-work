@@ -222,6 +222,9 @@ constexpr int kArmedKeyIdBase = 0x60;  // 0x60..0x66 给面板按键用
 constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
 constexpr UINT kMsgTray = WM_APP + 3;
 constexpr UINT kHotkeyId = 0x51;
+constexpr UINT kTabHotkeyId = 0x70;   // 悬停期独占的 Tab（面板打开时用另一套 id）
+bool g_hover_tab_armed = false;
+bool g_keys_armed = false;  // 面板打开期间那 6 个键被独占着
 constexpr int kTrayIconId = 1;
 
 // 这几个函数在窗口过程里就要用，定义在下面，先声明
@@ -236,6 +239,8 @@ void Repaint();
 void StartRegionCapture();
 void ArmPanelKeys();
 void DisarmPanelKeys();
+void ArmHoverTab();
+void DisarmHoverTab();
 
 void LogToFile(const std::string& message) {
   wchar_t profile[MAX_PATH] = {};
@@ -599,6 +604,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_HOTKEY:
       if (wparam == kHotkeyId) {
         TogglePanel();
+      } else if (wparam == kTabHotkeyId) {
+        // 悬停期按 Tab：直接进框选（不经过面板，少一次点击）
+        StartRegionCapture();
       } else if (wparam >= static_cast<WPARAM>(kArmedKeyIdBase)) {
         // 动作号和 id 一一对应，差值就是面板认的那个动作
         DispatchKey(static_cast<int>(wparam) - kArmedKeyIdBase);
@@ -1027,6 +1035,9 @@ void UpdateHover() {
 
   if (hovered) {
     if (!g_panel_open) {
+      // 指针一落到小条上，Tab 就属于我们——这是 lolPing 的手势思路：
+      // 只在"手已经搭在上面"的那几秒吞键，不去抢走全系统的 Tab。
+      ArmHoverTab();
       // 先弹一下（预备），弹完再展开（跟随动作）——
       // 两件事分开做，才有"先有反应、再出东西"的层次。
       StartSquash();
@@ -1036,6 +1047,7 @@ void UpdateHover() {
     }
   } else {
     // 还没弹完就走了：把待开的那一下撤掉，别让面板自己跳出来
+    DisarmHoverTab();
     KillTimer(g_window, kOpenTimerId);
     StartChipFade(1.0f);
     SetTimer(g_window, kAnimTimerId, 16, nullptr);
@@ -1134,6 +1146,26 @@ int HitTestDot(int px, int py) {
   return -1;
 }
 
+/** 悬停期独占 Tab：手一搭上小条，Tab 就是"框选"；手一离开立刻还回去。
+ *
+ * 为什么不常驻：Tab 是输入框、终端、表格的公共键，常驻等于把整个系统的
+ * 键盘导航弄坏。lolPing 也是同一个思路——只在自己的手势期间接管。
+ */
+void ArmHoverTab() {
+  if (g_hover_tab_armed || g_keys_armed) return;
+  if (!RegisterHotKey(g_window, kTabHotkeyId, MOD_NOREPEAT, VK_TAB)) {
+    LogToFile("悬停 Tab 注册失败");
+    return;
+  }
+  g_hover_tab_armed = true;
+}
+
+void DisarmHoverTab() {
+  if (!g_hover_tab_armed) return;
+  UnregisterHotKey(g_window, kTabHotkeyId);
+  g_hover_tab_armed = false;
+}
+
 /** 托盘：右键菜单里至少要有"退出"，否则这进程只能去任务管理器杀。 */
 void CreateTrayIcon() {
   NOTIFYICONDATAW data = {};
@@ -1219,10 +1251,10 @@ struct ArmedKey {
 constexpr ArmedKey kArmedKeys[] = {
     {VK_RETURN, 1}, {VK_BACK, 2}, {VK_ESCAPE, 3}, {VK_LEFT, 4}, {VK_RIGHT, 5}, {VK_TAB, 6},
 };
-bool g_keys_armed = false;
-
 void ArmPanelKeys() {
   if (g_keys_armed) return;
+  // 面板自己会独占 Tab，先把"悬停期独占"的那个撤掉，免得同一个键注册两次
+  DisarmHoverTab();
   int ok = 0;
   for (const ArmedKey& key : kArmedKeys) {
     // MOD_NOREPEAT 关掉连发：按住 Enter 不该一路推进到底
