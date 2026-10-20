@@ -2,11 +2,16 @@
 //
 // 为什么不放一个方盒子：这个面板是"随时瞟一眼"的东西，不是工作窗口。
 // 方盒子会压住正在看的内容，而长条只占顶部一条带，视线不用离开原来的位置。
-// 参考 BrimDeck（Windows 灵动岛）：收起是胶囊，展开是一条与其同中心的宽面板，
-// 展开过程是同一个表面在变宽变高，不是两个窗口替换。
 //
-// 一列任务平铺在长条里，用**透明度**区分远近：当前这张完全不透明，
-// 越往外越淡。不用边框、不用色块——视线先落在最实的那个，其余自然退后。
+// 参考 BrimDeck（Windows 灵动岛）：收起是胶囊，展开是一条与其同中心的宽面板，
+// 展开过程是同一个表面在变宽变高，不是两个窗口替换。它的收起态也是一排
+// 圆环而不是一排卡片——这里照搬这个判断：
+//
+// **任务用点表示，不用卡片。**
+// 卡片有边、有底、有文字，每多一张就多一种"细节要对齐"的负担；
+// 而这一层想说的只有"现在在第几件、前后还有几件"。点没有边距、没有字号、
+// 没有对齐问题，天然统一。文字只在需要的时候出现一次：鼠标指到哪个点，
+// 右边就写哪个任务。
 #pragma once
 
 #include <algorithm>
@@ -26,19 +31,19 @@ struct PanelFormats {
 namespace ui {
 
 // ── 尺寸（DIP）────────────────────────────────────────────
-constexpr float kStripHeight = 132.0f;  // 长条高度
-constexpr float kPadX = 20.0f;          // 左右内边距
-constexpr float kLeftBlock = 240.0f;    // 左侧：工作区标题 + 进度
-constexpr float kRightBlock = 116.0f;   // 右侧：连接状态 + 键位提示
-constexpr float kGapLeft = 18.0f;
-constexpr float kGapRight = 12.0f;
+constexpr float kStripHeight = 132.0f;
+constexpr float kPadX = 22.0f;
+constexpr float kLeftBlock = 210.0f;    // 左侧：工作区标题 + 进度
+constexpr float kDetailBlock = 430.0f;  // 右侧：当前/指到的那件事
+constexpr float kRightBlock = 92.0f;    // 最右：连接状态与键位
+constexpr float kGapLeft = 20.0f;
+constexpr float kGapRight = 18.0f;
 
-constexpr float kCardW = 196.0f;
-constexpr float kCardH = 84.0f;
-constexpr float kCardGap = 12.0f;
-constexpr float kCardRadius = 16.0f;
+constexpr float kDotStep = 26.0f;      // 点与点的间距
+constexpr float kDotRadius = 4.5f;     // 点的大小
+constexpr float kDotRadiusNow = 5.5f;  // 当前任务那颗点稍大
 
-constexpr float kMinWidth = 720.0f;
+constexpr float kMinWidth = 940.0f;
 constexpr float kMaxWidth = 1560.0f;
 
 constexpr UINT32 kText = 0xFFF5F5F7;
@@ -46,26 +51,28 @@ constexpr UINT32 kTextDim = 0xFF9A9AA0;
 constexpr UINT32 kAccent = 0xFF0A84FF;
 constexpr UINT32 kWarn = 0xFFFF453A;
 
-/** 这条长条能排下几张卡。任务更多时只画当前任务附近的一段。 */
-inline int VisibleCards(float dip_w) {
-  const float usable = dip_w - (kPadX * 2 + kLeftBlock + kGapLeft + kGapRight + kRightBlock);
-  int n = static_cast<int>((usable + kCardGap) / (kCardW + kCardGap));
+/** 这条长条能排下几颗点。任务更多时只画当前任务附近的一段。 */
+inline int VisibleDots(float dip_w) {
+  const float usable =
+      dip_w - (kPadX * 2 + kLeftBlock + kGapLeft + kGapRight + kDetailBlock + kRightBlock);
+  int n = static_cast<int>(usable / kDotStep);
   if (n < 1) n = 1;
   return n;
 }
 
-/** 窗口里第一张卡的序号：让当前任务尽量居中。 */
-inline int CardStart(int count, int current, int visible) {
+/** 窗口里第一颗点的序号：让当前任务尽量居中。 */
+inline int DotStart(int count, int current, int visible) {
   int start = current - visible / 2;
   if (start < 0) start = 0;
   if (start + visible > count) start = count - visible;
   return start < 0 ? 0 : start;
 }
-/** 长条宽度：让所有任务卡刚好排下，两侧留出信息区。 */
-inline float StripWidth(int card_count) {
-  const int n = card_count > 0 ? card_count : 1;
-  const float cards = static_cast<float>(n) * kCardW + static_cast<float>(n - 1) * kCardGap;
-  const float w = kPadX * 2 + kLeftBlock + kGapLeft + cards + kGapRight + kRightBlock;
+
+/** 长条宽度：把所有点排下，再留出两侧的信息区。 */
+inline float StripWidth(int count) {
+  const int n = count > 0 ? count : 1;
+  const float dots = static_cast<float>(n) * kDotStep;
+  const float w = kPadX * 2 + kLeftBlock + kGapLeft + dots + kGapRight + kDetailBlock + kRightBlock;
   if (w < kMinWidth) return kMinWidth;
   if (w > kMaxWidth) return kMaxWidth;
   return w;
@@ -106,7 +113,7 @@ inline void Text(ID2D1RenderTarget* target, const std::wstring& text, IDWriteTex
 /**
  * 按字符宽度硬截断。
  *
- * 分层窗口里 DWrite 的 SetTrimming 不生效（实测会溢出到卡片外面），
+ * 分层窗口里 DWrite 的 SetTrimming 不生效（实测会溢出到界外），
  * 所以宁可自己砍字：中文一个字约等于字号宽度，按格子数估就够用了。
  */
 inline std::wstring FitText(const std::wstring& text, float max_dip, float font_dip) {
@@ -125,20 +132,19 @@ inline const wchar_t* StatusLabel(const std::string& status) {
 }
 
 /**
- * 卡片透明度：以当前任务为中心向外衰减。
+ * 一颗点的透明度：以当前任务为中心向外衰减。
  *
- * 这张表就是"用透明度区分"的全部规则。当前任务永远 1.0，
- * 邻座 0.42 还看得清标题，再往外只剩一个轮廓——眼睛不会去读它，
- * 但余光知道"那边还有事"。
+ * 这就是"用透明度区分"的全部规则。当前那颗不透明，邻座还认得出，
+ * 再远只剩一个影子——眼睛不会去数它，但余光知道那边还有事。
  */
-inline float CardAlpha(int distance, const std::string& status) {
+inline float DotAlpha(int distance, const std::string& status) {
   float a = 1.0f;
   if (distance == 1) {
-    a = 0.50f;
+    a = 0.46f;
   } else if (distance == 2) {
-    a = 0.32f;
+    a = 0.28f;
   } else if (distance >= 3) {
-    a = 0.19f;
+    a = 0.16f;
   }
   // 已经做过的事再淡一档：它只需要"存在过"的证据，不需要再被读。
   if (status == "done" || status == "skipped") a *= 0.72f;
@@ -150,10 +156,11 @@ inline float CardAlpha(int distance, const std::string& status) {
  *
  * dip_w / dip_h 是当前的逻辑尺寸——展开动画的每一帧都在变，
  * 所以布局一律按传进来的尺寸算，不读常量，否则中间帧会撕裂。
- * alpha 是内容整体的淡入淡出（表面已经先长出来，内容后跟上来）。
+ * alpha 是内容整体的淡入淡出（表面已经先长出来，内容后跟上来），
+ * zoom 是内容从 0.96 长到 1 的缩放（BrimDeck 的展开里也有这一手）。
  */
 inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int focus, float scale,
-                      const PanelFormats& fmt, float dip_w, float dip_h, float alpha) {
+                      const PanelFormats& fmt, float dip_w, float dip_h, float alpha, float zoom) {
   const float w = dip_w * scale;
   const float h = dip_h * scale;
   // 收起来时高度接近药丸，圆角跟着收到一半高，才是一条胶囊
@@ -174,91 +181,117 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
 
   if (alpha <= 0.01f) return;
   // 太窄的时候还摆不下内容：等表面长开再画，避免文字在中间帧里挤成一团
-  if (dip_w < kMinWidth * 0.86f || dip_h < kStripHeight * 0.72f) return;
+  if (dip_w < kMinWidth * 0.80f || dip_h < kStripHeight * 0.72f) return;
+
+  // 内容整体缩放：围绕中心从 0.96 长到 1
+  const D2D1_POINT_2F center = D2D1::Point2F(w / 2.0f, h / 2.0f);
+  target->SetTransform(D2D1::Matrix3x2F::Scale(zoom, zoom, center));
 
   const UINT32 text = Fade(kText, alpha);
   const UINT32 dim = Fade(kTextDim, alpha);
 
   // ── 左侧：工作区标题 + 进度 ──────────────────────────
-  const float dot_y = 40.0f * scale;
+  const float dot_y = 44.0f * scale;
   fmt.brush->SetColor(Color(model.state == WorkModel::State::Online ? kAccent : kWarn, alpha));
   target->FillEllipse(D2D1::Ellipse(D2D1::Point2F((kPadX + 5.0f) * scale, dot_y), 4.5f * scale, 4.5f * scale),
                       fmt.brush);
 
   const float title_x = (kPadX + 18.0f) * scale;
-  // 单行标题：这个字体格式的行距是按小条调的，折行会叠字，
-  // 宁可在左边多留点地方让它排得下
   const std::wstring doc_title = FitText(model.doc_title.empty() ? L"未命名工作区" : model.doc_title,
                                          kLeftBlock - 26.0f, 12.5f);
   Text(target, doc_title, fmt.title,
-       D2D1::RectF(title_x, 28.0f * scale, title_x + (kLeftBlock - 24.0f) * scale, 54.0f * scale), fmt.brush,
+       D2D1::RectF(title_x, 30.0f * scale, title_x + (kLeftBlock - 24.0f) * scale, 56.0f * scale), fmt.brush,
        text);
 
   if (model.total > 0) {
     const std::wstring progress =
         std::to_wstring(model.done) + L"/" + std::to_wstring(model.total) + L" 已完成";
     Text(target, progress, fmt.meta,
-         D2D1::RectF(title_x, 70.0f * scale, title_x + (kLeftBlock - 10.0f) * scale, 92.0f * scale), fmt.brush,
+         D2D1::RectF(title_x, 72.0f * scale, title_x + (kLeftBlock - 10.0f) * scale, 94.0f * scale), fmt.brush,
          dim);
   }
 
-  // ── 中间：一列任务卡，按距离淡出 ─────────────────────
+  // ── 中间：一排点，一颗一件事 ─────────────────────────
   const int count = static_cast<int>(model.items.size());
-  const float card_y = (dip_h - kCardH) / 2.0f * scale;
-  const float cards_x = (kPadX + kLeftBlock + kGapLeft) * scale;
+  const float dots_x = (kPadX + kLeftBlock + kGapLeft) * scale;
+  const float dots_cy = dip_h * 0.5f * scale;
+  const int current = model.current >= 0 ? model.current : 0;
+  const int focus_index = (focus >= 0 && focus < count) ? focus : current;
 
   if (count == 0) {
-    Text(target, L"还没有任务 —— 按 Tab 框选屏幕上的活，或让我帮你拆", fmt.body,
-         D2D1::RectF(cards_x, card_y + 18.0f * scale, w - kRightBlock * scale, card_y + 60.0f * scale), fmt.brush,
+    Text(target, L"还没有任务 —— 按 Tab 框选屏幕上的活", fmt.body,
+         D2D1::RectF(dots_x, dots_cy - 12.0f * scale, w - (kDetailBlock + kRightBlock) * scale,
+                     dots_cy + 18.0f * scale),
+         fmt.brush, dim);
+  }
+
+  int visible = VisibleDots(dip_w);
+  if (visible > count) visible = count;
+  const int first = DotStart(count, current, visible);
+
+  for (int i = first; i < first + visible; ++i) {
+    const float cx = dots_x + (static_cast<float>(i - first) + 0.5f) * kDotStep * scale;
+    const NodeView& node = model.items[static_cast<size_t>(i)];
+    const int distance = i > current ? i - current : current - i;
+    const bool is_current = i == current;
+    const bool is_focus = i == focus_index;
+
+    if (is_current) {
+      // 光晕先画：当前这颗点自己会"发热"，不用再套一个框去强调它
+      fmt.brush->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.18f * alpha));
+      target->FillEllipse(
+          D2D1::Ellipse(D2D1::Point2F(cx, dots_cy), kDotRadiusNow * 2.1f * scale, kDotRadiusNow * 2.1f * scale),
+          fmt.brush);
+      fmt.brush->SetColor(Color(kAccent, alpha));
+      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, dots_cy), kDotRadiusNow * scale, kDotRadiusNow * scale),
+                          fmt.brush);
+    } else {
+      const float a = DotAlpha(distance, node.status) * alpha;
+      fmt.brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, a));
+      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, dots_cy), kDotRadius * scale, kDotRadius * scale),
+                          fmt.brush);
+      // 指到哪颗，哪颗外面套一圈：这是"我要看这个"的最小提示
+      if (is_focus) {
+        fmt.brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f * alpha));
+        target->DrawEllipse(
+            D2D1::Ellipse(D2D1::Point2F(cx, dots_cy), (kDotRadius + 4.5f) * scale, (kDotRadius + 4.5f) * scale),
+            fmt.brush, 1.2f * scale);
+      }
+    }
+  }
+
+  // ── 右侧：指到的那件事（没指就写当前这件）────────────────
+  const float detail_left = w - (kDetailBlock + kRightBlock + kPadX) * scale;
+  if (focus_index >= 0 && focus_index < count) {
+    const NodeView& node = model.items[static_cast<size_t>(focus_index)];
+    const float status_w = 56.0f * scale;
+    Text(target, StatusLabel(node.status), fmt.meta,
+         D2D1::RectF(detail_left, 28.0f * scale, detail_left + status_w, 48.0f * scale), fmt.brush,
+         node.status == "active" ? Fade(kAccent, alpha) : dim);
+
+    const std::wstring title = FitText(node.title, kDetailBlock - status_w - 20.0f, 13.0f);
+    Text(target, title, fmt.title,
+         D2D1::RectF(detail_left + status_w, 26.0f * scale, w - (kRightBlock + kPadX) * scale, 54.0f * scale),
+         fmt.brush, text);
+
+    const std::wstring acceptance =
+        node.acceptance.empty() ? L"（还没写验收）" : (L"验收 · " + node.acceptance);
+    Text(target, FitText(acceptance, kDetailBlock - 10.0f, 12.0f), fmt.body,
+         D2D1::RectF(detail_left, 58.0f * scale, w - (kRightBlock + kPadX) * scale, 84.0f * scale), fmt.brush,
          dim);
   }
 
-  const int current = model.current >= 0 ? model.current : 0;
-  int visible = VisibleCards(dip_w);
-  if (visible > count) visible = count;
-  const int first = CardStart(count, current, visible);
-  for (int i = first; i < first + visible; ++i) {
-    const float x = cards_x + static_cast<float>(i - first) * (kCardW + kCardGap) * scale;
-    const D2D1_RECT_F card =
-        D2D1::RectF(x, card_y, x + kCardW * scale, card_y + kCardH * scale);
-    const NodeView& node = model.items[static_cast<size_t>(i)];
-    const int distance = i > current ? i - current : current - i;
-    const float a = CardAlpha(distance, node.status) * alpha;
-    const bool is_current = i == current;
-    const bool is_focus = i == focus;
-
-    // 填充也吃透明度：同一张卡在不同距离上"厚薄"不同，
-    // 比换颜色更安静，也更像玻璃叠在桌面上。
-    FillRound(target, fmt.brush, card, kCardRadius * scale, Fade(0xFFFFFFFF, 0.055f * a + (is_current ? 0.02f : 0.0f)));
-    if (is_current) {
-      StrokeRound(target, fmt.brush, card, kCardRadius * scale, Fade(kAccent, 0.85f * alpha), 1.4f * scale);
-    } else if (is_focus) {
-      StrokeRound(target, fmt.brush, card, kCardRadius * scale, Fade(0xFFFFFFFF, 0.28f * alpha), 1.0f * scale);
-    } else {
-      StrokeRound(target, fmt.brush, card, kCardRadius * scale, Fade(0xFFFFFFFF, 0.10f * a));
-    }
-
-    Text(target, StatusLabel(node.status), fmt.meta,
-         D2D1::RectF(x + 14.0f * scale, card_y + 12.0f * scale, x + kCardW * scale - 12.0f * scale,
-                     card_y + 30.0f * scale),
-         fmt.brush, is_current ? Fade(kAccent, alpha) : Fade(kTextDim, a));
-
-    const std::wstring title = FitText(node.title, kCardW - 28.0f, 13.0f);
-    Text(target, title, fmt.title,
-         D2D1::RectF(x + 14.0f * scale, card_y + 34.0f * scale, x + kCardW * scale - 12.0f * scale,
-                     card_y + kCardH * scale - 10.0f * scale),
-         fmt.brush, Fade(kText, is_current ? alpha : a));
-  }
-
-  // ── 右侧：键位与连接状态 ─────────────────────────────
+  // ── 最右：键位与连接状态 ─────────────────────────────
   const float right_x = w - (kPadX + kRightBlock) * scale;
   const std::wstring status = model.state == WorkModel::State::Online ? L"已连接" : L"未连接";
-  Text(target, status, fmt.meta, D2D1::RectF(right_x, 40.0f * scale, w - kPadX * scale, 62.0f * scale), fmt.brush,
+  Text(target, status, fmt.meta, D2D1::RectF(right_x, 30.0f * scale, w - kPadX * scale, 52.0f * scale), fmt.brush,
        model.state == WorkModel::State::Online ? dim : Fade(kWarn, alpha));
-  Text(target, L"Esc 收起", fmt.meta, D2D1::RectF(right_x, 62.0f * scale, w - kPadX * scale, 84.0f * scale),
+  Text(target, L"Esc 收起", fmt.meta, D2D1::RectF(right_x, 72.0f * scale, w - kPadX * scale, 94.0f * scale),
        fmt.brush, dim);
-  Text(target, L"×", fmt.title, D2D1::RectF(w - 30.0f * scale, 6.0f * scale, w - 8.0f * scale, 34.0f * scale),
+  Text(target, L"×", fmt.title, D2D1::RectF(w - 30.0f * scale, 8.0f * scale, w - 10.0f * scale, 32.0f * scale),
        fmt.brush, dim);
+
+  target->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
 }  // namespace ui

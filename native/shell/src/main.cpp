@@ -226,6 +226,7 @@ constexpr int kTrayIconId = 1;
 
 // 这几个函数在窗口过程里就要用，定义在下面，先声明
 void RepaintPanel();
+int HitTestDot(int px, int py);  // 定义在后面，前面先用
 void RefreshPanelModel();
 void DispatchKey(int action);
 void TogglePanel();
@@ -403,79 +404,37 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
   float hit_left = pill_left;
   float hit_right = pill_left + pill_w;
 
-  // ── 两侧的"邻居"：不做 hover 时挂出来，一旦鼠标上来就收回去让位给面板 ──
-  // 左边 = 已经走过的（淡淡地退到后面），右边 = 还没到的（提醒还有多少）。
-  // 注意：不管画不画，命中区都按"挂出来"的尺寸算，否则鼠标一进来卡片消失、
-  // 命中区跟着缩小，就变成自己把自己踢出去的抖动。
+  // ── 两侧：一串半透明白点，代表排在前面/后面的事 ──
+  // 不用卡片：卡片有边、有底、有文字，每多一张就多一种"细节要统一"的负担，
+  // 而这里想说的只有"还有几件事、分别在前后"。一个点就够了。
+  // 参照 BrimDeck 的收起态：一排圆环，不排文字。
   if (model.current >= 0) {
     const int count = static_cast<int>(model.items.size());
-    const float chip_h = pill_h * 0.78f;
-    const float chip_top = (height - chip_h) * 0.5f;
-    const float chip_w = kSideChipWidth * scale;
-    const float gap = kSideChipGap * scale;
+    const float dot_r = 4.5f * scale;
+    const float dot_gap = 17.0f * scale;
+    const float dot_cy = pill_top + pill_h * 0.5f;
+    const float pad = 14.0f * scale;
 
     for (int side = -1; side <= 1; side += 2) {
-      int drawn = 0;
       for (int step = 1; step <= kSideChipCount; ++step) {
         const int index = model.current + side * step;
         if (index < 0 || index >= count) break;
-        // 逐层后退：越远越矮、越淡
-        const float shrink = static_cast<float>(drawn) * 6.0f * scale;
-        const float left = (side < 0) ? pill_left - gap - chip_w - shrink - static_cast<float>(drawn) * (chip_w * 0.92f)
-                                      : pill_left + pill_w + gap + shrink + static_cast<float>(drawn) * (chip_w * 0.92f);
-        const D2D1_RECT_F chip = D2D1::RectF(left, chip_top + shrink * 0.5f, left + chip_w,
-                                             chip_top + chip_h - shrink * 0.5f);
-        // 邻居卡必须是"看得见的卡片"，不是一层淡淡的白雾：
-        // 之前用 5.5% 白，在亮壁纸上等于不存在（实测用户直接问"为什么两边没有任务"）。
-        // 改成和药丸同族的深色玻璃，再用低透明度拉开主次。
-        const float fade = g_chip_fade;
-        const float surface = (0.62f - static_cast<float>(drawn) * 0.12f) * fade;
-        if (fade > 0.01f) {
-          g_brush->SetColor(D2D1::ColorF(0.055f, 0.055f, 0.075f, surface));
-          target->FillRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.30f, chip_h * 0.30f), g_brush);
-          // 0.5px 发丝边，让卡片在深色背景上也有个边
-          g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.10f * fade));
-          target->DrawRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.30f, chip_h * 0.30f), g_brush,
-                                       1.0f);
-        }
-
+        const float cx = (side < 0)
+                             ? pill_left - pad - dot_r - static_cast<float>(step - 1) * dot_gap
+                             : pill_left + pill_w + pad + dot_r + static_cast<float>(step - 1) * dot_gap;
+        const float alpha = (0.46f - 0.14f * static_cast<float>(step - 1)) * g_chip_fade;
+        if (alpha <= 0.01f) continue;
+        // 已完成的那侧再淡一点：它是"走过的路"，不是"待办"
         const dshwork::NodeView& node = model.items[static_cast<size_t>(index)];
-        if (left < hit_left) hit_left = left;
-        if (left + chip_w > hit_right) hit_right = left + chip_w;
-        if (fade > 0.01f) {
-          const float avail = chip_w - 30.0f * scale;
-          std::wstring label = node.title;
-          // 卡片只有 ~150 宽，中文标题基本放不下；DWrite 的 SetTrimming 在这里
-          // 量出来的宽度照样溢出边界，所以自己量一次、砍字、补省略号。
-          IDWriteTextLayout* probe = nullptr;
-          if (SUCCEEDED(g_dwrite->CreateTextLayout(label.c_str(), static_cast<UINT32>(label.size()),
-                                                   g_formatMeta, 4096.0f, chip_h, &probe))) {
-            DWRITE_TEXT_METRICS metrics = {};
-            if (SUCCEEDED(probe->GetMetrics(&metrics)) && metrics.width > avail && metrics.width > 0.0f) {
-              size_t keep = static_cast<size_t>(static_cast<float>(label.size()) * (avail / metrics.width));
-              if (keep < 1) keep = 1;
-              label = label.substr(0, keep - 1) + L"\u2026";
-            }
-            probe->Release();
-          }
-          IDWriteTextLayout* chip_layout = nullptr;
-          g_dwrite->CreateTextLayout(label.c_str(), static_cast<UINT32>(label.size()), g_formatMeta, avail, chip_h,
-                                     &chip_layout);
-          if (chip_layout != nullptr) {
-            chip_layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            // 左边是已经做完的，压暗一级；右边是还没做的，亮一级
-            const float ink = (side < 0 ? 0.50f : 0.80f) * fade;
-            g_brush->SetColor(D2D1::ColorF(1, 1, 1, ink));
-            target->DrawTextLayout(D2D1::Point2F(left + 15.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
-                                   chip_layout, g_brush);
-            chip_layout->Release();
-          }
-        }
-        ++drawn;
+        float a = alpha;
+        if (node.status == "done" || node.status == "skipped") a *= 0.55f;
+        g_brush->SetColor(D2D1::ColorF(1, 1, 1, a));
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, dot_cy), dot_r, dot_r), g_brush);
+        if (cx - dot_r < hit_left) hit_left = cx - dot_r;
+        if (cx + dot_r > hit_right) hit_right = cx + dot_r;
       }
     }
   }
-
   // 阴影：三层同心圆角矩形叠出柔和感（没有 GPU 模糊时的老办法，够用且零依赖）
   const float radius = pill_h * 0.5f;
 
@@ -783,18 +742,54 @@ RECT PanelTargetRect() {
   return r;
 }
 
+/**
+ * 动画时间轴：一段动画里每个元素只跑自己的那一段。
+ *
+ * 这是从 BrimDeck 学来的一手（`Track(Start, End)`，按总时长的比例分段）：
+ * 所有东西一起动会糊成一团，"表面先走、内容后跟"才是活的。
+ * 展开：表面 0→0.8，内容 0.25→0.9，药丸残影 0→0.15，阴影 0→0.3。
+ * 收起反过来：内容先走（0→0.3），表面后收（0.12→1）。
+ */
+struct TimeTrack {
+  float start;
+  float end;
+};
+
+TimeTrack TrackOf(bool expanding, int which) {
+  switch (which) {
+    case 0:  // surface
+      return expanding ? TimeTrack{0.0f, 0.80f} : TimeTrack{0.12f, 1.0f};
+    case 1:  // content
+      return expanding ? TimeTrack{0.25f, 0.90f} : TimeTrack{0.0f, 0.30f};
+    case 2:  // compact（药丸内容的残影）
+      return expanding ? TimeTrack{0.0f, 0.15f} : TimeTrack{0.62f, 1.0f};
+    default:  // shadow
+      return expanding ? TimeTrack{0.0f, 0.30f} : TimeTrack{0.50f, 1.0f};
+  }
+}
+
+/** 当前进度落在某段轨道上的 0..1。 */
+float TrackProgress(bool expanding, int which) {
+  if (!g_morph.active) return 1.0f;
+  const float t = static_cast<float>(GetTickCount64() - g_morph.start) / (g_morph.ms * g_motion_scale);
+  const float p = t >= 1.0f ? 1.0f : t;
+  const TimeTrack track = TrackOf(expanding, which);
+  const float span = track.end - track.start;
+  if (span <= 0.0001f) return p >= track.start ? 1.0f : 0.0f;
+  const float v = (p - track.start) / span;
+  return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
 /** 内容的不透明度：表面先长出来，字后跟上来（跟随动作，别一起糊上去）。 */
 float PanelContentAlpha() {
   if (!g_morph.active) return 1.0f;
-  const float t = static_cast<float>(GetTickCount64() - g_morph.start) /
-                  (g_morph.ms * g_motion_scale);
-  const float p = t >= 1.0f ? 1.0f : t;
-  if (g_morph.opening) {
-    const float v = (p - 0.34f) / 0.50f;
-    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-  }
-  const float v = 1.0f - p / 0.45f;
-  return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+  return TrackProgress(g_morph.opening, 1);
+}
+
+/** 内容从 0.96 长到 1（BrimDeck 的 ContentScale）。 */
+float PanelZoom() {
+  if (!g_morph.active) return 1.0f;
+  return 0.96f + 0.04f * TrackProgress(g_morph.opening, 1);
 }
 
 /** 推进变形：每一帧把窗口矩形朝目标插值，并重画（尺寸变了，布局得跟着重排）。 */
@@ -864,7 +859,7 @@ void RepaintPanel() {
   dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
   dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats,
                          static_cast<float>(px_w) / g_dpiScale, static_cast<float>(px_h) / g_dpiScale,
-                         PanelContentAlpha());
+                         PanelContentAlpha(), PanelZoom());
   const HRESULT draw_result = g_target->EndDraw();
   if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
 
@@ -1081,25 +1076,33 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         HidePanel();
         return 0;
       }
-      // 卡片行：点哪张就把焦点挪过去，双击语义先不做
+      // 一排点：点哪颗就把焦点挪过去，右边就写那件事
       const int count = static_cast<int>(g_panel_model.items.size());
       if (count > 0) {
         const float scale = g_dpiScale;
-        const float cards_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
-        const float step = (dshwork::ui::kCardW + dshwork::ui::kCardGap) * scale;
-        int visible = dshwork::ui::VisibleCards(g_panel_dip_w);
-        if (visible > count) visible = count;
+        const float dots_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
         const int current = g_panel_model.current >= 0 ? g_panel_model.current : 0;
-        const int first = dshwork::ui::CardStart(count, current, visible);
-        for (int slot = 0; slot < visible; ++slot) {
-          const float left = cards_x + static_cast<float>(slot) * step;
-          if (x >= left && x <= left + dshwork::ui::kCardW * scale) {
-            g_focus = first + slot;
-            RepaintPanel();
-            break;
-          }
+        int visible = dshwork::ui::VisibleDots(g_panel_dip_w);
+        if (visible > count) visible = count;
+        const int first = dshwork::ui::DotStart(count, current, visible);
+        const int hit = HitTestDot(x, y);
+        if (hit >= 0) {
+          g_focus = hit;
+          RepaintPanel();
         }
+        (void)dots_x;
+        (void)first;
       }
+      return 0;
+    }
+    case WM_MOUSEMOVE: {
+      // 指到哪颗点，右边就写哪件事；移开就回到当前任务
+      const int hit = HitTestDot(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+      if (hit != g_focus) {
+        g_focus = hit;
+        RepaintPanel();
+      }
+      // 鼠标在面板上就不要再触发"离开自动收起"
       return 0;
     }
     case WM_DESTROY:
@@ -1107,6 +1110,28 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
     default:
       return DefWindowProcW(window, message, wparam, lparam);
   }
+}
+
+/** 面板底部：点阵的命中测试，返回绝对序号（没命中返回 -1）。 */
+int HitTestDot(int px, int py) {
+  const int count = static_cast<int>(g_panel_model.items.size());
+  if (count <= 0) return -1;
+  const float scale = g_dpiScale;
+  const float dots_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
+  RECT rect = {};
+  GetWindowRect(g_panel, &rect);
+  const float dots_cy = static_cast<float>(rect.bottom - rect.top) * 0.5f;
+  if (py < dots_cy - 16.0f * scale || py > dots_cy + 16.0f * scale) return -1;
+
+  const int current = g_panel_model.current >= 0 ? g_panel_model.current : 0;
+  int visible = dshwork::ui::VisibleDots(g_panel_dip_w);
+  if (visible > count) visible = count;
+  const int first = dshwork::ui::DotStart(count, current, visible);
+  for (int slot = 0; slot < visible; ++slot) {
+    const float cx = dots_x + (static_cast<float>(slot) + 0.5f) * dshwork::ui::kDotStep * scale;
+    if (px >= cx - 13.0f * scale && px <= cx + 13.0f * scale) return first + slot;
+  }
+  return -1;
 }
 
 /** 托盘：右键菜单里至少要有"退出"，否则这进程只能去任务管理器杀。 */
