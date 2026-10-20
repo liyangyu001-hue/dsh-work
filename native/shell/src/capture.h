@@ -286,26 +286,40 @@ inline void DrawWheel() {
   if (s.stage != 1) return;
 
   const float sc = ScaleOf();
-  // 张开动画：从 0.86 倍缓出到 1 倍，同时整体淡入——先"弹出来"再"看清"
+  // 张开动画：0.86 → 1 倍缓出
   const float t = s.wheel_anim ? s.wheel_t : 1.0f;
   const float grow = 0.86f + 0.14f * (1.0f - (1.0f - t) * (1.0f - t));
-  const float fade = 1.0f;  // 不淡入：宁可第一帧就实，也别看着像半透明
+  const float pi = 3.14159265358979f;
 
-  const float inner = 46.0f * sc * grow;
-  const float outer = 106.0f * sc * grow;
-  const float ext = 122.0f * sc * grow;
+  const float inner = 44.0f * sc * grow;
+  const float outer = 104.0f * sc * grow;
+  const float shadow_w = 30.0f * sc * grow;  // 柔和投影的宽度，撑起"浮在桌面之上"的体积
+  const float ext = outer + shadow_w;
   const float cx = static_cast<float>(s.wheel_cx);
   const float cy = static_cast<float>(s.wheel_cy);
+
+  // 0 号扇区居 -45°，也就是右上；每 90° 一瓣，分界线落在 -90/0/90/180
+  auto sector_of = [pi](float dy, float dx) {
+    float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / 3.14159265358979);
+    deg += 90.0f;
+    while (deg < 0.0f) deg += 360.0f;
+    while (deg >= 360.0f) deg -= 360.0f;
+    int i = static_cast<int>(deg / 90.0f);
+    return i < 0 ? 0 : (i > 3 ? 3 : i);
+  };
+  (void)pi;
 
   const int x0 = static_cast<int>(cx - ext) - 2;
   const int x1 = static_cast<int>(cx + ext) + 2;
   const int y0 = static_cast<int>(cy - ext) - 2;
   const int y1 = static_cast<int>(cy + ext) + 2;
 
-  // 逐像素算覆盖率：每像素 2x2 采样，边缘就不会锯齿
+  // 每像素 2x2 采样，把覆盖率摊进各层，边缘才不会有锯齿
   for (int y = y0; y <= y1; ++y) {
     for (int x = x0; x <= x1; ++x) {
-      int hub = 0, band = 0, hot = 0, glow = 0, total = 0;
+      float a_shadow = 0, a_disc = 0, a_hot = 0, a_sep = 0;
+      float a_ring_o = 0, a_ring_i = 0, a_arc = 0, a_hub = 0;
+      int total = 0;
       for (int sy = 0; sy < 2; ++sy) {
         for (int sx = 0; sx < 2; ++sx) {
           const float dx = static_cast<float>(x) + (sx + 0.5f) * 0.5f - cx;
@@ -313,77 +327,93 @@ inline void DrawWheel() {
           const float d = std::sqrt(dx * dx + dy * dy);
           ++total;
           if (d > ext) continue;
-          if (d < inner) {
-            ++hub;
-          } else if (d < outer) {
-            ++band;
-            if (s.menu_index >= 0) {
-              float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) *
-                                             180.0 / 3.14159265358979);
-              deg += 90.0f;
-              while (deg < 0.0f) deg += 360.0f;
-              while (deg >= 360.0f) deg -= 360.0f;
-              if (static_cast<int>(deg / 90.0f) == s.menu_index) ++hot;
-            }
-          } else {
-            ++glow;
+
+          if (d > outer) {
+            // 投影：往下偏 3px，越远越淡，二次衰减才不像一圈脏边
+            const float k = (d - outer) / shadow_w;
+            const float off = (dy - 3.0f * sc) / shadow_w;
+            const float bias = off > 0.0f ? 1.0f : 0.55f;
+            a_shadow += 0.42f * bias * (1.0f - k) * (1.0f - k);
+            continue;
           }
+
+          if (d < inner) {
+            a_hub += 1.0f;
+            if (std::fabs(d - inner) < 0.60f * sc) a_ring_i += 1.0f;
+            continue;
+          }
+
+          a_disc += 1.0f;
+          const int sec = sector_of(dy, dx);
+          if (s.menu_index >= 0 && sec == s.menu_index) a_hot += 1.0f;
+
+          // 分界线：角向距离换算成像素宽度，远处同样 1px 粗
+          float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / pi);
+          float rel = std::fmod(deg + 90.0f, 90.0f);
+          if (rel < 0.0f) rel += 90.0f;
+          const float ang_px = (rel < 45.0f ? rel : 90.0f - rel) * pi / 180.0f * d;
+          if (ang_px < 0.55f * sc) a_sep += 1.0f;
+
+          if (std::fabs(d - outer) < 0.60f * sc) a_ring_o += 1.0f;
+          // 命中瓣的外沿再压一道强调色弧，比整瓣铺满更收敛
+          if (s.menu_index >= 0 && sec == s.menu_index && d > outer - 2.2f * sc) a_arc += 1.0f;
         }
       }
-      if (hub + band + hot + glow == 0) continue;
-      const float inv = fade / static_cast<float>(total);
-      if (hub > 0) {
-        const float a = static_cast<float>(hub) * inv * 0.99f;
-        BlendPixel(x, y, 17, 19, 24, a);
+      if (total == 0) continue;
+      const float inv = 1.0f / static_cast<float>(total);
+
+      if (a_shadow > 0.0f) BlendPixel(x, y, 0, 0, 0, a_shadow * inv);
+      if (a_disc > 0.0f) {
+        // 上浅下深一点点，圆面才不是一块死板的黑
+        const float g = (static_cast<float>(y) - (cy - outer)) / (2.0f * outer);
+        const float k = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
+        BlendPixel(x, y, static_cast<int>(27.0f - 9.0f * k), static_cast<int>(29.0f - 9.0f * k),
+                   static_cast<int>(37.0f - 11.0f * k), a_disc * inv * 0.97f);
       }
-      if (band > 0) {
-        const float a = static_cast<float>(band) * inv * 0.96f;
-        BlendPixel(x, y, 28, 30, 38, a);
+      if (a_hot > 0.0f) BlendPixel(x, y, 10, 132, 255, a_hot * inv * 0.20f);
+      if (a_sep > 0.0f) BlendPixel(x, y, 255, 255, 255, a_sep * inv * 0.075f);
+      if (a_ring_o + a_ring_i > 0.0f) {
+        BlendPixel(x, y, 255, 255, 255, (a_ring_o + a_ring_i) * inv * 0.09f);
       }
-      if (hot > 0) {
-        const float a = static_cast<float>(hot) * inv * 0.90f;
-        BlendPixel(x, y, 10, 132, 255, a);
-      }
-      if (glow > 0) {
-        const float a = static_cast<float>(glow) * inv * 0.10f;
-        BlendPixel(x, y, 120, 170, 255, a);
-      }
+      if (a_arc > 0.0f) BlendPixel(x, y, 10, 132, 255, a_arc * inv * 0.95f);
+      if (a_hub > 0.0f) BlendPixel(x, y, 14, 16, 21, a_hub * inv * 0.98f);
     }
   }
 
   HDC dc = s.work;
   SetBkMode(dc, TRANSPARENT);
-  HFONT font = CreateFontW(-static_cast<int>(13.0f * sc), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+  HFONT font = CreateFontW(-static_cast<int>(12.5f * sc), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                            OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                            L"Microsoft YaHei UI");
-  HFONT font_hot = CreateFontW(-static_cast<int>(14.0f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+  HFONT font_hot = CreateFontW(-static_cast<int>(13.5f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+  HFONT font_hub = CreateFontW(-static_cast<int>(15.0f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
   HGDIOBJ old_font = SelectObject(dc, font);
 
-  // 每一瓣的名字放在该瓣的中间半径上，横排——不做扇形里的旋转字，
-  // 四个词而已，转着读反而更慢
+  // 每瓣的名字放在该瓣的中间半径上，横排——四个词而已，转着读反而更慢
   const float label_r = (inner + outer) * 0.5f;
   for (int i = 0; i < MenuItems(); ++i) {
-    const float mid_deg = -90.0f + i * 90.0f + 45.0f;
-    const float rad = mid_deg * 3.14159265358979f / 180.0f;
+    const float mid_deg = -45.0f + static_cast<float>(i) * 90.0f;
+    const float rad = mid_deg * pi / 180.0f;
     const int lx = static_cast<int>(cx + label_r * std::cos(rad));
     const int ly = static_cast<int>(cy + label_r * std::sin(rad));
-    const int half_w = static_cast<int>(44.0f * sc);
-    RECT r = {lx - half_w, ly - static_cast<int>(11.0f * sc), lx + half_w,
-              ly + static_cast<int>(11.0f * sc)};
+    const int half_w = static_cast<int>(46.0f * sc);
+    RECT r = {lx - half_w, ly - static_cast<int>(10.0f * sc), lx + half_w, ly + static_cast<int>(10.0f * sc)};
     const bool is_hot = (i == s.menu_index);
     SelectObject(dc, is_hot ? font_hot : font);
-    SetTextColor(dc, is_hot ? RGB(255, 255, 255) : RGB(196, 200, 210));
+    SetTextColor(dc, is_hot ? RGB(255, 255, 255) : RGB(168, 174, 190));
     DrawTextW(dc, MenuLabel(i, s), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     OpaqueRect(r);
   }
 
-  // 中心：指到哪一瓣就写哪一瓣的名字；指在死区就写"取消"
-  SelectObject(dc, font_hot);
-  SetTextColor(dc, s.menu_index >= 0 ? RGB(255, 255, 255) : RGB(150, 156, 168));
-  RECT hub_r = {static_cast<int>(cx - inner * 0.95f), static_cast<int>(cy - 12.0f * sc),
-                static_cast<int>(cx + inner * 0.95f), static_cast<int>(cy + 12.0f * sc)};
+  // 中心：指到哪一瓣就写哪一瓣；指在死区就写"取消"
+  SelectObject(dc, font_hub);
+  SetTextColor(dc, s.menu_index >= 0 ? RGB(255, 255, 255) : RGB(158, 164, 178));
+  RECT hub_r = {static_cast<int>(cx - inner * 0.92f), static_cast<int>(cy - 13.0f * sc),
+                static_cast<int>(cx + inner * 0.92f), static_cast<int>(cy + 13.0f * sc)};
   const wchar_t* hub_text = s.menu_index >= 0 ? MenuLabel(s.menu_index, s) : L"取消";
   DrawTextW(dc, hub_text, -1, &hub_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   OpaqueRect(hub_r);
@@ -391,6 +421,7 @@ inline void DrawWheel() {
   SelectObject(dc, old_font);
   DeleteObject(font);
   DeleteObject(font_hot);
+  DeleteObject(font_hub);
 }
 inline void Compose() {
   State& s = S();
