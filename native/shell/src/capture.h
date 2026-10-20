@@ -68,6 +68,12 @@ struct State {
   HDC work = nullptr;  // 每帧要交给 UpdateLayeredWindow 的那张
 
   bool dragging = false;
+  // 框选的第二级：松开鼠标后不立刻收摊，先把"这块要拿去做什么"摆出来。
+  // 0 = 正在拖框，1 = 选中了、菜单在等你选。
+  int stage = 0;
+  int menu_index = 2;
+  int pending_action = 2;  // 1=解构 2=直接保存，随结果一起回给宿主
+  RECT menu = {};  // 菜单在虚拟屏幕里的位置（物理像素）
   POINT anchor = {};
   RECT selection = {};
   ULONGLONG last_paint = 0;
@@ -185,12 +191,137 @@ inline std::wstring TimestampedPath() {
  * 2) 把选框里的原始像素贴回去
  * 3) 画选框边和内圈的一像素白线
  */
+// ── 第二级：选中之后的动作菜单 ────────────────────────────────────────────────
+//
+// 用户对 Tab 的期望是"按下去会有菜单"，不是"按下去直接截图"：
+// 框完一块，得先问这块要拿去做什么。菜单是浮在冻结帧上的，不另开窗口——
+// 另开窗口会把底下的选区抢走焦点，也会让"再按一次 Tab"失效。
+//
+// 为什么这一块用 GDI 画：整条覆盖层是纯像素操作（UpdateLayeredWindow），
+// 没有 D2D/DirectWrite 可用；而菜单是唯一需要文字的地方，量小。
+// GDI 写字不写 alpha 通道，所以菜单底做成**不透明**的一块，字就正常了。
+
+inline int MenuItems() { return 4; }
+
+inline const wchar_t* MenuLabel(int index, const State& s) {
+  switch (index) {
+    case 0:
+      return L"重新框选";
+    case 1:
+      return L"解构这块";
+    case 2:
+      return L"直接保存";
+    default:
+      return L"取消";
+  }
+}
+
+/** 菜单放在选区右下角，放不下就翻到左边/上边——永远不越出屏幕。 */
+inline void LayoutMenu() {
+  State& s = S();
+  const float scale = s.window ? static_cast<float>(GetDpiForWindow(s.window)) / 96.0f : 1.0f;
+  const int w = static_cast<int>(188.0f * scale);
+  const int row = static_cast<int>(36.0f * scale);
+  const int h = row * MenuItems() + static_cast<int>(12.0f * scale);
+
+  int left = s.selection.right + static_cast<int>(8.0f * scale);
+  int top = s.selection.bottom + static_cast<int>(8.0f * scale);
+  if (left + w > s.vw) left = s.selection.left - w - static_cast<int>(8.0f * scale);
+  if (left < 0) left = 0;
+  if (top + h > s.vh) top = s.selection.top - h - static_cast<int>(8.0f * scale);
+  if (top < 0) top = 0;
+  s.menu = {left, top, left + w, top + h};
+}
+
+inline void FillRectAlpha(RECT r, BYTE rr, BYTE gg, BYTE bb, BYTE aa, float radius) {
+  State& s = S();
+  for (int y = r.top; y < r.bottom; ++y) {
+    if (y < 0 || y >= s.vh) continue;
+    auto* row = static_cast<BYTE*>(s.work_bits) + static_cast<size_t>(y) * static_cast<size_t>(s.vw) * 4;
+    for (int x = r.left; x < r.right; ++x) {
+      if (x < 0 || x >= s.vw) continue;
+      // 圆角：角落那几像素直接留空，才有卡片感
+      if (radius > 0.5f) {
+        const float fx = static_cast<float>(x - r.left);
+        const float fy = static_cast<float>(y - r.top);
+        const float fx2 = static_cast<float>(r.right - 1 - x);
+        const float fy2 = static_cast<float>(r.bottom - 1 - y);
+        const float dx = fx < radius ? radius - fx : (fx2 < radius ? radius - fx2 : radius);
+        const float dy = fy < radius ? radius - fy : (fy2 < radius ? radius - fy2 : radius);
+        if (dx < radius && dy < radius) {
+          const float ddx = radius - dx;
+          const float ddy = radius - dy;
+          if (ddx * ddx + ddy * ddy > radius * radius) continue;
+        }
+      }
+      BYTE* px = row + static_cast<size_t>(x) * 4;
+      px[0] = bb;
+      px[1] = gg;
+      px[2] = rr;
+      px[3] = aa;
+    }
+  }
+}
+
+inline void OpaqueRect(RECT r) {
+  State& s = S();
+  for (int y = r.top; y < r.bottom; ++y) {
+    if (y < 0 || y >= s.vh) continue;
+    auto* row = static_cast<BYTE*>(s.work_bits) + static_cast<size_t>(y) * static_cast<size_t>(s.vw) * 4;
+    for (int x = r.left; x < r.right; ++x) {
+      if (x < 0 || x >= s.vw) continue;
+      row[x * 4 + 3] = 255;
+    }
+  }
+}
+
+inline void DrawMenu() {
+  State& s = S();
+  if (s.stage != 1 || s.menu.right <= s.menu.left) return;
+  const float scale = s.window ? static_cast<float>(GetDpiForWindow(s.window)) / 96.0f : 1.0f;
+  const int row_h = static_cast<int>(36.0f * scale);
+  const float radius = 12.0f * scale;
+
+  // 底：不透明的深色卡（GDI 写字不写 alpha，底必须实心）
+  // 直角：圆角那几个像素会留空, 会露出后面的桌面，像四个亮角
+  FillRectAlpha(s.menu, 26, 26, 30, 255, 0.0f);
+
+  // 当前项：一条强调色高亮
+  if (s.menu_index >= 0 && s.menu_index < MenuItems()) {
+    RECT hl = {s.menu.left + 6, s.menu.top + 6 + s.menu_index * row_h, s.menu.right - 6,
+               s.menu.top + 6 + (s.menu_index + 1) * row_h};
+    FillRectAlpha(hl, 38, 78, 128, 255, radius * 0.6f);
+  }
+
+  // 字：直接写进 work 那张位图已经挂着的 DC。
+  // 位图同时只能被一个 DC 选中，再 CreateCompatibleDC 去选一次会失败，
+  // 结果就是菜单出来了但没有字。
+  HDC dc = s.work;
+  SetBkMode(dc, TRANSPARENT);
+  HFONT font = CreateFontW(-static_cast<int>(14.0f * scale), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+  HGDIOBJ old_font = SelectObject(dc, font);
+  SetTextColor(dc, RGB(245, 245, 247));
+  for (int i = 0; i < MenuItems(); ++i) {
+    RECT r = {s.menu.left + static_cast<int>(18.0f * scale), s.menu.top + 6 + i * row_h,
+              s.menu.right - static_cast<int>(12.0f * scale), s.menu.top + 6 + (i + 1) * row_h};
+    DrawTextW(dc, MenuLabel(i, s), -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  }
+  SelectObject(dc, old_font);
+  DeleteObject(font);
+
+  // GDI 往 32bpp DIB 上写字不会碰 alpha 字节，结果就是字写了但透明。
+  // 菜单底本来就不透明，画完统一把这一块的 alpha 拉满。
+  OpaqueRect(s.menu);
+}
+
 inline void Compose() {
   State& s = S();
   const size_t bytes = static_cast<size_t>(s.vw) * static_cast<size_t>(s.vh) * 4;
   CopyPixels(s.work_bits, s.dim_bits, bytes);
 
-  if (s.dragging) {
+  if (s.dragging || s.stage == 1) {
     const RECT& r = s.selection;
     const int w = r.right - r.left;
     const int h = r.bottom - r.top;
@@ -228,6 +359,8 @@ inline void Compose() {
       }
     }
   }
+
+  if (s.stage == 1) DrawMenu();
 }
 
 inline void Paint() {
@@ -254,7 +387,7 @@ inline void Teardown(int result);
 inline void Finish() {
   State& s = S();
   if (!s.active) return;
-  const bool selection_ok = s.dragging && (s.selection.right - s.selection.left) >= kMinSide &&
+  const bool selection_ok = (s.selection.right - s.selection.left) >= kMinSide &&
                             (s.selection.bottom - s.selection.top) >= kMinSide;
 
   if (!selection_ok) {
@@ -303,6 +436,9 @@ inline void Finish() {
 inline void Teardown(int result) {
   State& s = S();
   UnregisterHotKey(s.window, 0x71);
+  UnregisterHotKey(s.window, 0x72);
+  UnregisterHotKey(s.window, 0x73);
+  UnregisterHotKey(s.window, 0x74);
   if (s.window != nullptr) {
     ShowWindow(s.window, SW_HIDE);
     DestroyWindow(s.window);
@@ -324,7 +460,33 @@ inline void Teardown(int result) {
   s.work_bitmap = nullptr; s.work = nullptr;
   s.active = false;
   s.dragging = false;
-  PostMessageW(s.owner, kMsgCaptureDone, static_cast<WPARAM>(result), 0);
+  PostMessageW(s.owner, kMsgCaptureDone, static_cast<WPARAM>(result), static_cast<LPARAM>(s.pending_action));
+}
+
+/** 菜单选中某项之后要做的事。 */
+inline void ActivateMenu(int index) {
+  State& s = S();
+  switch (index) {
+    case 0:  // 重新框选：留在覆盖层里，下次按下重新拖
+      s.stage = 0;
+      s.dragging = false;
+      s.selection = {0, 0, 0, 0};
+      s.menu = {0, 0, 0, 0};
+      Paint();
+      break;
+    case 1:  // 解构这块
+      s.pending_action = 1;
+      Finish();
+      break;
+    case 2:  // 直接保存
+      s.pending_action = 2;
+      Finish();
+      break;
+    default:  // 取消
+      s.dragging = false;
+      Teardown(0);
+      break;
+  }
 }
 
 // ── 窗口过程 ─────────────────────────────────────────────────────────────────
@@ -333,6 +495,23 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
   State& s = S();
   switch (message) {
     case WM_LBUTTONDOWN: {
+      // 菜单开着的时候，点菜单就是选动作；点别处等于"重来一次"
+      if (s.stage == 1) {
+        POINT now = {};
+        GetCursorPos(&now);
+        now.x -= s.vx;
+        now.y -= s.vy;
+        if (now.x >= s.menu.left && now.x <= s.menu.right && now.y >= s.menu.top && now.y <= s.menu.bottom) {
+          const float scale = window ? static_cast<float>(GetDpiForWindow(window)) / 96.0f : 1.0f;
+          const int row_h = static_cast<int>(36.0f * scale);
+          const int index = (now.y - s.menu.top - 6) / row_h;
+          ActivateMenu(index < 0 ? 0 : (index >= MenuItems() ? MenuItems() - 1 : index));
+          return 0;
+        }
+        s.stage = 0;
+        s.selection = {0, 0, 0, 0};
+        s.menu = {0, 0, 0, 0};
+      }
       s.dragging = true;
       GetCursorPos(&s.anchor);
       s.anchor.x -= s.vx;
@@ -342,6 +521,24 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       return 0;
     }
     case WM_MOUSEMOVE: {
+      if (s.stage == 1) {
+        POINT now = {};
+        GetCursorPos(&now);
+        now.x -= s.vx;
+        now.y -= s.vy;
+        if (now.x >= s.menu.left && now.x <= s.menu.right && now.y >= s.menu.top && now.y <= s.menu.bottom) {
+          const float scale = window ? static_cast<float>(GetDpiForWindow(window)) / 96.0f : 1.0f;
+          const int row_h = static_cast<int>(36.0f * scale);
+          int index = (now.y - s.menu.top - 6) / row_h;
+          if (index < 0) index = 0;
+          if (index >= MenuItems()) index = MenuItems() - 1;
+          if (index != s.menu_index) {
+            s.menu_index = index;
+            Paint();
+          }
+        }
+        return 0;
+      }
       if (!s.dragging) return 0;
       POINT now = {};
       GetCursorPos(&now);
@@ -361,7 +558,20 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
     case WM_LBUTTONUP: {
       if (!s.dragging) return 0;
       ReleaseCapture();
-      Finish();
+      s.dragging = false;
+      const bool ok = (s.selection.right - s.selection.left) >= kMinSide &&
+                      (s.selection.bottom - s.selection.top) >= kMinSide;
+      if (!ok) {
+        // 手滑点了一下：不算选中，回到拖框状态
+        s.selection = {0, 0, 0, 0};
+        Paint();
+        return 0;
+      }
+      // 选中了就先问"这块拿去做什么"，不直接落盘
+      s.stage = 1;
+      s.menu_index = 2;
+      LayoutMenu();
+      Paint();
       return 0;
     }
     case WM_RBUTTONDOWN:
@@ -372,6 +582,11 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       if (wparam == 0x71) {  // Esc
         s.dragging = false;
         Teardown(0);
+      } else if (s.stage == 1 && wparam == 0x72) {  // Tab：换一项
+        s.menu_index = (s.menu_index + 1) % MenuItems();
+        Paint();
+      } else if (s.stage == 1 && (wparam == 0x73 || wparam == 0x74)) {  // Enter / 空格：执行
+        ActivateMenu(s.menu_index);
       }
       return 0;
     case WM_DESTROY:
@@ -534,8 +749,12 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
 
   ShowWindow(s.window, SW_SHOWNOACTIVATE);
   SetWindowPos(s.window, HWND_TOPMOST, s.vx, s.vy, s.vw, s.vh, SWP_NOACTIVATE);
-  // Esc 用热键接：覆盖层不抢焦点，收不到键盘
+  // Esc 用热键接：覆盖层不抢焦点，收不到键盘。
+  // Tab/Enter/空格 同理——菜单里要用它们，一样得走热键。
   RegisterHotKey(s.window, 0x71, MOD_NOREPEAT, VK_ESCAPE);
+  RegisterHotKey(s.window, 0x72, MOD_NOREPEAT, VK_TAB);
+  RegisterHotKey(s.window, 0x73, MOD_NOREPEAT, VK_RETURN);
+  RegisterHotKey(s.window, 0x74, MOD_NOREPEAT, VK_SPACE);
   return true;
 }
 

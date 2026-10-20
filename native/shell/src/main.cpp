@@ -587,12 +587,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       return 0;
     case dshwork::capture::kMsgCaptureDone:
+      ArmHoverTab();  // 覆盖层收摊了，Tab 还给主窗口
       ShowWindow(g_window, SW_SHOWNOACTIVATE);
       if (wparam != 0) {
-        wchar_t text[64];
-        swprintf_s(text, L"已截取 %d × %d", g_capture_w, g_capture_h);
+        wchar_t text[96];
+        if (wparam == 1 && lparam == 1) {
+          swprintf_s(text, L"已截取 %d × %d · 解构待接", g_capture_w, g_capture_h);
+        } else {
+          swprintf_s(text, L"已截取 %d × %d", g_capture_w, g_capture_h);
+        }
         ShowNotice(text, 2400);
-        LogToFile("框选完成");
+        LogToFile(std::string("框选完成 action=") + std::to_string(static_cast<int>(lparam)));
       } else {
         ShowNotice(L"已取消", 1600);
         LogToFile("框选取消");
@@ -926,6 +931,7 @@ void RefreshPanelModel() {
  * 结束后由 kMsgCaptureDone 把该露出来的露回来。
  */
 void StartRegionCapture() {
+  DisarmHoverTab();  // 覆盖层要独占 Tab 进菜单，先把悬停期的那个还掉
   HidePanel(false);
   g_panel_by_hover = false;
   ShowWindow(g_window, SW_HIDE);
@@ -1047,7 +1053,7 @@ void UpdateHover() {
     }
   } else {
     // 还没弹完就走了：把待开的那一下撤掉，别让面板自己跳出来
-    DisarmHoverTab();
+    // Tab 不跟着收回（用户要随时能按），这里只撤待开的面板
     KillTimer(g_window, kOpenTimerId);
     StartChipFade(1.0f);
     SetTimer(g_window, kAnimTimerId, 16, nullptr);
@@ -1344,6 +1350,7 @@ int main() {
   PositionWindow();
   Repaint();
   CreateTrayIcon();
+  ArmHoverTab();  // Tab 常驻：随时按都该能进框选／菜单
   if (!RegisterHotKey(g_window, kHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE)) {
     LogToFile("全局热键 Ctrl+Alt+Space 注册失败（可能被别的软件占了）");
   }
