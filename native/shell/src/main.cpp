@@ -942,6 +942,8 @@ void StartRegionCapture() {
     LogToFile("框选启动失败");
     return;
   }
+  // 一进来就把轮盘摆在鼠标上：按 Tab 之后手不用先挪过去，菜单就在指针底下
+  dshwork::capture::ShowWheelAtCursor();
   LogToFile("进入框选");
 }
 

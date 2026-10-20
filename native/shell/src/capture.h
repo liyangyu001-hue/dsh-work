@@ -83,6 +83,8 @@ struct State {
   RECT selection = {};
   ULONGLONG last_paint = 0;
 
+  // 最近一次截取的 PNG：有它，Tab 之后摆出来的就是"这块拿去做什么"那一层
+  std::wstring pending_path;
   std::wstring* out_path = nullptr;
   int* out_w = nullptr;
   int* out_h = nullptr;
@@ -212,21 +214,46 @@ inline float ScaleOf() {
   return s.window ? static_cast<float>(GetDpiForWindow(s.window)) / 96.0f : 1.0f;
 }
 
-inline int MenuItems() { return 4; }
+// ── 轮盘条目 ───────────────────────────────────────────────────────────────────
+// Tab 按下去不一定有截图：没有就问"要干什么"，有截图才问"这块拿去做什么"。
+// 两层条目数不同，扇区一律按 360/n 均分，第 0 瓣永远指向正上方。
+enum MenuKind { kMenuCancel = 0, kMenuCrop = 1, kMenuDeconstruct = 2, kMenuPanel = 4, kMenuFolder = 5 };
 
-inline const wchar_t* MenuLabel(int index, const State& s) {
-  switch (index) {
-    case 0:
-      return L"重新框选";
-    case 1:
-      return L"解构这块";
-    case 2:
-      return L"直接保存";
+inline int MenuItems() { return S().pending_path.empty() ? 3 : 4; }
+
+inline const wchar_t* MenuLabel(int index) {
+  static const wchar_t* level0[] = {L"框选", L"面板", L"取消"};
+  static const wchar_t* level1[] = {L"解构这块", L"重新框选", L"打开文件夹", L"取消"};
+  const int n = MenuItems();
+  if (index < 0 || index >= n) return L"";
+  return S().pending_path.empty() ? level0[index] : level1[index];
+}
+
+inline int MenuAction(int index) {
+  static const int level0[] = {kMenuCrop, kMenuPanel, kMenuCancel};
+  static const int level1[] = {kMenuDeconstruct, kMenuCrop, kMenuFolder, kMenuCancel};
+  const int n = MenuItems();
+  if (index < 0 || index >= n) return kMenuCancel;
+  return S().pending_path.empty() ? level0[index] : level1[index];
+}
+
+/** 0=框选 1=面板 2=解构 3=文件夹 4=叉 */
+inline int MenuIcon(int index) {
+  switch (MenuAction(index)) {
+    case kMenuCrop:
+      return 0;
+    case kMenuPanel:
+      return 1;
+    case kMenuDeconstruct:
+      return 2;
+    case kMenuFolder:
+      return 3;
     default:
-      return L"取消";
+      return 4;
   }
 }
 
+/** 往画布上按 alpha 混一个像素；ULW_ALPHA 要的是逐像素 alpha，所以每次都写满 255。 */
 inline void BlendPixel(int x, int y, BYTE rr, BYTE gg, BYTE bb, float a) {
   State& s = S();
   if (x < 0 || y < 0 || x >= s.vw || y >= s.vh || a <= 0.0f) return;
@@ -239,7 +266,7 @@ inline void BlendPixel(int x, int y, BYTE rr, BYTE gg, BYTE bb, float a) {
   px[3] = 255;
 }
 
-/** 把 dot 像素的 alpha 拉满：GDI 写字不写 alpha，会在这块戳出透明的洞。 */
+/** 把一块矩形的 alpha 拉满：GDI 写字不写 alpha，会在这块戳出透明的洞。 */
 inline void OpaqueRect(RECT r) {
   State& s = S();
   for (int y = r.top; y < r.bottom; ++y) {
@@ -252,69 +279,137 @@ inline void OpaqueRect(RECT r) {
   }
 }
 
-/** 相对圆心的角度落在哪一瓣；-1 = 中心死区或环外。正上方起顺时针，每瓣 90°。 */
+inline float SegDist(float px, float py, float ax, float ay, float bx, float by) {
+  const float vx = bx - ax, vy = by - ay;
+  const float wx = px - ax, wy = py - ay;
+  const float len2 = vx * vx + vy * vy;
+  float t = len2 > 0.0f ? (wx * vx + wy * vy) / len2 : 0.0f;
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  const float dx = px - (ax + vx * t), dy = py - (ay + vy * t);
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+/** 圆头线段：轮盘上的图标全用这一种笔触拼，和圆环共用同一套 2x2 采样，所以一样干净。 */
+inline void StampCapsule(float ax, float ay, float bx, float by, float radius, BYTE rr, BYTE gg, BYTE bb) {
+  const float lo_x = (ax < bx ? ax : bx) - radius - 1.0f;
+  const float hi_x = (ax > bx ? ax : bx) + radius + 1.0f;
+  const float lo_y = (ay < by ? ay : by) - radius - 1.0f;
+  const float hi_y = (ay > by ? ay : by) + radius + 1.0f;
+  for (int y = static_cast<int>(lo_y); y <= static_cast<int>(hi_y); ++y) {
+    for (int x = static_cast<int>(lo_x); x <= static_cast<int>(hi_x); ++x) {
+      int covered = 0;
+      for (int sy = 0; sy < 2; ++sy) {
+        for (int sx = 0; sx < 2; ++sx) {
+          const float px = static_cast<float>(x) + (sx + 0.5f) * 0.5f;
+          const float py = static_cast<float>(y) + (sy + 0.5f) * 0.5f;
+          if (SegDist(px, py, ax, ay, bx, by) <= radius) ++covered;
+        }
+      }
+      if (covered > 0) BlendPixel(x, y, rr, gg, bb, static_cast<float>(covered) * 0.25f);
+    }
+  }
+}
+
+/** 四个图标都是用圆头线段拼的：好写、抗锯齿一致、不依赖任何字体或图片资源。 */
+inline void StampIcon(int kind, float cx, float cy, float size, BYTE rr, BYTE gg, BYTE bb) {
+  const float u = size * 0.5f;
+  const float th = u * 0.155f;
+  switch (kind) {
+    case 0: {  // 框选：四个直角括号
+      const float o = u * 0.74f;
+      const float arm = u * 0.58f;
+      StampCapsule(cx - o, cy - o, cx - o + arm, cy - o, th, rr, gg, bb);
+      StampCapsule(cx - o, cy - o, cx - o, cy - o + arm, th, rr, gg, bb);
+      StampCapsule(cx + o, cy - o, cx + o - arm, cy - o, th, rr, gg, bb);
+      StampCapsule(cx + o, cy - o, cx + o, cy - o + arm, th, rr, gg, bb);
+      StampCapsule(cx - o, cy + o, cx - o + arm, cy + o, th, rr, gg, bb);
+      StampCapsule(cx - o, cy + o, cx - o, cy + o - arm, th, rr, gg, bb);
+      StampCapsule(cx + o, cy + o, cx + o - arm, cy + o, th, rr, gg, bb);
+      StampCapsule(cx + o, cy + o, cx + o, cy + o - arm, th, rr, gg, bb);
+      break;
+    }
+    case 1: {  // 面板：一条长的 + 一条短的，像侧栏里那两行
+      StampCapsule(cx - u * 0.78f, cy - u * 0.34f, cx + u * 0.16f, cy - u * 0.34f, th * 1.5f, rr, gg, bb);
+      StampCapsule(cx - u * 0.78f, cy + u * 0.34f, cx + u * 0.66f, cy + u * 0.34f, th * 1.5f, rr, gg, bb);
+      break;
+    }
+    case 2: {  // 解构：四射的星芒，中心实心
+      const float r = u * 0.86f;
+      StampCapsule(cx, cy - r, cx, cy + r, th * 0.9f, rr, gg, bb);
+      StampCapsule(cx - r, cy, cx + r, cy, th * 0.9f, rr, gg, bb);
+      StampCapsule(cx - r * 0.62f, cy - r * 0.62f, cx + r * 0.62f, cy + r * 0.62f, th * 0.55f, rr, gg, bb);
+      StampCapsule(cx - r * 0.62f, cy + r * 0.62f, cx + r * 0.62f, cy - r * 0.62f, th * 0.55f, rr, gg, bb);
+      break;
+    }
+    case 3: {  // 文件夹：扁圆角块当身子，左上压一个小把手
+      StampCapsule(cx - u * 0.52f, cy - u * 0.44f, cx - u * 0.02f, cy - u * 0.44f, u * 0.15f, rr, gg, bb);
+      StampCapsule(cx - u * 0.78f, cy + u * 0.12f, cx + u * 0.78f, cy + u * 0.12f, u * 0.30f, rr, gg, bb);
+      break;
+    }
+    default: {  // 叉
+      const float r = u * 0.60f;
+      StampCapsule(cx - r, cy - r, cx + r, cy + r, th * 1.2f, rr, gg, bb);
+      StampCapsule(cx - r, cy + r, cx + r, cy - r, th * 1.2f, rr, gg, bb);
+      break;
+    }
+  }
+}
+
+/** 相对圆心的角度落在哪一瓣；-1 = 中心死区或环外。0 号瓣在正上方，顺时针均分。 */
 inline int PickSector(int rel_x, int rel_y) {
   const float sc = ScaleOf();
-  const float inner = 46.0f * sc;
-  const float outer = 106.0f * sc;
+  const float inner = 44.0f * sc;
+  const float outer = 104.0f * sc;
   const float dist2 = static_cast<float>(rel_x) * rel_x + static_cast<float>(rel_y) * rel_y;
   if (dist2 < inner * inner || dist2 > outer * outer) return -1;
   float deg = static_cast<float>(
       std::atan2(static_cast<double>(rel_y), static_cast<double>(rel_x)) * 180.0 / 3.14159265358979);
-  deg += 90.0f;  // 让 0° 指向正上方
+  deg += 90.0f;  // 从正上方量
   while (deg < 0.0f) deg += 360.0f;
   while (deg >= 360.0f) deg -= 360.0f;
-  int index = static_cast<int>(deg / 90.0f);
+  const int n = MenuItems();
+  const float step = 360.0f / static_cast<float>(n);
+  int index = static_cast<int>((deg + step * 0.5f) / step);
+  if (index >= n) index -= n;
   if (index < 0) index = 0;
-  if (index >= MenuItems()) index = MenuItems() - 1;
   return index;
 }
 
-/** 轮盘开在选区右下角（就是松手那一点）；menu_index = -1 表示现在指在死区。 */
-inline void PrepareWheel() {
+/** 轮盘永远开在当前鼠标位置——想点哪一瓣，手不用先跑过去。 */
+inline void PrepareWheelAt(int px, int py) {
   State& s = S();
-  s.wheel_cx = s.selection.right;
-  s.wheel_cy = s.selection.bottom;
+  s.stage = 1;
+  s.wheel_cx = px;
+  s.wheel_cy = py;
   s.menu_index = -1;
   s.wheel_t = 0;
   s.wheel_anim = true;
   if (s.window != nullptr) SetTimer(s.window, kWheelTimerId, 16, nullptr);
 }
-
 inline void DrawWheel() {
   State& s = S();
   if (s.stage != 1) return;
 
   const float sc = ScaleOf();
-  // 张开动画：0.86 → 1 倍缓出
   const float t = s.wheel_anim ? s.wheel_t : 1.0f;
   const float grow = 0.86f + 0.14f * (1.0f - (1.0f - t) * (1.0f - t));
   const float pi = 3.14159265358979f;
 
+  const int n = MenuItems();
+  const float step = 360.0f / static_cast<float>(n);
   const float inner = 44.0f * sc * grow;
   const float outer = 104.0f * sc * grow;
-  const float shadow_w = 30.0f * sc * grow;  // 柔和投影的宽度，撑起"浮在桌面之上"的体积
+  const float shadow_w = 30.0f * sc * grow;
   const float ext = outer + shadow_w;
   const float cx = static_cast<float>(s.wheel_cx);
   const float cy = static_cast<float>(s.wheel_cy);
-
-  // 0 号扇区居 -45°，也就是右上；每 90° 一瓣，分界线落在 -90/0/90/180
-  auto sector_of = [pi](float dy, float dx) {
-    float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / 3.14159265358979);
-    deg += 90.0f;
-    while (deg < 0.0f) deg += 360.0f;
-    while (deg >= 360.0f) deg -= 360.0f;
-    int i = static_cast<int>(deg / 90.0f);
-    return i < 0 ? 0 : (i > 3 ? 3 : i);
-  };
-  (void)pi;
 
   const int x0 = static_cast<int>(cx - ext) - 2;
   const int x1 = static_cast<int>(cx + ext) + 2;
   const int y0 = static_cast<int>(cy - ext) - 2;
   const int y1 = static_cast<int>(cy + ext) + 2;
 
-  // 每像素 2x2 采样，把覆盖率摊进各层，边缘才不会有锯齿
   for (int y = y0; y <= y1; ++y) {
     for (int x = x0; x <= x1; ++x) {
       float a_shadow = 0, a_disc = 0, a_hot = 0, a_sep = 0;
@@ -329,7 +424,6 @@ inline void DrawWheel() {
           if (d > ext) continue;
 
           if (d > outer) {
-            // 投影：往下偏 3px，越远越淡，二次衰减才不像一圈脏边
             const float k = (d - outer) / shadow_w;
             const float off = (dy - 3.0f * sc) / shadow_w;
             const float bias = off > 0.0f ? 1.0f : 0.55f;
@@ -344,18 +438,24 @@ inline void DrawWheel() {
           }
 
           a_disc += 1.0f;
-          const int sec = sector_of(dy, dx);
+          // 从正上方顺时针量角度，第 0 瓣居中在正上方
+          float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / pi);
+          deg += 90.0f;
+          while (deg < 0.0f) deg += 360.0f;
+          while (deg >= 360.0f) deg -= 360.0f;
+          int sec = static_cast<int>((deg + step * 0.5f) / step);
+          if (sec >= n) sec -= n;
+          if (sec < 0) sec = 0;
           if (s.menu_index >= 0 && sec == s.menu_index) a_hot += 1.0f;
 
           // 分界线：角向距离换算成像素宽度，远处同样 1px 粗
-          float deg = static_cast<float>(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * 180.0 / pi);
-          float rel = std::fmod(deg + 90.0f, 90.0f);
-          if (rel < 0.0f) rel += 90.0f;
-          const float ang_px = (rel < 45.0f ? rel : 90.0f - rel) * pi / 180.0f * d;
+          float rel = std::fmod(deg + step * 0.5f, step);
+          if (rel < 0.0f) rel += step;
+          const float da = rel < step * 0.5f ? rel : step - rel;
+          const float ang_px = da * pi / 180.0f * d;
           if (ang_px < 0.55f * sc) a_sep += 1.0f;
 
           if (std::fabs(d - outer) < 0.60f * sc) a_ring_o += 1.0f;
-          // 命中瓣的外沿再压一道强调色弧，比整瓣铺满更收敛
           if (s.menu_index >= 0 && sec == s.menu_index && d > outer - 2.2f * sc) a_arc += 1.0f;
         }
       }
@@ -364,13 +464,12 @@ inline void DrawWheel() {
 
       if (a_shadow > 0.0f) BlendPixel(x, y, 0, 0, 0, a_shadow * inv);
       if (a_disc > 0.0f) {
-        // 上浅下深一点点，圆面才不是一块死板的黑
         const float g = (static_cast<float>(y) - (cy - outer)) / (2.0f * outer);
         const float k = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
         BlendPixel(x, y, static_cast<int>(27.0f - 9.0f * k), static_cast<int>(29.0f - 9.0f * k),
                    static_cast<int>(37.0f - 11.0f * k), a_disc * inv * 0.97f);
       }
-      if (a_hot > 0.0f) BlendPixel(x, y, 10, 132, 255, a_hot * inv * 0.20f);
+      if (a_hot > 0.0f) BlendPixel(x, y, 10, 132, 255, a_hot * inv * 0.22f);
       if (a_sep > 0.0f) BlendPixel(x, y, 255, 255, 255, a_sep * inv * 0.075f);
       if (a_ring_o + a_ring_i > 0.0f) {
         BlendPixel(x, y, 255, 255, 255, (a_ring_o + a_ring_i) * inv * 0.09f);
@@ -380,47 +479,35 @@ inline void DrawWheel() {
     }
   }
 
-  HDC dc = s.work;
-  SetBkMode(dc, TRANSPARENT);
-  HFONT font = CreateFontW(-static_cast<int>(12.5f * sc), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                           L"Microsoft YaHei UI");
-  HFONT font_hot = CreateFontW(-static_cast<int>(13.5f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  HFONT font_hub = CreateFontW(-static_cast<int>(15.0f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-  HGDIOBJ old_font = SelectObject(dc, font);
-
-  // 每瓣的名字放在该瓣的中间半径上，横排——四个词而已，转着读反而更慢
+  // 每一瓣只放图标，名字留给中心——扇形里塞中文会挤成一团，lolPing 也是这么办的
   const float label_r = (inner + outer) * 0.5f;
-  for (int i = 0; i < MenuItems(); ++i) {
-    const float mid_deg = -45.0f + static_cast<float>(i) * 90.0f;
-    const float rad = mid_deg * pi / 180.0f;
-    const int lx = static_cast<int>(cx + label_r * std::cos(rad));
-    const int ly = static_cast<int>(cy + label_r * std::sin(rad));
-    const int half_w = static_cast<int>(46.0f * sc);
-    RECT r = {lx - half_w, ly - static_cast<int>(10.0f * sc), lx + half_w, ly + static_cast<int>(10.0f * sc)};
+  for (int i = 0; i < n; ++i) {
+    const float mid = -90.0f + static_cast<float>(i) * step;
+    const float rad = mid * pi / 180.0f;
+    const float ix = cx + label_r * std::cos(rad);
+    const float iy = cy + label_r * std::sin(rad);
     const bool is_hot = (i == s.menu_index);
-    SelectObject(dc, is_hot ? font_hot : font);
-    SetTextColor(dc, is_hot ? RGB(255, 255, 255) : RGB(168, 174, 190));
-    DrawTextW(dc, MenuLabel(i, s), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    OpaqueRect(r);
+    const float size = (is_hot ? 27.0f : 23.0f) * sc * grow;
+    if (is_hot) {
+      StampIcon(MenuIcon(i), ix, iy, size, 255, 255, 255);
+    } else {
+      StampIcon(MenuIcon(i), ix, iy, size, 206, 213, 230);
+    }
   }
 
-  // 中心：指到哪一瓣就写哪一瓣；指在死区就写"取消"
-  SelectObject(dc, font_hub);
+  HDC dc = s.work;
+  SetBkMode(dc, TRANSPARENT);
+  HFONT font_hub = CreateFontW(-static_cast<int>(14.5f * sc), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+  HGDIOBJ old_font = SelectObject(dc, font_hub);
   SetTextColor(dc, s.menu_index >= 0 ? RGB(255, 255, 255) : RGB(158, 164, 178));
   RECT hub_r = {static_cast<int>(cx - inner * 0.92f), static_cast<int>(cy - 13.0f * sc),
                 static_cast<int>(cx + inner * 0.92f), static_cast<int>(cy + 13.0f * sc)};
-  const wchar_t* hub_text = s.menu_index >= 0 ? MenuLabel(s.menu_index, s) : L"取消";
+  const wchar_t* hub_text = s.menu_index >= 0 ? MenuLabel(s.menu_index) : L"取消";
   DrawTextW(dc, hub_text, -1, &hub_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   OpaqueRect(hub_r);
-
   SelectObject(dc, old_font);
-  DeleteObject(font);
-  DeleteObject(font_hot);
   DeleteObject(font_hub);
 }
 inline void Compose() {
@@ -484,7 +571,9 @@ inline void Paint() {
   SIZE size = {s.vw, s.vh};
   POINT source = {0, 0};
   BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-  UpdateLayeredWindow(s.window, nullptr, &dest, &size, s.work, &source, 0, &blend, ULW_ALPHA);
+  const BOOL ok = UpdateLayeredWindow(s.window, nullptr, &dest, &size, s.work, &source, 0, &blend, ULW_ALPHA);
+  CapLog("paint stage=" + std::to_string(s.stage) + " ok=" + std::to_string(static_cast<int>(ok)) +
+         " t=" + std::to_string(s.wheel_t));
 }
 
 // ── 收尾 ─────────────────────────────────────────────────────────────────────
@@ -494,9 +583,9 @@ inline void Teardown(int result);
 inline void Finish() {
   State& s = S();
   if (!s.active) return;
+
   const bool selection_ok = (s.selection.right - s.selection.left) >= kMinSide &&
                             (s.selection.bottom - s.selection.top) >= kMinSide;
-
   if (!selection_ok) {
     Teardown(0);
     return;
@@ -506,40 +595,41 @@ inline void Finish() {
   const int h = s.selection.bottom - s.selection.top;
   const std::wstring path = TimestampedPath();
 
-  // 只把选框那一块抠出来另存；整张桌面不落盘（用户只框了一小块，
-  // 旁边可能就开着不该进仓库的窗口）
-  HBITMAP crop_bitmap = nullptr;
-  HDC crop_dc = nullptr;
+  // 只把选框那一块抠出来另存；整张桌面不落盘
   void* crop_bits = nullptr;
   bool saved = false;
-  if (CreateSurface(s.screen, w, h, &crop_bitmap, &crop_dc) != nullptr) {
-    crop_bits = nullptr;
-    BITMAPINFO info = MakeBitmapInfo(w, h);
-    DeleteObject(crop_bitmap);
-    DeleteDC(crop_dc);
-    crop_bitmap = CreateDIBSection(s.screen, &info, DIB_RGB_COLORS, &crop_bits, nullptr, 0);
-    if (crop_bitmap != nullptr) {
-      const size_t row_bytes = static_cast<size_t>(w) * 4;
-      for (int y = 0; y < h; ++y) {
-        const auto* src = static_cast<const BYTE*>(s.shot_bits) +
-                          (static_cast<size_t>(s.selection.top + y) * static_cast<size_t>(s.vw) +
-                           s.selection.left) * 4;
-        auto* dst = static_cast<BYTE*>(crop_bits) + static_cast<size_t>(y) * row_bytes;
-        memcpy(dst, src, row_bytes);
-      }
-      saved = SavePng(path, crop_bits, w, h);
-      DeleteObject(crop_bitmap);
+  BITMAPINFO info = MakeBitmapInfo(w, h);
+  HBITMAP crop_bitmap = CreateDIBSection(s.screen, &info, DIB_RGB_COLORS, &crop_bits, nullptr, 0);
+  if (crop_bitmap != nullptr && crop_bits != nullptr) {
+    const size_t row_bytes = static_cast<size_t>(w) * 4;
+    for (int y = 0; y < h; ++y) {
+      const auto* src = static_cast<const BYTE*>(s.shot_bits) +
+                        (static_cast<size_t>(s.selection.top + y) * static_cast<size_t>(s.vw) +
+                         s.selection.left) * 4;
+      auto* dst = static_cast<BYTE*>(crop_bits) + static_cast<size_t>(y) * row_bytes;
+      memcpy(dst, src, row_bytes);
     }
+    saved = SavePng(path, crop_bits, w, h);
+  }
+  if (crop_bitmap != nullptr) DeleteObject(crop_bitmap);
+
+  if (!saved) {
+    Teardown(0);
+    return;
   }
 
-  if (saved) {
-    if (s.out_path != nullptr) *s.out_path = path;
-    if (s.out_w != nullptr) *s.out_w = w;
-    if (s.out_h != nullptr) *s.out_h = h;
-  }
-  Teardown(saved ? 1 : 0);
+  s.pending_path = path;
+  if (s.out_path != nullptr) *s.out_path = path;
+  if (s.out_w != nullptr) *s.out_w = w;
+  if (s.out_h != nullptr) *s.out_h = h;
+
+  // 图已经落到磁盘了，别急着收摊：就地把它"能干什么"摆出来
+  POINT p = {};
+  GetCursorPos(&p);
+  CapLog("showwheel cursor=" + std::to_string(p.x) + "," + std::to_string(p.y) + " n=" + std::to_string(MenuItems()));
+  PrepareWheelAt(p.x - s.vx, p.y - s.vy);
+  Paint();
 }
-
 inline void Teardown(int result) {
   State& s = S();
   UnregisterHotKey(s.window, 0x71);
@@ -571,37 +661,46 @@ inline void Teardown(int result) {
 }
 
 /** 菜单选中某项之后要做的事。 */
+/** 菜单选中某项之后要做的事。 */
 inline void ActivateMenu(int index) {
   State& s = S();
-  switch (index) {
-    case 0:  // 重新框选：留在覆盖层里，下次按下重新拖
+  switch (MenuAction(index)) {
+    case kMenuCrop:  // 开始/重新拖框
       s.stage = 0;
       s.dragging = false;
       s.selection = {0, 0, 0, 0};
       s.wheel_anim = false;
       Paint();
       break;
-    case 1:  // 解构这块
+    case kMenuDeconstruct:  // 交给宿主拆任务树
       s.pending_action = 1;
-      Finish();
+      Teardown(1);
       break;
-    case 2:  // 直接保存
-      s.pending_action = 2;
-      Finish();
+    case kMenuPanel:  // 收起截图，让宿主把长条面板展开
+      Teardown(2);
       break;
-    default:  // 取消
+    case kMenuFolder: {  // 直接把截图所在目录打开，人自己去看
+      const std::wstring dir = CapturesDir();
+      if (!dir.empty()) {
+        ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      }
+      PrepareWheelAt(s.wheel_cx, s.wheel_cy);
+      Paint();
+      break;
+    }
+    default:
       s.dragging = false;
       Teardown(0);
       break;
   }
 }
-
 // ── 窗口过程 ─────────────────────────────────────────────────────────────────
 
 inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   State& s = S();
   switch (message) {
     case WM_LBUTTONDOWN: {
+
       // 轮盘开着：点在某一瓣上就执行；点回中心＝放弃
       if (s.stage == 1) {
         if (s.menu_index >= 0) {
@@ -650,6 +749,7 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       return 0;
     }
     case WM_LBUTTONUP: {
+
       if (!s.dragging) return 0;
       ReleaseCapture();
       s.dragging = false;
@@ -661,11 +761,8 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
         Paint();
         return 0;
       }
-      // 选中了就先问"这块拿去做什么"，不直接落盘
-      s.stage = 1;
-      s.menu_index = 2;
-      PrepareWheel();
-      Paint();
+      // 框好了：先落盘，再把"这块拿去做什么"摆在当前指针上
+      Finish();
       return 0;
     }
     case WM_RBUTTONDOWN:
@@ -875,6 +972,20 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
 }
 
 inline bool IsActive() { return S().active; }
+
+/** 轮盘是不是正开着（鼠标事件该按"选瓣"处理，而不是开始拖框）。 */
+inline bool WheelOpen() { return S().stage == 1; }
+
+/** 在当前鼠标位置摆出轮盘：没有截图就是一级（框选/面板/取消），有截图就是二级。 */
+inline void ShowWheelAtCursor() {
+  State& s = S();
+  if (!s.active) return;
+  POINT p = {};
+  GetCursorPos(&p);
+  CapLog("showwheel cursor=" + std::to_string(p.x) + "," + std::to_string(p.y) + " n=" + std::to_string(MenuItems()));
+  PrepareWheelAt(p.x - s.vx, p.y - s.vy);
+  Paint();
+}
 
 inline void Cancel() {
   State& s = S();
