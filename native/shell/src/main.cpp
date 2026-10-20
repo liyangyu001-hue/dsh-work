@@ -366,28 +366,52 @@ void DrawPill(ID2D1RenderTarget* target, const BarModel& model) {
         if (index < 0 || index >= count) break;
         // 逐层后退：越远越矮、越淡
         const float shrink = static_cast<float>(drawn) * 6.0f * scale;
-        const float left = (side < 0) ? pill_left - gap - chip_w - shrink - static_cast<float>(drawn) * (chip_w * 0.55f)
-                                      : pill_left + pill_w + gap + shrink + static_cast<float>(drawn) * (chip_w * 0.55f);
+        const float left = (side < 0) ? pill_left - gap - chip_w - shrink - static_cast<float>(drawn) * (chip_w * 0.92f)
+                                      : pill_left + pill_w + gap + shrink + static_cast<float>(drawn) * (chip_w * 0.92f);
         const D2D1_RECT_F chip = D2D1::RectF(left, chip_top + shrink * 0.5f, left + chip_w,
                                              chip_top + chip_h - shrink * 0.5f);
-        // 透明度整体乘上显隐进度：鼠标上来时卡片是"收进去"，不是"跳没了"
+        // 邻居卡必须是"看得见的卡片"，不是一层淡淡的白雾：
+        // 之前用 5.5% 白，在亮壁纸上等于不存在（实测用户直接问"为什么两边没有任务"）。
+        // 改成和药丸同族的深色玻璃，再用低透明度拉开主次。
         const float fade = g_chip_fade;
-        const float alpha = (0.055f - static_cast<float>(drawn) * 0.015f) * fade;
-        g_brush->SetColor(D2D1::ColorF(1, 1, 1, alpha));
+        const float surface = (0.62f - static_cast<float>(drawn) * 0.12f) * fade;
         if (fade > 0.01f) {
-          target->FillRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.42f, chip_h * 0.42f), g_brush);
+          g_brush->SetColor(D2D1::ColorF(0.055f, 0.055f, 0.075f, surface));
+          target->FillRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.30f, chip_h * 0.30f), g_brush);
+          // 0.5px 发丝边，让卡片在深色背景上也有个边
+          g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.10f * fade));
+          target->DrawRoundedRectangle(D2D1::RoundedRect(chip, chip_h * 0.30f, chip_h * 0.30f), g_brush,
+                                       1.0f);
         }
 
         const dshwork::NodeView& node = model.items[static_cast<size_t>(index)];
         if (left < hit_left) hit_left = left;
         if (left + chip_w > hit_right) hit_right = left + chip_w;
         if (fade > 0.01f) {
+          const float avail = chip_w - 30.0f * scale;
+          std::wstring label = node.title;
+          // 卡片只有 ~150 宽，中文标题基本放不下；DWrite 的 SetTrimming 在这里
+          // 量出来的宽度照样溢出边界，所以自己量一次、砍字、补省略号。
+          IDWriteTextLayout* probe = nullptr;
+          if (SUCCEEDED(g_dwrite->CreateTextLayout(label.c_str(), static_cast<UINT32>(label.size()),
+                                                   g_formatMeta, 4096.0f, chip_h, &probe))) {
+            DWRITE_TEXT_METRICS metrics = {};
+            if (SUCCEEDED(probe->GetMetrics(&metrics)) && metrics.width > avail && metrics.width > 0.0f) {
+              size_t keep = static_cast<size_t>(static_cast<float>(label.size()) * (avail / metrics.width));
+              if (keep < 1) keep = 1;
+              label = label.substr(0, keep - 1) + L"\u2026";
+            }
+            probe->Release();
+          }
           IDWriteTextLayout* chip_layout = nullptr;
-          g_dwrite->CreateTextLayout(node.title.c_str(), static_cast<UINT32>(node.title.size()), g_formatMeta,
-                                     chip_w - 16.0f * scale, chip_h, &chip_layout);
+          g_dwrite->CreateTextLayout(label.c_str(), static_cast<UINT32>(label.size()), g_formatMeta, avail, chip_h,
+                                     &chip_layout);
           if (chip_layout != nullptr) {
-            g_brush->SetColor(D2D1::ColorF(1, 1, 1, 0.22f * fade));
-            target->DrawTextLayout(D2D1::Point2F(left + 10.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
+            chip_layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            // 左边是已经做完的，压暗一级；右边是还没做的，亮一级
+            const float ink = (side < 0 ? 0.50f : 0.80f) * fade;
+            g_brush->SetColor(D2D1::ColorF(1, 1, 1, ink));
+            target->DrawTextLayout(D2D1::Point2F(left + 15.0f * scale, chip_top + (chip_h - pill_h * 0.34f) * 0.5f),
                                    chip_layout, g_brush);
             chip_layout->Release();
           }
