@@ -395,10 +395,12 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     const Row& row = model.rows[i];
     const bool selected = static_cast<int>(i) == model.selected;
     const D2D1_RECT_F box = D2D1::RectF(row.x, row.y, row.x + row.w, row.y + row.h);
+    // 概念节点不改颜色：试过紫色，实际看起来比原来的冷灰底脏，撤回。
     const UINT32 fill = selected ? ui::Fade(0xFF1B2A44, a) : ui::Fade(0xFF1B1D24, a);
     ui::FillRound(target, fmt.brush, box, kNodeRadius, fill);
     ui::StrokeRound(target, fmt.brush, box, kNodeRadius,
-                    selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a), selected ? 1.6f : 0.5f);
+                    selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a),
+                    selected ? 1.6f : 0.5f);
 
     // 「正在做」的框：iOS 那种「一圈在转」的效果。
     //
@@ -471,7 +473,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     std::wstring line1;
     std::wstring line2;
     SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 12.5f, line1, line2);
-    ui::Text(target, line1, fmt.body, D2D1::RectF(row.x + 28.0f, row.y + 11.0f, row.x + row.w - 16.0f, row.y + 32.0f),
+    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 11.0f, row.x + row.w - 16.0f, row.y + 32.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
       ui::Text(target, line2, fmt.body,

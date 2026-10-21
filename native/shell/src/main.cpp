@@ -299,6 +299,7 @@ float PanelContentAlpha();
 int g_focus = -1;  // 面板里选中第几张卡；-1 表示跟随当前任务
 dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
+IDWriteTextFormat* g_formatNode = nullptr;
 IDWriteTextFormat* g_formatBody = nullptr;
 IDWriteTextFormat* g_formatPanelMeta = nullptr;
 
@@ -1081,6 +1082,11 @@ bool CreateGraphics() {
                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.5f, L"zh-CN",
                                         &g_formatPanelTitle)))
     return false;
+  // 节点图标题：16 DIP。和面板标题视觉等大，缩放到 100% 也清楚。
+  if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"zh-CN",
+                                      &g_formatNode)))
+    return false;
   if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-CN",
                                         &g_formatBody)))
@@ -1251,7 +1257,7 @@ void RepaintPanel() {
     std::lock_guard<std::mutex> lock(g_model_mutex);
     model = g_panel_model;
   }
-  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
+  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_formatNode, g_brush};
   dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats,
                          static_cast<float>(px_w) / g_dpiScale, static_cast<float>(px_h) / g_dpiScale,
                          PanelContentAlpha(), PanelZoom());
@@ -1322,6 +1328,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
     row.detail = node.GetString("detail");
     row.acceptance = node.GetString("acceptance");
     row.status = node.GetString("status", "todo");
+    // 概念节点靠它区分：读不到就当普通任务，绝不凭空标成「要学」。
+    row.kind = node.GetString("kind", "task");
     if (const JValue* children = node.Get("children"); children != nullptr && children->IsArray()) {
       row.child_count = static_cast<int>(children->array.size());
       row.has_children = row.child_count > 0;
@@ -1401,7 +1409,7 @@ void RepaintReview() {
   g_target->BeginDraw();
   g_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
-  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
+  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_formatNode, g_brush};
   dshwork::review::Model model = g_review_model;
   model.read_only = g_review_read_only;
   if (g_review_busy) {

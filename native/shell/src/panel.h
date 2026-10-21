@@ -35,6 +35,7 @@ struct PanelFormats {
   IDWriteTextFormat* title = nullptr;  // 任务标题 13px
   IDWriteTextFormat* body = nullptr;   // 详情 12.5px
   IDWriteTextFormat* meta = nullptr;   // 标签/计数 10.5px
+  IDWriteTextFormat* node = nullptr;   // 节点图里的节点标题 16px：比面板正文大一号，缩放到 100% 也看得清
   ID2D1SolidColorBrush* brush = nullptr;
 };
 
