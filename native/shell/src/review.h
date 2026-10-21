@@ -55,6 +55,7 @@ struct Model {
   float pan_y = 0.0f;
   float zoom = 1.0f;
   bool fitted = false;  // 第一次排版后自动缩放到合适大小，之后尊重用户的手动视图
+  float content_h = 0.0f;  // 内容实际高度（DIP），窗口按它长个
 
   // 每颗节点「第一次被看到」的时刻，用来让新长出来的框错开淡入。
   std::unordered_map<std::string, ULONGLONG> appear;
@@ -70,10 +71,10 @@ constexpr float kHeader = 58.0f;
 constexpr float kFooter = 48.0f;
 constexpr float kPad = 26.0f;
 
-constexpr float kNodeW = 252.0f;  // 4K/1080p 都要看得清：宁可宽一点，也别把字挤小
-constexpr float kNodeH = 92.0f;   // 只有标题和徽标，别留一大片空
-constexpr float kGapX = 56.0f;   // 列间距：够画连线就行，太宽一屏放不下几颗
-constexpr float kGapY = 22.0f;   // 行间距
+constexpr float kNodeW = 200.0f;  // 紧凑：一屏能放 6 颗，像 Blender 的节点
+constexpr float kNodeH = 64.0f;   // 一行标题 + 一行副标题，压掉大半空白
+constexpr float kGapX = 48.0f;   // 列间距：够画连线就行，太宽一屏放不下几颗
+constexpr float kGapY = 20.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
 
 constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定\nconstexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
@@ -85,9 +86,16 @@ constexpr float kCommitW = 108.0f;
 constexpr float kCommitH = 32.0f;
 
 inline float WindowWidth(const Model&) { return kWindowW; }
-inline float WindowHeight(const Model&) { return kWindowH; }
+// 窗口高度跟着内容长：一层节点就是一条扁条，展开子层再长高。
+// 夹在 [kMinWindowH, kWindowH] 之间：太小放不下页脚，太大就失去浮层的轻快感。
+constexpr float kMinWindowH = 260.0f;
+inline float WindowHeight(const Model& m) {
+  if (m.content_h <= 0.0f) return kWindowH;
+  const float want = kHeader + kFooter + m.content_h + kPad * 2.0f;
+  return want < kMinWindowH ? kMinWindowH : (want > kWindowH ? kWindowH : want);
+}
 inline float BodyWidth(const Model&) { return kWindowW; }
-inline float BodyHeight(const Model&) { return kWindowH - kHeader - kFooter; }
+inline float BodyHeight(const Model& m) { return WindowHeight(m) - kHeader - kFooter; }
 
 inline float EaseOut(float t) {
   if (t <= 0.0f) return 0.0f;
@@ -173,6 +181,14 @@ inline void Layout(Model& model) {
     row.x = static_cast<float>(i) * (kNodeW + kGapX);
     row.y = static_cast<float>(row.depth) * (kNodeH + kGapY);
   }
+
+  // 记下内容真实高度：窗口按它长个（一层节点 = 一条扁条，展开子层再长高）。
+  float max_bottom = 0.0f;
+  for (const Row& row : model.rows) {
+    const float bottom = row.y + row.h;
+    if (bottom > max_bottom) max_bottom = bottom;
+  }
+  model.content_h = max_bottom;
 }
 
 /** 世界坐标的包围盒（用来做自动适配视图）。 */
@@ -465,7 +481,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     }
     // 状态点
     fmt.brush->SetColor(ui::Color(ui::Fade(StatusInk(row.status, row.depth > 0), a)));
-    const D2D1_POINT_2F dot = D2D1::Point2F(row.x + 16.0f, row.y + 20.0f);
+    const D2D1_POINT_2F dot = D2D1::Point2F(row.x + 16.0f, row.y + 18.0f);
     const float dot_r = row.status == "active" ? 4.6f : 3.6f;
     target->FillEllipse(D2D1::Ellipse(dot, dot_r, dot_r), fmt.brush);
 
@@ -473,7 +489,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     std::wstring line1;
     std::wstring line2;
     SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 12.5f, line1, line2);
-    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 11.0f, row.x + row.w - 16.0f, row.y + 32.0f),
+    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 6.0f, row.x + row.w - 14.0f, row.y + 30.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
       ui::Text(target, line2, fmt.body,
