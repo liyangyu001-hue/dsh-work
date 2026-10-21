@@ -27,6 +27,9 @@ namespace dshwork {
  * 外面再声明一个同名的就是「不明确的符号」（实测 C2872）。
  */
 inline IDWriteFactory* g_ui_dwrite = nullptr;
+// 完成按钮的按压进度：0=常态、1=按到底。main 在点击后驱动它，
+// 画的时候做一次「按下去再弹回来」，点下去才有手感。
+inline float g_btn_pulse = 0.0f;
 
 struct PanelFormats {
   IDWriteTextFormat* title = nullptr;  // 任务标题 13px
@@ -377,7 +380,16 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   Text(target, status, fmt.meta, D2D1::RectF(right_x, 26.0f * scale, w - kPadX * scale, 46.0f * scale), fmt.brush,
        model.state == WorkModel::State::Online ? dim : Fade(kWarn, alpha));
   // 「完成」是个真按钮：面板不抢焦点、也不注册全局键，所以动作只能靠点。
-  const D2D1_RECT_F done = AdvanceRectAt(w / scale, h / scale, scale);
+  D2D1_RECT_F done = AdvanceRectAt(w / scale, h / scale, scale);
+  if (g_btn_pulse > 0.0f) {
+    const float k = 1.0f - 0.10f * g_btn_pulse;  // 最多缩到九成
+    const float pcx = (done.left + done.right) * 0.5f;
+    const float pcy = (done.top + done.bottom) * 0.5f;
+    done.left = pcx + (done.left - pcx) * k;
+    done.right = pcx + (done.right - pcx) * k;
+    done.top = pcy + (done.top - pcy) * k;
+    done.bottom = pcy + (done.bottom - pcy) * k;
+  }
   FillRound(target, fmt.brush, done, 13.0f * scale, Fade(kAccent, alpha * 0.92f));
   TextCentered(target, L"完成", fmt.meta,
                D2D1::RectF(done.left, done.top, done.right, done.bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));

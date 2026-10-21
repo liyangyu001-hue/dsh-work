@@ -119,6 +119,10 @@ HWND g_panel = nullptr;
 bool g_panel_open = false;
 /** 面板是被鼠标悬停带出来的（而不是热键按出来的）——离开时要跟着收回去 */
 bool g_panel_by_hover = false;
+// 「完成」按钮的按压动画：按下后 260ms 内压下去再弹回，停表后归零。
+constexpr UINT kBtnPulseTimerId = 0x7C;
+ULONGLONG g_btn_pulse_at = 0;
+bool g_btn_pulse_on = false;
 /** 鼠标是否停在小条上。小条是穿透窗口收不到 WM_MOUSEMOVE，只能轮询光标。 */
 bool g_bar_hovered = false;
 /** 上一次绘制出来的可悬停范围（DIP，相对窗口左上角）。药丸宽度跟着文字变，只能画完才知道。 */
@@ -960,6 +964,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_TIMER:
       if (wparam == kReviewAnimTimerId) {
         TickReviewAnim();
+        return 0;
+      }
+      if (wparam == kBtnPulseTimerId) {
+        const float kk = static_cast<float>(GetTickCount64() - g_btn_pulse_at) / 260.0f;
+        // 0→1 压下去，1→2 弹回来；用一条简谐曲线，末了就停在常态
+        dshwork::g_btn_pulse = kk >= 1.0f ? 0.0f : (1.0f - std::cos(kk * 3.14159265f));
+        RepaintPanel();
+        if (kk >= 1.0f) {
+          g_btn_pulse_on = false;
+          KillTimer(g_window, kBtnPulseTimerId);
+        }
         return 0;
       }
       if (wparam == kHoverTimerId) {
@@ -2271,6 +2286,9 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         const D2D1_RECT_F done =
             dshwork::ui::AdvanceRectAt(g_panel_dip_w, g_panel_dip_h, g_dpiScale);
         if (x >= done.left && x <= done.right && y >= done.top && y <= done.bottom) {
+          g_btn_pulse_at = GetTickCount64();
+          g_btn_pulse_on = true;
+          SetTimer(g_window, kBtnPulseTimerId, 16, nullptr);
           PostIntent("node.advance");
           return 0;
         }
