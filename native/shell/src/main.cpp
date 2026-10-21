@@ -626,6 +626,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         text = g_recognize_text;
       }
       ShowNotice(text, 3600);
+
+      // 拆完了就把面板推出来：让人立刻看见新长出来的任务树，而不是自己去悬停
+
+      if (wparam != 0 && !g_panel_open) ShowPanel();
       return 0;
     }
     case kMsgKey:
@@ -1117,6 +1121,7 @@ void HidePanel(bool animated) {
     g_morph.to = PillRectPx();
     g_morph.ms = static_cast<float>(kPanelCloseMs);
     DisarmPanelKeys();
+    ArmHoverTab();  // 面板拿走的那几个键要还回去，否则关掉面板后 Tab 就哑了
     SetTimer(g_window, kAnimTimerId, 16, nullptr);
     return;
   }
@@ -1125,6 +1130,7 @@ void HidePanel(bool animated) {
   g_morph.active = false;
   g_panel_open = false;
   DisarmPanelKeys();
+  ArmHoverTab();  // 同上：把 Tab 还给小条，随时按都能进框选
   LogToFile("面板收起");
 }
 
