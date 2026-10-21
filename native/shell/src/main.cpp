@@ -803,6 +803,25 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         RepaintPanel();
       }
       return 0;
+    case WM_LBUTTONDBLCLK:
+      // 双击药丸 = 把眼下这件标记完成（单击是开面板，见 WM_LBUTTONDOWN）
+      {
+        std::thread([]() {
+          const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+          std::string body, reason;
+          if (!dshwork::HttpPostJson(endpoint, L"/dsh-work/api/intent",
+                                     "{\"intent\":{\"type\":\"node.advance\"},\"by\":\"human\"}", body,
+                                     reason)) {
+            LogToFile("双击小条失败：" + reason);
+          }
+        }).detach();
+        ShowNotice(L"已标记完成", 1600);
+      }
+      return 0;
+    case WM_LBUTTONDOWN:
+      // 单击药丸 = 展开/收起面板（悬停已经能开，这一下是给"想用鼠标点"的人）
+      if (g_panel_open) HidePanel(); else ShowPanel();
+      return 0;
     case dshwork::capture::kMsgCaptureDone:
       ArmHoverTab();  // 覆盖层收摊了，Tab 还给主窗口
       ShowWindow(g_window, SW_SHOWNOACTIVATE);
@@ -2168,6 +2187,14 @@ void UpdateHover() {
   }
   if (hovered == g_bar_hovered) return;
   g_bar_hovered = hovered;
+  // 悬停期间把 WS_EX_TRANSPARENT 摘掉：穿透窗口收不到点击，
+  // 而单击（开面板）和双击（标记完成）都得靠真的鼠标消息。
+  {
+    LONG_PTR ex = GetWindowLongPtrW(g_window, GWL_EXSTYLE);
+    ex = hovered ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
+                 : (ex | static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+    SetWindowLongPtrW(g_window, GWL_EXSTYLE, ex);
+  }
   LogToFile(std::string("hover 变化 → ") + (hovered ? "进入" : "离开"));
   Repaint();
 
@@ -2497,11 +2524,13 @@ int main() {
   g_instance = GetModuleHandleW(nullptr);
 
   WNDCLASSEXW window_class = {};
+  // CS_DBLCLKS：小条要区分单击（开面板）和双击（标记完成）
   window_class.cbSize = sizeof(window_class);
   window_class.lpfnWndProc = WindowProc;
   window_class.hInstance = g_instance;
   window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   window_class.lpszClassName = kWindowClass;
+  window_class.style |= CS_DBLCLKS;
   if (RegisterClassExW(&window_class) == 0) return 1;
 
   g_window = CreateWindowExW(

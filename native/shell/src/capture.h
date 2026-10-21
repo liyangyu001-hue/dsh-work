@@ -686,6 +686,8 @@ inline void Paint() {
 // ── 收尾 ─────────────────────────────────────────────────────────────────────
 
 inline void Teardown(int result);
+// 不截图、只是要回一个动作码（例如双击 Tab = 标记完成）。
+inline void TeardownWithAction(int action) { S().pending_action = action; Teardown(1); }
 
 inline void Finish() {
   State& s = S();
