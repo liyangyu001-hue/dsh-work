@@ -403,6 +403,7 @@ inline void DrawWheel() {
   const float cx = static_cast<float>(s.wheel_cx);
   const float cy = static_cast<float>(s.wheel_cy);
   const float gap = 3.4f;              // 每瓣两侧各留这么多度 --> 块与块等距
+  const float corner = 7.0f * sc;      // 扇区四角的圆角半径（真实圆角，走 SDF）
   const float rim = 1.3f * sc;         // 外沿亮面宽度
   const float lip = 2.2f * sc;         // 内沿压暗宽度
 
@@ -442,14 +443,32 @@ inline void DrawWheel() {
             const float dy = py - cy;
             const float d = std::sqrt(dx * dx + dy * dy);
             ++total;
-            if (d < inner || d > outer) continue;
+            // 便宜的粗筛：连圆角的余量都够不着就直接跳过
+            if (d < inner - corner || d > outer + corner) continue;
             float ang = static_cast<float>(std::atan2(static_cast<double>(dx), static_cast<double>(-dy)));
             if (ang < 0.0f) ang += two_pi;
-            if (ang < a0 || ang > a1) continue;
+            if (ang < a0 - 0.2f || ang > a1 + 0.2f) continue;
+
+            // 圆角扇区的有符号距离场：把 (径向, 切向) 当成一张长方形的局部坐标，
+            // 用圆角矩形的 SDF 判内外。这样四个角是真的圆角，而不是一刀切到圆心。
+            const float u = d - inner;                 // 0 = 内沿
+            const float arc = (a1 - a0) * d;           // 这一瓣在当前半径上的弧长
+            if (arc < 1.0f) continue;
+            const float v = (ang - a0) * d;            // 0 = 起始边
+            const float hw = (outer - inner) * 0.5f;
+            const float hh = arc * 0.5f;
+            const float r = corner < hw ? (corner < hh ? corner : hh) : (hw < hh ? hw : hh);
+            const float qx = std::fabs(u - hw) - (hw - r);
+            const float qy = std::fabs(v - hh) - (hh - r);
+            const float ox = qx > 0.0f ? qx : 0.0f;
+            const float oy = qy > 0.0f ? qy : 0.0f;
+            const float sdf = std::sqrt(ox * ox + oy * oy) +
+                              (qx > qy ? qx : qy) * ((qx > qy ? qx : qy) < 0.0f ? 1.0f : 0.0f) - r;
+            if (sdf > 0.0f) continue;
             cov += 1.0f;
-            if (d > outer - rim) cover_rim += 1.0f;
-            if (d < inner + lip) cover_lip += 1.0f;
-            if ((ang - a0) * d < 0.8f * sc || (a1 - ang) * d < 0.8f * sc) cover_edge += 1.0f;
+            if (-sdf < rim && u > hw) cover_rim += 1.0f;   // 外沿亮面只在外半侧
+            if (u < lip) cover_lip += 1.0f;                // 内沿压暗
+            if (v < 0.8f * sc || arc - v < 0.8f * sc) cover_edge += 1.0f;
           }
         }
         if (cov <= 0.0f) continue;
