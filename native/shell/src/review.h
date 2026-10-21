@@ -485,15 +485,18 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     const float dot_r = row.status == "active" ? 4.6f : 3.6f;
     target->FillEllipse(D2D1::Ellipse(dot, dot_r, dot_r), fmt.brush);
 
-    // 标题：最多两行
+    // 标题：最多两行。
+    // 这里必须按节点矩形裁剪：DWrite 排版高度比框高时会把字画到框外，
+    // 看着就像「字被切掉一半」。节点是圆角矩形，用矩形裁剪够用了。
+    target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     std::wstring line1;
     std::wstring line2;
-    SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 12.5f, line1, line2);
-    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 6.0f, row.x + row.w - 14.0f, row.y + 30.0f),
+    SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 16.0f, line1, line2);
+    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 7.0f, row.x + row.w - 14.0f, row.y + 31.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
       ui::Text(target, line2, fmt.body,
-               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 16.0f, row.y + 52.0f), fmt.brush,
+               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 14.0f, row.y + 55.0f), fmt.brush,
                ui::Fade(ui::kText, a));
     }
 
@@ -507,6 +510,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
       ui::Text(target, badge, fmt.meta, D2D1::RectF(chip.left + 6.0f, chip.top + 1.0f, chip.right, chip.bottom),
                fmt.brush, row.expanded ? ui::Fade(ui::kAccent, a) : ui::Fade(ui::kTextDim, a));
     }
+    target->PopAxisAlignedClip();
   }
 
   target->PopAxisAlignedClip();
