@@ -39,6 +39,7 @@ struct Model {
   std::vector<Row> rows;
   int selected = 0;
   int total = 0;
+  int scroll = 0;  // 第一行可见的索引；窗口只露 kMaxRowsVisible 行
   bool busy = false;
   std::wstring busy_text;
 };
@@ -83,7 +84,7 @@ inline int RowAt(const Model& model, float x, float y, float scale) {
   const float bottom = top + BodyHeight(model) * scale;
   if (y < top || y >= bottom) return -1;
   if (x < kPad * scale) return -1;
-  const int index = static_cast<int>((y - top) / (kRowH * scale));
+  const int index = model.scroll + static_cast<int>((y - top) / (kRowH * scale));
   return index >= 0 && index < static_cast<int>(model.rows.size()) ? index : -1;
 }
 
@@ -136,10 +137,14 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   FillRound(target, fmt.brush, D2D1::RectF(kPad * scale, kHeader * scale - 0.5f, w - kPad * scale, kHeader * scale + 0.5f),
             0.5f, Fade(0x1AFFFFFF, alpha));
 
-  // 行
-  for (int i = 0; i < static_cast<int>(model.rows.size()); ++i) {
+  // 行（只画可见的那一段，scroll 是窗口顶端对应的索引）
+  const int first = model.scroll < 0 ? 0 : model.scroll;
+  const int last = static_cast<int>(model.rows.size()) < first + static_cast<int>(kMaxRowsVisible)
+                       ? static_cast<int>(model.rows.size())
+                       : first + static_cast<int>(kMaxRowsVisible);
+  for (int i = first; i < last; ++i) {
     const Row& row = model.rows[static_cast<size_t>(i)];
-    const float top = (kHeader + static_cast<float>(i) * kRowH) * scale;
+    const float top = (kHeader + static_cast<float>(i - first) * kRowH) * scale;
     const float row_h = kRowH * scale;
     const bool picked = i == model.selected;
     const float indent = (kPad + static_cast<float>(row.depth) * kIndentStep) * scale;
@@ -180,6 +185,28 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
       Text(target, badge, fmt.meta,
            D2D1::RectF(text_right - 30.0f * scale, top + 14.0f * scale, text_right, top + row_h - 10.0f * scale),
            fmt.brush, Fade(row.expanded ? kAccent : kTextDim, alpha));
+    }
+  }
+
+  // 滚动条：只在装不下的时候出现。没有它，用户不知道下面还有东西。
+  {
+    const int total = static_cast<int>(model.rows.size());
+    const int visible = static_cast<int>(kMaxRowsVisible);
+    if (total > visible) {
+      // 放在标题列右缘、右列分隔线之前：滚动条在那儿最不抢戏，也不会挡到缩进线。
+      const float track_x = w - (kPad + kRightW + 9.0f) * scale;
+      const float top = kHeader * scale + 6.0f * scale;
+      const float bottom = (kHeader + static_cast<float>(visible) * kRowH) * scale - 6.0f * scale;
+      const float track_h = bottom - top;
+      FillRound(target, fmt.brush, D2D1::RectF(track_x, top, track_x + 2.5f * scale, bottom), 1.25f * scale,
+                Fade(0x14FFFFFF, alpha));
+      const float ratio = static_cast<float>(visible) / static_cast<float>(total);
+      const float thumb_h = track_h * ratio < 18.0f * scale ? 18.0f * scale : track_h * ratio;
+      const float max_scroll = static_cast<float>(total - visible);
+      const float t = max_scroll > 0.0f ? static_cast<float>(model.scroll) / max_scroll : 0.0f;
+      const float thumb_top = top + (track_h - thumb_h) * t;
+      FillRound(target, fmt.brush, D2D1::RectF(track_x, thumb_top, track_x + 2.5f * scale, thumb_top + thumb_h),
+                1.25f * scale, Fade(0x55FFFFFF, alpha));
     }
   }
 
@@ -226,9 +253,9 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
          Fade(model.busy ? kAccent : kTextDim, alpha));
 
     FillRound(target, fmt.brush, cr, 15.0f * scale, Fade(model.busy ? 0x33FFFFFF : kAccent, alpha));
-    // 三个字手动居中：DWrite 的排版格式是左对齐，直接铺满会让字贴着圆角被切掉。
-    Text(target, L"就这样", fmt.body,
-         D2D1::RectF(cr.left + 28.0f * scale, text_top, cr.right, text_bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));
+    // 居中交给 DWrite 算：不同缩放下字宽会变，手调偏移一定偏。
+    TextCentered(target, L"就这样", fmt.body,
+                 D2D1::RectF(cr.left, cr.top, cr.right, cr.bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));
   }
 }
 

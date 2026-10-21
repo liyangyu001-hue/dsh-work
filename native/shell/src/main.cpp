@@ -897,6 +897,7 @@ bool CreateGraphics() {
                                  reinterpret_cast<IUnknown**>(&g_dwrite))))
     return false;
 
+  dshwork::g_ui_dwrite = g_dwrite;
   if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"zh-CN",
                                         &g_formatTitle)))
@@ -906,6 +907,7 @@ bool CreateGraphics() {
                                         &g_formatMeta)))
     return false;
 
+  dshwork::g_ui_dwrite = g_dwrite;
   if (FAILED(g_dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.5f, L"zh-CN",
                                         &g_formatPanelTitle)))
@@ -1169,6 +1171,17 @@ void LayoutReview() {
 
 void RepaintReview() {
   if (g_review == nullptr) return;
+  // 滚动窗口跟着选中行走：选中跑到可见区外面时，自动把可见区挪过去。
+  // 放在这里而不是每个改 selected 的地方，是为了不漏（方向键、点击、展开都会调它）。
+  const int visible = static_cast<int>(dshwork::review::kMaxRowsVisible);
+  const int count = static_cast<int>(g_review_model.rows.size());
+  if (g_review_model.selected < g_review_model.scroll) g_review_model.scroll = g_review_model.selected;
+  if (g_review_model.selected >= g_review_model.scroll + visible) {
+    g_review_model.scroll = g_review_model.selected - visible + 1;
+  }
+  if (g_review_model.scroll > count - visible) g_review_model.scroll = count - visible;
+  if (g_review_model.scroll < 0) g_review_model.scroll = 0;
+
   RECT rect = {};
   GetWindowRect(g_review, &rect);
   const int px_w = rect.right - rect.left;
@@ -1272,6 +1285,21 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
       default:
         break;
+    }
+    return 0;
+  }
+  if (message == WM_MOUSEWHEEL) {
+    // 滚轮翻列表：一次三行，够快又不至于一滑就飞出去
+    const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+    const int rows = static_cast<int>(dshwork::review::kMaxRowsVisible);
+    const int count = static_cast<int>(g_review_model.rows.size());
+    const int step = delta > 0 ? -3 : 3;
+    int next = g_review_model.scroll + step;
+    if (next > count - rows) next = count - rows;
+    if (next < 0) next = 0;
+    if (next != g_review_model.scroll) {
+      g_review_model.scroll = next;
+      RepaintReview();
     }
     return 0;
   }

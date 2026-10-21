@@ -16,10 +16,17 @@
 
 #include <algorithm>
 #include <string>
-
 #include "doc.h"
 
 namespace dshwork {
+
+/**
+ * DWrite 工厂在这里存一份指针（由 main.cpp 在初始化时赋值）。
+ *
+ * 不直接 extern 去引 main.cpp 里那个全局量：它在匿名 namespace 里，
+ * 外面再声明一个同名的就是「不明确的符号」（实测 C2872）。
+ */
+inline IDWriteFactory* g_ui_dwrite = nullptr;
 
 struct PanelFormats {
   IDWriteTextFormat* title = nullptr;  // 任务标题 13px
@@ -124,6 +131,31 @@ inline void Text(ID2D1RenderTarget* target, const std::wstring& text, IDWriteTex
   brush->SetColor(Color(color));
   target->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format, rect, brush,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+}
+
+/**
+ * 文字在一个矩形里精确居中（水平 + 垂直）。
+ *
+ * 按钮上的字不能用「左对齐 + 手工加个 padding」凑——字宽随字体和缩放变，
+ * 手调的偏移一定会偏。这里交给 DWrite 排一次版，居中是它算的。
+ */
+inline void TextCentered(ID2D1RenderTarget* target, const std::wstring& text, IDWriteTextFormat* format,
+                         D2D1_RECT_F rect, ID2D1SolidColorBrush* brush, UINT32 color) {
+  if (!g_ui_dwrite || text.empty()) return;
+  IDWriteTextLayout* layout = nullptr;
+  const float w = rect.right - rect.left;
+  const float h = rect.bottom - rect.top;
+  if (w <= 0.0f || h <= 0.0f) return;
+  if (FAILED(g_ui_dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format, w, h, &layout)) ||
+      !layout) {
+    return;
+  }
+  layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+  layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  brush->SetColor(Color(color));
+  target->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+  layout->Release();
 }
 
 /**
@@ -329,8 +361,8 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   // 「完成」是个真按钮：面板不抢焦点、也不注册全局键，所以动作只能靠点。
   const D2D1_RECT_F done = AdvanceRectAt(w / scale, h / scale, scale);
   FillRound(target, fmt.brush, done, 13.0f * scale, Fade(kAccent, alpha * 0.92f));
-  Text(target, L"完成", fmt.meta, D2D1::RectF(done.left + 20.0f * scale, done.top + 5.0f * scale, done.right, done.bottom),
-       fmt.brush, Fade(0xFFFFFFFF, alpha));
+  TextCentered(target, L"完成", fmt.meta,
+               D2D1::RectF(done.left, done.top, done.right, done.bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));
 
   // 交给 AI 之后，最右列常驻一行交接状态（面板只有 132 DIP 高，别处放不下）
   std::wstring handoff_line;
