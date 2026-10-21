@@ -70,17 +70,17 @@ constexpr float kHeader = 58.0f;
 constexpr float kFooter = 48.0f;
 constexpr float kPad = 26.0f;
 
-constexpr float kNodeW = 214.0f;
-constexpr float kNodeH = 86.0f;
-constexpr float kGapX = 74.0f;   // 列间距：够画一条明显的连线
-constexpr float kGapY = 26.0f;   // 行间距
+constexpr float kNodeW = 252.0f;  // 4K/1080p 都要看得清：宁可宽一点，也别把字挤小
+constexpr float kNodeH = 92.0f;   // 只有标题和徽标，别留一大片空
+constexpr float kGapX = 56.0f;   // 列间距：够画连线就行，太宽一屏放不下几颗
+constexpr float kGapY = 22.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
 
-constexpr float kMinZoom = 0.28f;  // 展开一层后内容会很宽，允许缩得更小才装得下
+constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定\nconstexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
 constexpr float kMaxZoom = 1.60f;
 
-constexpr float kWindowW = 980.0f;
-constexpr float kWindowH = 640.0f;
+constexpr float kWindowW = 1320.0f;  // 不用 100% 屏宽：留出桌面背景，才看得出这是浮层
+constexpr float kWindowH = 720.0f;
 constexpr float kCommitW = 108.0f;
 constexpr float kCommitH = 32.0f;
 
@@ -218,7 +218,7 @@ inline void FitView(Model& model) {
     zoom = zx < zy ? zx : zy;  // 手写比较：windows.h 的 min 宏会吃掉 std::min
   }
   if (zoom > 1.0f) zoom = 1.0f;
-  if (zoom < kMinZoom) zoom = kMinZoom;
+  // 自动适配时别把字缩到看不清：够不着就让人自己拖，不硬塞\n  if (zoom < kMinFitZoom) zoom = kMinFitZoom;
   model.zoom = zoom;
 
   // 居中：把内容中心搬到面板中心
