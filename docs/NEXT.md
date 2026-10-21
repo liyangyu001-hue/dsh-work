@@ -30,9 +30,14 @@
 - **说一件事 ✅（这一轮）**：`Ctrl+Alt+N` → 原生输入框（普通窗口 + EDIT，不是分层窗口）
   → `POST /dsh-work/api/plan-text` → 与识别**共用** `parseRecognizedPlan` + `plan.set`
   → 成功后刷新模型并自动摊开面板。真机：「把 README 补一张架构图」→ 8 个节点。
+- **解构审阅窗 ✅（这一轮）**：解构不再「一次定终身」。模型拆完先落**草稿**
+  （宿主侧 `DraftPlan`，不碰 `work.json`），原生弹审阅窗：纵向缩进树 + 右列详情，
+  `Enter` 对选中项再拆一层、`Ctrl+Enter` 就这样、`Esc` 不要了。确认才
+  `POST /api/plan/commit`；草稿过期或放弃则什么都不留。
 - **下一轮从**：交接跑通之后要不要**自动触发**模型（主动回合：`turn/end` 事件或
   `ctx.schedule.create` 发 followup），让人点完「交给 AI」不用再去对话里催一句。
-- 待办：托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）；
+- 待办：审阅窗的「+N / −N」标记在展开后没画出来（`has_children` 在重建后丢了）；
+  托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）；
   学习模式的侧栏 tips（用户明确说本轮不做）。
 
 ## 进度
