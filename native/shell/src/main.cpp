@@ -176,6 +176,13 @@ std::string g_review_pending_expand;
 
 void ShowReview(const std::wstring& job);
 bool ReloadReviewDraft();
+// 审阅窗的动画状态：打开进度 + 选中块的当前位置（DIP，body 顶部起算）。
+// 逐帧在这里推进，review.h 的 Draw 只负责按这两个值画。
+float g_review_anim_open = 1.0f;
+float g_review_hl_y = -1.0f;
+ULONGLONG g_review_anim_at = 0;
+constexpr UINT kReviewAnimTimerId = 0x7B;
+
 void RepaintReview();
 void ReviewKey(int which);
 void LayoutReview();
@@ -361,6 +368,46 @@ void PollLoop() {
 float EaseOutCubic(float t) {
   const float inv = 1.0f - t;
   return 1.0f - inv * inv * inv;
+}
+
+/**
+ * 审阅窗的一帧动画。
+ *
+ * 三件事同时推进：窗口淡入（200ms）、选中块滑到新位置（跟手，约 120ms 收敛）、
+ * 新行的淡入由每行自己的 appear 时间决定（在 Draw 里算，不在这里）。
+ * 全部收敛后停表，静止时不占 CPU。
+ */
+void TickReviewAnim() {
+  if (g_review == nullptr) {
+    KillTimer(g_window, kReviewAnimTimerId);
+    return;
+  }
+  const ULONGLONG now = GetTickCount64();
+  const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
+  g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
+
+  // 可见窗口先夹好，选中块的目标位置才准。
+  const int visible = static_cast<int>(dshwork::review::kMaxRowsVisible);
+  const int count = static_cast<int>(g_review_model.rows.size());
+  if (g_review_model.selected < g_review_model.scroll) g_review_model.scroll = g_review_model.selected;
+  if (g_review_model.selected >= g_review_model.scroll + visible) {
+    g_review_model.scroll = g_review_model.selected - visible + 1;
+  }
+  if (g_review_model.scroll > count - visible) g_review_model.scroll = count - visible;
+  if (g_review_model.scroll < 0) g_review_model.scroll = 0;
+
+  const float target = static_cast<float>(g_review_model.selected - g_review_model.scroll) * dshwork::review::kRowH;
+  if (g_review_hl_y < 0.0f) g_review_hl_y = target;
+  g_review_hl_y += (target - g_review_hl_y) * 0.40f;
+  RepaintReview();
+
+  const float gap = target - g_review_hl_y;
+  const bool settled = g_review_anim_open >= 1.0f && gap < 0.3f && gap > -0.3f && (now - g_review_anim_at) > 420;
+  if (settled) {
+    g_review_hl_y = target;
+    RepaintReview();
+    KillTimer(g_window, kReviewAnimTimerId);
+  }
 }
 
 /** 两头慢中间快：收起用它，像被吸回去，而不是"啪"地消失。 */
@@ -808,6 +855,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       return 0;
     case WM_TIMER:
+      if (wparam == kReviewAnimTimerId) {
+        TickReviewAnim();
+        return 0;
+      }
       if (wparam == kHoverTimerId) {
         UpdateHover();
         return 0;
@@ -1106,6 +1157,7 @@ void RepaintPanel() {
 constexpr wchar_t kReviewClass[] = L"DSHWorkNativeReview";
 
 void RepaintReview();
+void TickReviewAnim();
 
 /** 把草稿 JSON 摊平成行：结构折进 depth，绘制与命中只认行。 */
 void BuildReviewModel(const dshwork::JValue& root) {
@@ -1152,6 +1204,21 @@ void BuildReviewModel(const dshwork::JValue& root) {
 
   for (const JValue& id : roots->array) walk(id.text, 0);
   if (model.selected >= static_cast<int>(model.rows.size())) model.selected = 0;
+
+  // 记住每一行「第一次被看到」的时间：老行沿用之前的时间戳（不重播动画），
+  // 新行（比如刚展开出来的子节点）从此刻开始淡入，并错开一点形成瀑布感。
+  const ULONGLONG now = GetTickCount64();
+  ULONGLONG stagger = 0;
+  for (const dshwork::review::Row& row : model.rows) {
+    const auto old = g_review_model.appear.find(row.id);
+    if (old != g_review_model.appear.end()) {
+      model.appear[row.id] = old->second;
+    } else {
+      model.appear[row.id] = now + stagger;
+      stagger += 26;  // 每条错开 26ms
+    }
+  }
+
   g_review_model = model;
 }
 
@@ -1214,8 +1281,12 @@ void RepaintReview() {
     model.busy = true;
     model.busy_text = g_review_note;
   }
+  dshwork::review::Anim anim;
+  anim.open = g_review_anim_open;
+  anim.highlight_y = g_review_hl_y;
+  anim.now = GetTickCount64();
   dshwork::review::Draw(g_target, model, formats, g_dpiScale, static_cast<float>(px_w) / g_dpiScale,
-                        static_cast<float>(px_h) / g_dpiScale, 1.0f);
+                        static_cast<float>(px_h) / g_dpiScale, 1.0f, anim);
   if (FAILED(g_target->EndDraw())) LogToFile("审阅窗绘制失败");
 
   POINT source = {0, 0};
@@ -1314,6 +1385,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (index >= 0) {
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
+      SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
       // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
       if (again) {
         const auto& row = g_review_model.rows[static_cast<size_t>(index)];
@@ -1431,6 +1503,11 @@ void ShowReview(const std::wstring& job) {
   SetForegroundWindow(g_review);
   SetFocus(g_review);
   g_review_open = true;
+  // 从头放一遍：淡入 + 每行错开落下 + 选中块从原位滑过来。
+  g_review_anim_open = 0.0f;
+  g_review_anim_at = GetTickCount64();
+  g_review_hl_y = -1.0f;
+  SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
   RepaintReview();
   LogToFile("审阅窗打开 job=" + dshwork::Narrow(job) + " 行数=" + std::to_string(g_review_model.rows.size()));
 }
