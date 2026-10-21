@@ -21,11 +21,14 @@
 - **建议流 ✅**：面板打开时后台请求 `POST /dsh-work/api/advise`，
   模型给一句建议 + 一条更优解，落在节点的 `advice` 挂件上；
   同一节点 60 秒内不重复请求。
-- **交接 ✅（这一轮）**：轮盘第四项写 `handoff.offer`，面板最右列显示
-  「已交给 AI / AI 正在做 / 已验收 / 已退回」。**只落意愿，不冒充执行**——
-  真正跑起来要等宿主侧接上会话。
-- **下一轮从**：交接的「真的让 AI 干」——用 `ctx.agents` 起一个会话，
-  把节点目标/验收喂进去，把 `agentSessionId` 写回 `handoff.start`。
+- **交接 ✅**：轮盘第四项写 `handoff.offer`，面板最右列显示
+  「已交给 AI / AI 正在做 / 已验收 / 已退回」。**只落意愿，不冒充执行**。
+- **交接接棒 ✅（这一轮）**：不自己起会话，走「模型自己调工具」的协议——
+  `work_status` 新增「已交给你（等你接手的节点）」段，把目标/验收和下一步动作
+  直接写进模型看得见的文本里；新增工具 `work_handoff_start` 把 `offered → running`
+  （写回 `agentSessionId`），做完照旧 `work_handoff_submit`。
+- **下一轮从**：交接跑通之后要不要**自动触发**模型（主动回合：`turn/end` 事件或
+  `ctx.schedule.create` 发 followup），让人点完「交给 AI」不用再去对话里催一句。
 - 待办：托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）；
   学习模式的侧栏 tips（用户明确说本轮不做）。
 

@@ -18,6 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Actor, ApplyResult, Intent, WorkDoc } from '@dshwork/core';
 import { linearOrder, materializePlan, progress } from '@dshwork/core';
 
+import { formatStatus, formatTree, offeredNodes, titleOf } from './format.ts';
 import { parsePlanInput } from './plan-text.ts';
 
 /** 工具需要的最小提交面：由 index.ts 注入，单测里可以直接造假。 */
@@ -122,6 +123,37 @@ export function registerTools(ctx: any, host: ToolHost): Array<() => void> {
   });
 
   register({
+    name: 'work_handoff_start',
+    description:
+      '接下一个人交给你的节点。当 work_status 里出现「已交给你」的节点、而你也真的开始做了，就调它；' +
+      '这会把交接状态标成 running，人能在屏幕上的小条里看到「AI 正在做」。做完再调 work_handoff_submit。',
+    parameters: {
+      nodeId: { type: 'string', description: '要接的节点 id，省略则用当前节点' },
+      sessionId: { type: 'string', description: '你的会话 id（不知道就省略）' },
+    },
+    output: TEXT_OUTPUT,
+    timeoutMs: 5_000,
+    async execute(args: { nodeId?: string; sessionId?: string }) {
+      const doc = await host.snapshot();
+      const nodeId = args?.nodeId ?? doc.pointer;
+      if (!nodeId) return '当前没有进行中的节点。';
+      const node = doc.nodes[nodeId];
+      if (!node) return `找不到节点 ${nodeId}。`;
+      if (node.handoff?.state === 'running') return `「${node.title}」已经在做了。`;
+      if (node.handoff?.state !== 'offered') {
+        return `「${node.title}」还没有被交给你（当前交接状态：${node.handoff?.state ?? '无'}），先让人在轮盘里点「交给 AI」。`;
+      }
+      const result = await host.commit(
+        { type: 'handoff.start', nodeId, agentSessionId: args?.sessionId ?? 'ai' },
+        'ai',
+      );
+      return result.ok
+        ? `已接下「${node.title}」，人的小条上会显示「AI 正在做」。做完用 work_handoff_submit 交回。`
+        : `接下没有落地：${result.reason}`;
+    },
+  });
+
+  register({
     name: 'work_handoff_submit',
     description:
       '当你**真的做完了**被交接的那部分工作时调用：说明你产出了什么、放在哪里、怎么验证。这不会自动结束节点 —— 人看过之后才会点通过。',
@@ -150,50 +182,3 @@ export function registerTools(ctx: any, host: ToolHost): Array<() => void> {
 
 /* ─────────────────────────── 格式化 ─────────────────────────── */
 
-/** 给模型看的进度摘要：结论 → 当前节点 → 整棵树。 */
-export function formatStatus(doc: WorkDoc): string {
-  const p = progress(doc);
-  const current = doc.pointer ? doc.nodes[doc.pointer] : null;
-  const head = current
-    ? `进度 ${p.done}/${p.total}，当前节点「${current.title}」${current.detail ? `：${current.detail}` : ''}`
-    : p.total === 0
-      ? '还没有任务树。'
-      : `进度 ${p.done}/${p.total}，没有进行中的节点。`;
-
-  const lines: string[] = [head];
-  if (current?.acceptance) lines.push(`验收标准：${current.acceptance}`);
-  if (current?.advice?.text) lines.push(`已有建议：${current.advice.text}`);
-  if (current?.handoff) lines.push(`交接状态：${current.handoff.state}`);
-
-  if (p.total > 0) {
-    lines.push('任务树：');
-    lines.push(formatTree(doc));
-  }
-  return lines.join('\n');
-}
-
-function formatTree(doc: WorkDoc): string {
-  const out: string[] = [];
-  const walk = (id: string, depth: number): void => {
-    const node = doc.nodes[id];
-    if (!node) return;
-    const mark =
-      node.id === doc.pointer
-        ? '▶'
-        : node.status === 'done'
-          ? '✔'
-          : node.status === 'skipped'
-            ? '⤼'
-            : '·';
-    const kind = node.kind === 'concept' ? '[学] ' : '';
-    out.push(`${'  '.repeat(depth)}${mark} ${kind}${node.title}`);
-    for (const child of node.children) walk(child, depth + 1);
-  };
-  for (const root of doc.roots) walk(root, 0);
-  return out.join('\n');
-}
-
-function titleOf(doc: WorkDoc, id: string | null): string {
-  if (!id) return '(无)';
-  return doc.nodes[id]?.title ?? id;
-}

@@ -94,6 +94,33 @@ export function apply(ctx: any, config?: PluginConfig): void {
   async function initialize(): Promise<void> {
     const store = await WorkStore.open({ root });
     const version = await readVersion();
+    // 一次性把宿主实际提供的服务名打进日志。cordis 的 ctx 是代理，
+    // 读一个没 inject 的服务会直接抛，所以只能一个个 try。
+    // 留着的用处：以后要接会话/agent 时，先看这一行就知道有没有。
+    {
+      const probe = ['agents', 'sessions', 'sessionController', 'llm', 'tools', 'webServer',
+        'subprocess', 'schedule', 'tokenMeter', 'storageDomain', 'workspace', 'workspaces',
+        'connection', 'logger'];
+      const found: string[] = [];
+      for (const name of probe) {
+        try {
+          if (ctx.get(name as never) !== undefined) found.push(name);
+        } catch {
+          /* 没有 inject，或者宿主根本没有这个服务 */
+        }
+      }
+      console.log('[dsh-work] 宿主服务：' + (found.length === 0 ? '（一个都没探到）' : found.join(', ')));
+      for (const target of ['agents', 'sessions'] as const) {
+        try {
+          const svc = ctx.get(target as never) as unknown as Record<string, unknown>;
+          const own = Object.keys(svc);
+          const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(svc) ?? {}).filter((k) => k !== 'constructor');
+          console.log(`[dsh-work] ${target} 的方法：own=[${own.join(',')}] proto=[${proto.join(',')}]`);
+        } catch (error) {
+          console.log(`[dsh-work] ${target} 探测失败：${String(error)}`);
+        }
+      }
+    }
 
     const host: ToolHost = {
       snapshot: async () => store.snapshot,
