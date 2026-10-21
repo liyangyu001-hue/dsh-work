@@ -27,6 +27,9 @@
   `work_status` 新增「已交给你（等你接手的节点）」段，把目标/验收和下一步动作
   直接写进模型看得见的文本里；新增工具 `work_handoff_start` 把 `offered → running`
   （写回 `agentSessionId`），做完照旧 `work_handoff_submit`。
+- **说一件事 ✅（这一轮）**：`Ctrl+Alt+N` → 原生输入框（普通窗口 + EDIT，不是分层窗口）
+  → `POST /dsh-work/api/plan-text` → 与识别**共用** `parseRecognizedPlan` + `plan.set`
+  → 成功后刷新模型并自动摊开面板。真机：「把 README 补一张架构图」→ 8 个节点。
 - **下一轮从**：交接跑通之后要不要**自动触发**模型（主动回合：`turn/end` 事件或
   `ctx.schedule.create` 发 followup），让人点完「交给 AI」不用再去对话里催一句。
 - 待办：托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）；
