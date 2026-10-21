@@ -400,52 +400,67 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     ui::StrokeRound(target, fmt.brush, box, kNodeRadius,
                     selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a), selected ? 1.6f : 0.5f);
 
-    // 「正在做」的框：一圈常亮蓝边 + 沿边跑的一段光。
-    // 静态粗边只说明"被选中"，说明不了"此刻在跑"；光在走，才知道进度是活的。
+    // 「正在做」的框：iOS 那种「一圈在转」的效果。
+    //
+    // 做法：把圆角矩形周长采样成 96 段，按「离光头的距离」算强度衰减
+    // （三次方，尾巴长、头部亮），同一段画两遍——宽而淡的一遍当辉光，
+    // 窄而亮的一遍当芯。光头从正上方出发顺时针走，和 iOS 活动环同向。
+    // 底色边框还在，所以就算动画被系统节流也不会看起来像坏了。
     if (row.status == "active") {
-      ui::StrokeRound(target, fmt.brush, box, kNodeRadius, ui::Fade(ui::kAccent, 0.55f * a), 1.6f);
-      constexpr int kPerim = 72;
-      D2D1_POINT_2F pt[kPerim + 1];
+      ui::StrokeRound(target, fmt.brush, box, kNodeRadius, ui::Fade(ui::kAccent, 0.50f * a), 1.5f);
+
+      constexpr int kN = 96;
+      D2D1_POINT_2F pt[kN + 1];
       const float r = kNodeRadius;
       const float x0 = row.x, y0 = row.y, x1 = row.x + row.w, y1 = row.y + row.h;
-      // 圆角矩形的周长按 8 段折线近似：四条边 + 四个角，够顺滑且写起来短。
-      const float straight_x = (x1 - x0) - 2.0f * r;
-      const float straight_y = (y1 - y0) - 2.0f * r;
+      const float sx = (x1 - x0) - 2.0f * r;
+      const float sy = (y1 - y0) - 2.0f * r;
       const float arc = 1.5707963f * r;
-      const float total = 2.0f * straight_x + 2.0f * straight_y + 4.0f * arc;
-      for (int s = 0; s <= kPerim; ++s) {
-        float d = static_cast<float>(s) / kPerim * total;
-        // 从左上角弧的中点起绕
-        if (d < straight_x) { pt[s] = D2D1::Point2F(x0 + r + d, y0); continue; }
-        d -= straight_x;
+      const float total = 2.0f * sx + 2.0f * sy + 4.0f * arc;
+      // 周长参数化：从左上角接缝开始，先走顶边，顺时针。
+      for (int s = 0; s <= kN; ++s) {
+        float d = static_cast<float>(s) / kN * total;
+        if (d < sx) { pt[s] = D2D1::Point2F(x0 + r + d, y0); continue; }
+        d -= sx;
         if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x1 - r + r * std::sin(k), y0 + r - r * std::cos(k)); continue; }
         d -= arc;
-        if (d < straight_y) { pt[s] = D2D1::Point2F(x1, y0 + r + d); continue; }
-        d -= straight_y;
+        if (d < sy) { pt[s] = D2D1::Point2F(x1, y0 + r + d); continue; }
+        d -= sy;
         if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x1 - r + r * std::cos(k), y1 - r + r * std::sin(k)); continue; }
         d -= arc;
-        if (d < straight_x) { pt[s] = D2D1::Point2F(x1 - r - d, y1); continue; }
-        d -= straight_x;
+        if (d < sx) { pt[s] = D2D1::Point2F(x1 - r - d, y1); continue; }
+        d -= sx;
         if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x0 + r - r * std::sin(k), y1 - r + r * std::cos(k)); continue; }
         d -= arc;
-        if (d < straight_y) { pt[s] = D2D1::Point2F(x0, y1 - r - d); continue; }
-        d -= straight_y;
+        if (d < sy) { pt[s] = D2D1::Point2F(x0, y1 - r - d); continue; }
+        d -= sy;
         const float k = d / arc * 1.5707963f;
         pt[s] = D2D1::Point2F(x0 + r - r * std::cos(k), y0 + r - r * std::sin(k));
       }
-      const float head = static_cast<float>(anim.now % 100000) * 0.00033f;
+
+      // 0.55 圈/秒：比"扫一眼跟得上"慢一点，iOS 的活动环大概是这个节奏。
+      const float head = static_cast<float>(anim.now % 100000) * 0.00055f;
       const float hl = head - std::floor(head);
-      for (int s = 0; s < kPerim; ++s) {
-        float d = (static_cast<float>(s) / kPerim) - hl;
-        d -= std::floor(d);
-        if (d < 0.15f) {
-          const float k = 1.0f - d / 0.15f;
-          fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, (0.10f + 0.80f * k) * a)));
-          target->DrawLine(pt[s], pt[s + 1], fmt.brush, 2.4f);
+      constexpr float kTail = 0.42f;
+      for (int pass = 0; pass < 2; ++pass) {
+        for (int s = 0; s < kN; ++s) {
+          float d = (static_cast<float>(s) / kN) - hl;
+          d -= std::floor(d);
+          if (d > kTail) continue;
+          const float k = 1.0f - d / kTail;
+          const float ease = k * k * k;  // 尾巴收得快，头部才显得集中
+          if (pass == 0) {
+            fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.05f + 0.22f * ease) * a)));
+            target->DrawLine(pt[s], pt[s + 1], fmt.brush, 7.0f);
+          } else {
+            // 头部偏白，像有光从边里透出来
+            const UINT32 core = ui::Fade(0xFFFFFFFF, (0.20f + 0.80f * ease) * a);
+            fmt.brush->SetColor(ui::Color(core));
+            target->DrawLine(pt[s], pt[s + 1], fmt.brush, 2.0f + 1.6f * ease);
+          }
         }
       }
     }
-
     // 状态点
     fmt.brush->SetColor(ui::Color(ui::Fade(StatusInk(row.status, row.depth > 0), a)));
     const D2D1_POINT_2F dot = D2D1::Point2F(row.x + 16.0f, row.y + 20.0f);
