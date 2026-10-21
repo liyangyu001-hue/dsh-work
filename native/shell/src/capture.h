@@ -41,6 +41,7 @@ inline void CapLog(const std::string& text) {
 constexpr wchar_t kCaptureClass[] = L"DSHWorkNativeCapture";
 constexpr UINT kMsgCaptureDone = WM_APP + 5;  // 发给主窗口：0=取消，1=完成
 constexpr UINT_PTR kWheelTimerId = 0x81;      // 轮盘张开动画的定时器
+constexpr int kWheelOpenMs = 420;             // 轮盘张开总时长（按秒算，不按帧）
 
 /** 压暗多少。0.55 保留 55% 亮度，框内原样。 */
 constexpr float kDim = 0.55f;
@@ -77,7 +78,8 @@ struct State {
   int pending_action = 2;  // 1=解构 2=直接保存，随结果一起回给宿主
   int wheel_cx = 0;  // 轮盘圆心（覆盖层坐标系，物理像素）
   int wheel_cy = 0;
-  float wheel_t = 0.0f;     // 张开动画进度 0→1
+  float wheel_t = 0.0f;     // 张开动画进度 0→1（每帧由 elapsed 重算，不按 tick 累加）
+  ULONGLONG wheel_start = 0; // 动画起点，决定「按秒」而不是「按帧」推进
   bool wheel_anim = false;
   POINT anchor = {};
   RECT selection = {};
@@ -375,8 +377,28 @@ inline void PrepareWheelAt(int px, int py) {
   s.wheel_cy = py;
   s.menu_index = -1;
   s.wheel_t = 0;
+  s.wheel_start = GetTickCount64();
   s.wheel_anim = true;
-  if (s.window != nullptr) SetTimer(s.window, kWheelTimerId, 16, nullptr);
+  if (s.window != nullptr) {
+    // 高刷屏上 16ms 一跳会明显掉帧；按刷新率算，夹在 [4, 16]
+    UINT hz = 60;
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    // 双屏刷新率可能不一样：取轮盘所在那一块
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    POINT wheel_point = {s.wheel_cx, s.wheel_cy};
+    if (GetMonitorInfoW(MonitorFromPoint(wheel_point, MONITOR_DEFAULTTONEAREST), &mi) &&
+        EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1) {
+      hz = mode.dmDisplayFrequency;
+    }
+    if (hz < 60) hz = 60;
+    if (hz > 240) hz = 240;
+    UINT frame = 1000u / hz;
+    if (frame < 4u) frame = 4u;
+    if (frame > 16u) frame = 16u;
+    SetTimer(s.window, kWheelTimerId, frame, nullptr);
+  }
 }
 /**
  * 环形菜单。
@@ -493,7 +515,7 @@ inline void DrawWheel() {
           gg += static_cast<int>((134 - gg) * 0.22f);
           b += static_cast<int>((255 - b) * 0.22f);
         }
-        BlendPixel(x, y, r, gg, b, a * 0.90f);
+        BlendPixel(x, y, r, gg, b, a * 0.985f);  // 近乎不透明：底下哪怕只是压暗的桌面，透出来也会显脏
 
         // 外沿亮面 + 内沿压暗：厚度感都在这两道
         if (cover_rim > 0.0f) BlendPixel(x, y, 255, 255, 255, cover_rim * inv * (hot ? 0.34f : 0.18f));
@@ -866,7 +888,9 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       return 0;    case WM_TIMER:
       if (wparam == kWheelTimerId) {
         // 张开动画：走完就停表，别一直空转
-        s.wheel_t += 0.09f;
+        // 按真实时间推进：WM_TIMER 的抖动、掉帧、高刷屏都不会改变动画总时长
+        const ULONGLONG elapsed = GetTickCount64() - s.wheel_start;
+        s.wheel_t = static_cast<float>(elapsed) / static_cast<float>(kWheelOpenMs);
         if (s.wheel_t >= 1.0f) {
           s.wheel_t = 1.0f;
           s.wheel_anim = false;
@@ -1053,6 +1077,19 @@ inline bool IsActive() { return S().active; }
 
 /** 轮盘是不是正开着（鼠标事件该按"选瓣"处理，而不是开始拖框）。 */
 inline bool WheelOpen() { return S().stage == 1; }
+
+/** 有没有一块够大的选好框（还没进轮盘）。长按 Tab 松手时用它决定是「提交」还是「取消」。 */
+inline bool ReadyToCommit() {
+  if (!S().active || S().stage != 0 || S().dragging) return false;
+  const int w = S().selection.right - S().selection.left;
+  const int h = S().selection.bottom - S().selection.top;
+  return w >= kMinSide && h >= kMinSide;
+}
+
+/** 把当前选框交出去（落盘 + 弹轮盘）。 */
+inline void CommitSelection() {
+  if (ReadyToCommit()) Finish();
+}
 
 /** 在当前鼠标位置摆出轮盘：没有截图就是一级（框选/面板/取消），有截图就是二级。 */
 inline void ShowWheelAtCursor() {

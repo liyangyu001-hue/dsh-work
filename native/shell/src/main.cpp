@@ -65,6 +65,13 @@ constexpr float kSideChipGap = 8.0f;
 constexpr int kSideChipCount = 2;         // 每侧最多挂两张：再多就糊成一片
 constexpr UINT kHoverTimerId = 0x77;
 constexpr UINT kAnimTimerId = 0x78;
+// Tab 是「长按手势」：按下先等一会儿，按住够久才召唤覆盖层，松手才落子。
+// 用 GetAsyncKeyState 轮询来判断松手 —— RegisterHotKey 只给按下的通知，没有抬起。
+constexpr UINT_PTR kTabWatchTimerId = 0x7a;
+constexpr ULONGLONG kTabHoldMs = 220;
+ULONGLONG g_tab_press = 0;      // 这次按下是什么时候（0 = 没在按）
+bool g_tab_gesture = false;     // 这一轮是不是「按住 Tab」唤起的框选
+bool g_tab_watch = false;       // 轮询定时器在不在跑
 constexpr UINT kOpenTimerId = 0x79;
 // 动效时长（毫秒）：改手感只改这里，别散落到各处
 constexpr DWORD kSquashMs = 420;    // 药丸挤压回弹的整段时长
@@ -564,12 +571,25 @@ void Repaint() {
   DeleteDC(memory);
 }
 
-/** 贴在工作区顶部正中。多显示器时跟着主屏，缩放变化要重算。 */
-void PositionWindow() {
-  HMONITOR monitor = MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
+/**
+ * 贴在工作区顶部正中。
+ * monitor 传 nullptr 就留在原处；传了就把小条搬到那块屏（双屏时按热键唤起到光标所在的屏）。
+ * 必须先重算 DPI：两块屏缩放不同（150% + 100%）是常态，用旧值搬过去会错位。
+ */
+void UpdateDpi();  // 定义在下面，这里先声明
+
+void PositionWindow(HMONITOR monitor = nullptr) {
+  if (monitor == nullptr) monitor = MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
   GetMonitorInfoW(monitor, &info);
+
+  // 先把窗口挪进目标显示器的范围，GetDpiForWindow 才会报那块屏的 DPI
+  const int probe_w = 8;
+  const int probe_x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - probe_w) / 2;
+  const int probe_y = info.rcWork.top + 4;
+  SetWindowPos(g_window, HWND_TOPMOST, probe_x, probe_y, probe_w, probe_w, SWP_NOACTIVATE);
+  UpdateDpi();
 
   const int px_w = static_cast<int>(kWindowWidth * g_dpiScale);
   const int px_h = static_cast<int>(kWindowHeight * g_dpiScale);
@@ -579,6 +599,41 @@ void PositionWindow() {
   // Windows 会悄悄把置顶窗口降级（lolPing issue #70），每次显示都要重申
   SetWindowPos(g_window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
+
+/**
+ * 当前显示器刷新率。用 EnumDisplaySettings 而不是 DWM：前者只要 user32，
+ * 后者要额外链 dwmapi.lib，而我们只需要一个量级正确的数字。
+ * 拿不到按 60 算；夹在 [60, 240]，免得某些虚拟显示器报 1 或 360。
+ */
+UINT RefreshHzOf(HMONITOR monitor) {
+  MONITORINFOEXW info = {};
+  info.cbSize = sizeof(info);
+  if (monitor == nullptr || !GetMonitorInfoW(monitor, &info)) return 60;
+  DEVMODEW mode = {};
+  mode.dmSize = sizeof(mode);
+  if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 60;
+  UINT hz = mode.dmDisplayFrequency;
+  if (hz == 0 || hz == 1) return 60;  // 1 表示「硬件默认」，不可信
+  if (hz < 60) hz = 60;
+  if (hz > 240) hz = 240;
+  return hz;
+}
+
+/** 动画定时器一跳多少毫秒：按当前屏刷新率算。 */
+UINT FrameIntervalMs() {
+  const UINT hz = RefreshHzOf(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY));
+  const UINT ms = 1000u / (hz == 0 ? 60u : hz);
+  return ms < 4u ? 4u : ms;
+}
+
+/** 光标所在的显示器。热键唤起时把小条搬过去——双屏用户不该被钉在第一块屏上。 */
+HMONITOR MonitorUnderCursor() {
+  POINT point = {};
+  if (!GetCursorPos(&point)) return MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
+  return MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+}
+
+void UpdateDpi();  // 前向声明：PositionWindow 里要先按目标屏重算 DPI
 
 void UpdateDpi() {
   const UINT dpi = GetDpiForWindow(g_window);
@@ -643,10 +698,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       return 0;
     case WM_HOTKEY:
       if (wparam == kHotkeyId) {
+        // 双屏：唤起到光标所在的那块屏，而不是永远粘在主屏
+        PositionWindow(MonitorUnderCursor());
         TogglePanel();
       } else if (wparam == kTabHotkeyId) {
-        // 悬停期按 Tab：直接进框选（不经过面板，少一次点击）
-        StartRegionCapture();
+        // 按下只记时间。自动重复已经被 MOD_NOREPEAT 挡掉，这里再兜一层：
+        // 同一个手势里重复到达的 WM_HOTKEY 不再重置起点，否则永远等不到阈值。
+        if (g_tab_press == 0) g_tab_press = GetTickCount64();
+        if (!g_tab_watch) {
+          g_tab_watch = true;
+          SetTimer(g_window, kTabWatchTimerId, 16, nullptr);
+        }
       } else if (wparam >= static_cast<WPARAM>(kArmedKeyIdBase)) {
         // 动作号和 id 一一对应，差值就是面板认的那个动作
         DispatchKey(static_cast<int>(wparam) - kArmedKeyIdBase);
@@ -655,6 +717,41 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_TIMER:
       if (wparam == kHoverTimerId) {
         UpdateHover();
+        return 0;
+      }
+      if (wparam == kTabWatchTimerId) {
+        const bool down = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
+        if (down) {
+          if (!g_tab_gesture && g_tab_press != 0 && GetTickCount64() - g_tab_press >= kTabHoldMs) {
+            g_tab_gesture = true;
+            // 覆盖层自己也会注册 Tab；先把手里的让出去，别两个窗口抢同一个键
+            DisarmHoverTab();
+            StartRegionCapture();
+          }
+          return 0;
+        }
+
+        // 松手：这一轮手势结束
+        KillTimer(g_window, kTabWatchTimerId);
+        g_tab_watch = false;
+        const bool was_gesture = g_tab_gesture;
+        g_tab_gesture = false;
+        g_tab_press = 0;
+        if (was_gesture) {
+          if (dshwork::capture::IsActive()) {
+            // 松手时可能已经进了轮盘（鼠标一松开就落盘弹轮盘了）——那就别动它，
+            // 否则会出现「轮盘闪一下就没了」。
+            if (dshwork::capture::WheelOpen()) {
+              /* 已经在选动作了，什么也不做 */
+            } else if (dshwork::capture::ReadyToCommit()) {
+              dshwork::capture::CommitSelection();
+            } else {
+              dshwork::capture::Cancel();
+            }
+          } else {
+            ArmHoverTab();  // 覆盖层自己收摊了，Tab 还给主窗口
+          }
+        }
         return 0;
       }
       if (wparam == kAnimTimerId) {
@@ -1185,7 +1282,7 @@ void ShowPanel() {
   g_morph.ms = static_cast<float>(kPanelOpenMs);
   g_panel_open = true;
   ArmPanelKeys();
-  SetTimer(g_window, kAnimTimerId, 16, nullptr);
+  SetTimer(g_window, kAnimTimerId, FrameIntervalMs(), nullptr);
   RepaintPanel();
   LogToFile("面板打开 from=" + std::to_string(from.right - from.left) + "x" +
             std::to_string(from.bottom - from.top) + " to=" + std::to_string(target.right - target.left) + "x" +
@@ -1206,7 +1303,7 @@ void HidePanel(bool animated) {
     g_morph.ms = static_cast<float>(kPanelCloseMs);
     DisarmPanelKeys();
     ArmHoverTab();  // 面板拿走的那几个键要还回去，否则关掉面板后 Tab 就哑了
-    SetTimer(g_window, kAnimTimerId, 16, nullptr);
+    SetTimer(g_window, kAnimTimerId, FrameIntervalMs(), nullptr);
     return;
   }
   ShowWindow(g_panel, SW_HIDE);
@@ -1577,7 +1674,12 @@ int main() {
   if (!RegisterHotKey(g_window, kHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE)) {
     LogToFile("全局热键 Ctrl+Alt+Space 注册失败（可能被别的软件占了）");
   }
-  LogToFile("原生小条启动");
+  {
+    wchar_t fps[96];
+    const UINT hz = RefreshHzOf(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY));
+    swprintf_s(fps, L"原生小条启动 刷新率=%uHz 帧间隔=%ums", hz, FrameIntervalMs());
+    LogToFile(dshwork::Narrow(fps));
+  }
 
   // 悬停轮询：小条是穿透窗口，收不到鼠标消息，只能自己看光标
   SetTimer(g_window, kHoverTimerId, 120, nullptr);
