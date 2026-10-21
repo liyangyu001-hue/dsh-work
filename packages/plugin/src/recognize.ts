@@ -64,6 +64,9 @@ export interface RecognizeInputs {
   timeoutMs?: number;
 }
 
+/** collectText 只需要模型三件套，不需要附件——建议链路不传图。 */
+export type LlmInputs = Pick<RecognizeInputs, 'llm' | 'provider' | 'model' | 'timeoutMs'>;
+
 export interface RecognizedPlan {
   title: string;
   specs: PlanSpec[];
@@ -171,8 +174,8 @@ async function admitImage(attachments: AttachmentsLike, pngBase64: string): Prom
 }
 
 /** 把流式分片拼成一段文本；流里的失败会变成可读错误，而不是静默的空字符串。 */
-async function collectText(
-  inputs: RecognizeInputs,
+export async function collectText(
+  inputs: LlmInputs,
   messages: unknown[],
   outer: AbortSignal | undefined,
 ): Promise<string> {

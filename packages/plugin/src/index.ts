@@ -22,8 +22,9 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import { planSetFromSpecs, recognizePlan } from './recognize.ts';
+import { adviseNode } from './advise.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
@@ -137,6 +138,61 @@ export function apply(ctx: any, config?: PluginConfig): void {
       },
     };
 
+    /**
+     * 给节点要一条建议。
+     *
+     * 这里刻意做成"同步等"：一句话建议几百 token，用户按下去就要看到，
+     * 拖成作业反而更麻烦。失败只回可读原因，绝不写文档。
+     */
+    const advise: AdviseApi = {
+      async request(nodeId) {
+        const llm = readService(ctx, 'llm');
+        if (llm === null) {
+          return { ok: false, status: 503, reason: '宿主没有提供 llm 服务' };
+        }
+        const doc = store.snapshot;
+        const target = nodeId ?? doc.pointer;
+        if (target === null || target === undefined) {
+          return { ok: false, status: 409, reason: '现在没有在进行中的节点' };
+        }
+        const node = doc.nodes[target];
+        if (node === undefined) {
+          return { ok: false, status: 404, reason: '没有这个节点' };
+        }
+        const selection = resolveLlmSelection(ctx, cfg);
+        try {
+          const advice = await adviseNode(
+            {
+              llm,
+              provider: selection.provider,
+              model: selection.model,
+              ...(cfg.llm?.timeoutMs === undefined ? {} : { timeoutMs: cfg.llm.timeoutMs }),
+            },
+            {
+              title: node.title,
+              detail: node.detail ?? '',
+              acceptance: node.acceptance ?? '',
+            },
+            unload.signal,
+          );
+          const intent: Intent = {
+            type: 'node.advise',
+            nodeId: target,
+            advice: {
+              text: advice.text,
+              ...(advice.alt === undefined ? {} : { alt: advice.alt }),
+              at: Date.now(),
+              model: selection.model,
+            },
+          };
+          const result = await store.commit(intent, 'ai');
+          if (!result.ok) return { ok: false, status: 409, reason: result.reason };
+          return { ok: true, text: advice.text, ...(advice.alt === undefined ? {} : { alt: advice.alt }) };
+        } catch (error) {
+          return { ok: false, status: 500, reason: describe(error) };
+        }
+      },
+    };
     // 插件卸载时把在跑的识别真正叫停：否则宿主退出后还会有一个请求挂在模型上。
     disposers.push(() => unload.abort());
 
@@ -211,6 +267,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       },
       authorize: (req) => authorizeRequest(ctx, req),
       recognize,
+      advise,
     });
 
     // 令牌先就位：伴随层的请求可能在路由注册后几十毫秒内就打进来。

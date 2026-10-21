@@ -1080,9 +1080,68 @@ void StartRegionCapture() {
   LogToFile("进入框选");
 }
 
+
+/* ───────────────────── 建议：给当前节点要一句下一步 ───────────────────── */
+
+/*
+ * 什么时候要：面板打开、且当前节点还没有建议的时候。
+ *
+ * 三个约束：
+ * 1. 同一个节点同一时刻只发一次（g_advice_pending）；
+ * 2. 失败后不追着打——同一节点 60 秒内不再重试，否则每秒一次的轮询会变成
+ *    每秒一次的模型调用；
+ * 3. 全程在后台线程，结果靠 1 秒轮询自然带回来，不额外造一条消息通道。
+ */
+std::mutex g_advice_mutex;
+std::string g_advice_pending;
+std::string g_advice_tried_id;
+ULONGLONG g_advice_tried_at = 0;
+
+void RequestAdvice(const std::string& node_id) {
+  {
+    std::lock_guard<std::mutex> lock(g_advice_mutex);
+    if (g_advice_pending == node_id) return;
+    if (g_advice_tried_id == node_id && GetTickCount64() - g_advice_tried_at < 60000) return;
+    g_advice_pending = node_id;
+    g_advice_tried_id = node_id;
+    g_advice_tried_at = GetTickCount64();
+  }
+  std::thread([node_id]() {
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (endpoint.ok) {
+      const std::string payload = "{\"nodeId\":\"" + node_id + "\"}";
+      std::string body;
+      std::string reason;
+      if (dshwork::HttpPostJson(endpoint, L"/dsh-work/api/advise", payload, body, reason)) {
+        LogToFile("建议已取回：" + node_id);
+      } else {
+        LogToFile("建议失败：" + reason);
+      }
+    } else {
+      LogToFile("建议失败：没连上宿主");
+    }
+    std::lock_guard<std::mutex> lock(g_advice_mutex);
+    if (g_advice_pending == node_id) g_advice_pending.clear();
+  }).detach();
+}
+
+/** 当前节点还没有建议时去要一条。没当前节点、或者已经有了，就什么都不做。 */
+void MaybeRequestAdvice() {
+  std::string node_id;
+  {
+    std::lock_guard<std::mutex> lock(g_model_mutex);
+    if (g_model.current < 0 || static_cast<size_t>(g_model.current) >= g_model.items.size()) return;
+    const dshwork::NodeView& node = g_model.items[static_cast<size_t>(g_model.current)];
+    if (!node.advice.empty()) return;
+    node_id = node.id;
+  }
+  if (node_id.empty()) return;
+  RequestAdvice(node_id);
+}
 void ShowPanel() {
   if (g_panel == nullptr) return;
   RefreshPanelModel();
+  MaybeRequestAdvice();
   const RECT target = PanelTargetRect();
   const RECT from = PillRectPx();
 

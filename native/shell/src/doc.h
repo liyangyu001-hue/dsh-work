@@ -19,6 +19,8 @@ struct NodeView {
   std::wstring title;
   std::wstring detail;      // 目标
   std::wstring acceptance;  // 验收
+  std::wstring advice;      // 模型给的一句话建议（可能没有）
+  std::wstring advice_alt;  // 更优解（可选）
   std::string status;       // todo / active / done / skipped
   std::string kind;         // task / concept
 };
@@ -48,6 +50,11 @@ inline void WalkNodes(const JValue& nodes, const JValue& roots, const std::strin
   view.acceptance = Widen(node->GetString("acceptance"));
   view.status = node->GetString("status", "todo");
   view.kind = node->GetString("kind", "task");
+  // advice 是可选的挂件：没有就留空，面板会自动省掉那一行
+  if (const JValue* advice = node->Get("advice")) {
+    view.advice = Widen(advice->GetString("text"));
+    view.advice_alt = Widen(advice->GetString("alt"));
+  }
   out.push_back(std::move(view));
 
   const JValue* children = node->Get("children");

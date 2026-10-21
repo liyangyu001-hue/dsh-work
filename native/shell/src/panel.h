@@ -279,6 +279,21 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
     Text(target, FitText(acceptance, kDetailBlock - 10.0f, 12.0f), fmt.body,
          D2D1::RectF(detail_left, 58.0f * scale, w - (kRightBlock + kPadX) * scale, 84.0f * scale), fmt.brush,
          dim);
+
+    // 建议是"AI 替你想过一手的下一步"，所以给它强调色；没有就整行不画，
+    // 不摆一句"暂无建议"占地方。
+    if (!node.advice.empty()) {
+      const std::wstring line = L"建议 · " + node.advice;
+      Text(target, FitText(line, kDetailBlock - 10.0f, 12.0f), fmt.body,
+           D2D1::RectF(detail_left, 88.0f * scale, w - (kRightBlock + kPadX) * scale, 112.0f * scale),
+           fmt.brush, Fade(kAccent, alpha));
+      if (!node.advice_alt.empty()) {
+        const std::wstring alt = L"更优解 · " + node.advice_alt;
+        Text(target, FitText(alt, kDetailBlock - 10.0f, 11.5f), fmt.meta,
+             D2D1::RectF(detail_left, 114.0f * scale, w - (kRightBlock + kPadX) * scale, 136.0f * scale),
+             fmt.brush, dim);
+      }
+    }
   }
 
   // ── 最右：键位与连接状态 ─────────────────────────────

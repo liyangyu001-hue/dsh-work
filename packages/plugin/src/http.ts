@@ -50,6 +50,8 @@ export interface HttpOptions {
   authorize?: (req: IncomingMessage) => number | null;
   /** 识别作业：没注入时该路由回 503，本文件因此可以脱离宿主单测。 */
   recognize?: RecognizeApi;
+  /** 节点建议：同上，没注入就 503。 */
+  advise?: AdviseApi;
 }
 
 /** 识别作业的对外视图：状态 + 一句人话，不含模型原文与图片。 */
@@ -67,6 +69,11 @@ export interface RecognizeApi {
   get(id: string): RecognizeJobView | null;
 }
 
+
+/** 节点建议：现在要一条，回来一句话。失败给可读原因，不给半成品。 */
+export interface AdviseApi {
+  request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
+}
 export function createHttpHandler(options: HttpOptions) {
   const { runtime } = options;
   const clients = new Set<ServerResponse>();
@@ -175,6 +182,30 @@ export function createHttpHandler(options: HttpOptions) {
       return;
     }
 
+    if (pathname === '/api/advise') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      if (options.advise === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供建议能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { nodeId?: unknown };
+      const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
+      const result = await options.advise.request(nodeId);
+      if (!result.ok) {
+        sendJson(res, result.status, { ok: false, error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true, text: result.text, ...(result.alt === undefined ? {} : { alt: result.alt }) });
+      return;
+    }
     if (pathname === '/api/recognize' && req.method !== 'POST') {
       sendJson(res, 405, { error: 'method not allowed' });
       return;
