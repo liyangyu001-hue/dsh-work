@@ -130,7 +130,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
        Fade(kText, alpha));
   const std::wstring count = std::to_wstring(model.total) + L" 件事";
   Text(target, count, fmt.meta,
-       D2D1::RectF(w - kPad * scale - 78.0f * scale, 20.0f * scale, w - kPad * scale, 40.0f * scale), fmt.brush,
+       D2D1::RectF(w - kPad * scale - 78.0f * scale, 14.0f * scale, w - kPad * scale, 42.0f * scale), fmt.brush,
        Fade(kTextDim, alpha));
 
   FillRound(target, fmt.brush, D2D1::RectF(kPad * scale, kHeader * scale - 0.5f, w - kPad * scale, kHeader * scale + 0.5f),
@@ -213,18 +213,22 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     const float top = h - kFooter * scale;
     FillRound(target, fmt.brush, D2D1::RectF(kPad * scale, top, w - kPad * scale, top + 1.0f), 0.5f,
               Fade(0x1AFFFFFF, alpha));
+
+    // 先算按钮矩形，再让左边的提示文字与它同一套基线——
+    // 之前两边各自"看着差不多"给 y，结果字比按钮低了一截。
+    const D2D1_RECT_F cr = CommitRectAt(width_dip, height_dip, scale);
+    const float text_top = cr.top + 5.0f * scale;
+    const float text_bottom = cr.top + 21.0f * scale;
     const std::wstring hint =
         model.busy ? model.busy_text : L"↑↓ 选 · Enter 再拆一层 · Ctrl+Enter 就这样 · Esc 不要了";
     Text(target, FitText(hint, width_dip - kPad * 2 - kCommitW - 20.0f, 11.5f), fmt.meta,
-         D2D1::RectF(kPad * scale, top + 13.0f * scale, w - (kPad + kCommitW + 20.0f) * scale, h - 6.0f * scale),
-         fmt.brush, Fade(model.busy ? kAccent : kTextDim, alpha));
+         D2D1::RectF(kPad * scale, text_top, cr.left - 16.0f * scale, text_bottom), fmt.brush,
+         Fade(model.busy ? kAccent : kTextDim, alpha));
 
-    const D2D1_RECT_F cr = CommitRectAt(width_dip, height_dip, scale);
     FillRound(target, fmt.brush, cr, 15.0f * scale, Fade(model.busy ? 0x33FFFFFF : kAccent, alpha));
     // 三个字手动居中：DWrite 的排版格式是左对齐，直接铺满会让字贴着圆角被切掉。
     Text(target, L"就这样", fmt.body,
-         D2D1::RectF(cr.left + 28.0f * scale, cr.top + 5.0f * scale, cr.right, cr.bottom - 4.0f * scale), fmt.brush,
-         Fade(0xFFFFFFFF, alpha));
+         D2D1::RectF(cr.left + 28.0f * scale, text_top, cr.right, text_bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));
   }
 }
 

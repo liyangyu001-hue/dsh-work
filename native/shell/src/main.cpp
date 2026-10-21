@@ -164,6 +164,8 @@ constexpr int kReviewKeyBase = 0x90;  // 0 上 · 1 下 · 2 回车 · 3 Ctrl+�
 
 bool g_review_open = false;
 HWND g_review = nullptr;
+/** 唤出审阅窗之前谁在前台；关窗要还回去，别把人家的输入光标抢走。 */
+HWND g_review_prev_focus = nullptr;
 std::wstring g_review_job;
 dshwork::review::Model g_review_model;
 std::wstring g_review_note = L"正在再拆一层…";
@@ -263,7 +265,6 @@ dshwork::WorkModel g_panel_model;
 IDWriteTextFormat* g_formatPanelTitle = nullptr;
 IDWriteTextFormat* g_formatBody = nullptr;
 IDWriteTextFormat* g_formatPanelMeta = nullptr;
-constexpr int kArmedKeyIdBase = 0x60;  // 0x60..0x66 给面板按键用
 
 constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
 constexpr UINT kMsgTray = WM_APP + 3;
@@ -281,7 +282,6 @@ void ShowPanel();
 constexpr UINT kHotkeyId = 0x51;
 constexpr UINT kTabHotkeyId = 0x70;   // Tab 常驻热键：开着 DSH Work 就一直监听
 bool g_hover_tab_armed = false;
-bool g_keys_armed = false;  // 面板打开期间那 6 个键被独占着
 constexpr int kTrayIconId = 1;
 
 // 这几个函数在窗口过程里就要用，定义在下面，先声明
@@ -294,8 +294,6 @@ void UpdateHover();
 void ShowTrayMenu();
 void Repaint();
 void StartRegionCapture();
-void ArmPanelKeys();
-void DisarmPanelKeys();
 void ArmHoverTab();
 void DisarmHoverTab();
 
@@ -807,9 +805,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (now - g_tab_press < 400) return 0;
         g_tab_press = now;
         StartRegionCapture();
-      } else if (wparam >= static_cast<WPARAM>(kArmedKeyIdBase)) {
-        // 动作号和 id 一一对应，差值就是面板认的那个动作
-        DispatchKey(static_cast<int>(wparam) - kArmedKeyIdBase);
       }
       return 0;
     case WM_TIMER:
@@ -887,7 +882,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       data.hWnd = g_window;
       data.uID = kTrayIconId;
       Shell_NotifyIconW(NIM_DELETE, &data);
-      DisarmPanelKeys();
       UnregisterHotKey(g_window, kHotkeyId);
       PostQuitMessage(0);
       return 0;
@@ -1045,7 +1039,6 @@ void UpdatePanelMorph() {
     ShowWindow(g_panel, SW_HIDE);
     ShowWindow(g_window, SW_SHOWNOACTIVATE);
     g_panel_open = false;
-    DisarmPanelKeys();
     LogToFile("面板收起");
   } else {
     LogToFile("面板展开完成");
@@ -1258,37 +1251,30 @@ bool ReloadReviewDraft() {
   return true;
 }
 
-void DisarmReviewKeys() {
-  for (int i = 0; i < 5; ++i) UnregisterHotKey(g_window, kReviewKeyBase + i);
-}
-
-void ArmReviewKeys() {
-  DisarmReviewKeys();
-  // 注册失败要说出来：按键收不到时最难查的就是「到底注册上没有」。
-  const struct {
-    int slot;
-    UINT mods;
-    UINT vk;
-    const char* name;
-  } keys[] = {
-      {0, MOD_NOREPEAT, VK_UP, "Up"},        {1, MOD_NOREPEAT, VK_DOWN, "Down"},
-      {2, MOD_NOREPEAT, VK_RETURN, "Enter"},  {3, MOD_CONTROL | MOD_NOREPEAT, VK_RETURN, "Ctrl+Enter"},
-      {4, MOD_NOREPEAT, VK_ESCAPE, "Esc"},
-  };
-  int ok = 0;
-  std::string failed;
-  for (const auto& key : keys) {
-    if (RegisterHotKey(g_window, kReviewKeyBase + key.slot, key.mods, key.vk)) {
-      ++ok;
-    } else {
-      if (!failed.empty()) failed += ",";
-      failed += key.name;
-    }
-  }
-  LogToFile("审阅按键已注册 " + std::to_string(ok) + "/5" + (failed.empty() ? "" : "，失败：" + failed));
-}
 
 LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_KEYDOWN) {
+    // 键盘走这个窗口自己的消息，不注册任何全局热键：
+    // 全局热键会在用户打字时把键吞掉（Tab 是唯一例外，那是我们自己唤出的手势键）。
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    switch (wparam) {
+      case VK_UP:
+        ReviewKey(0);
+        return 0;
+      case VK_DOWN:
+        ReviewKey(1);
+        return 0;
+      case VK_RETURN:
+        ReviewKey(ctrl ? 3 : 2);
+        return 0;
+      case VK_ESCAPE:
+        ReviewKey(4);
+        return 0;
+      default:
+        break;
+    }
+    return 0;
+  }
   if (message == WM_LBUTTONDOWN) {
     const float x = static_cast<float>(GET_X_LPARAM(lparam));
     const float y = static_cast<float>(GET_Y_LPARAM(lparam));
@@ -1320,9 +1306,13 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 void CloseReview() {
   g_review_open = false;
   g_review_busy = false;
-  DisarmReviewKeys();
   if (g_review != nullptr) ShowWindow(g_review, SW_HIDE);
   g_review_job.clear();
+  // 关窗之后把前台还给唤出之前那个窗口：抢一次焦点可以，赖着不走不行。
+  if (g_review_prev_focus != nullptr && IsWindow(g_review_prev_focus)) {
+    SetForegroundWindow(g_review_prev_focus);
+  }
+  g_review_prev_focus = nullptr;
   if (g_window != nullptr) ArmHoverTab();
   if (!g_panel_open) ShowWindow(g_window, SW_SHOWNOACTIVATE);
 }
@@ -1401,14 +1391,18 @@ void ShowReview(const std::wstring& job) {
     cls.hInstance = GetModuleHandleW(nullptr);
     cls.lpszClassName = kReviewClass;
     RegisterClassExW(&cls);
-    g_review = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kReviewClass,
-                               L"DSH Work 审阅", WS_POPUP, 0, 0, 100, 100, nullptr, nullptr,
-                               GetModuleHandleW(nullptr), nullptr);
+    // 审阅窗是个要动手做决定的窗口，可以抢焦点、直接从 WM_KEYDOWN 收键。
+    // 不去注册全局热键：那会把用户正在打的字一起吞掉（这是踩过的坑）。
+    g_review = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kReviewClass, L"DSH Work 审阅",
+                               WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
   }
   LayoutReview();
-  ShowWindow(g_review, SW_SHOWNOACTIVATE);
+  // 记住唤出之前谁在前台，关窗时还回去。
+  g_review_prev_focus = GetForegroundWindow();
+  ShowWindow(g_review, SW_SHOW);
+  SetForegroundWindow(g_review);
+  SetFocus(g_review);
   g_review_open = true;
-  ArmReviewKeys();
   RepaintReview();
   LogToFile("审阅窗打开 job=" + dshwork::Narrow(job) + " 行数=" + std::to_string(g_review_model.rows.size()));
 }
@@ -1703,7 +1697,6 @@ void ShowPanel() {
   g_morph.to = target;
   g_morph.ms = static_cast<float>(kPanelOpenMs);
   g_panel_open = true;
-  ArmPanelKeys();
   SetTimer(g_window, kAnimTimerId, FrameIntervalMs(), nullptr);
   RepaintPanel();
   LogToFile("面板打开 from=" + std::to_string(from.right - from.left) + "x" +
@@ -1723,7 +1716,6 @@ void HidePanel(bool animated) {
     g_morph.from = from;
     g_morph.to = PillRectPx();
     g_morph.ms = static_cast<float>(kPanelCloseMs);
-    DisarmPanelKeys();
     ArmHoverTab();  // 面板拿走的那几个键要还回去，否则关掉面板后 Tab 就哑了
     SetTimer(g_window, kAnimTimerId, FrameIntervalMs(), nullptr);
     return;
@@ -1732,7 +1724,6 @@ void HidePanel(bool animated) {
   ShowWindow(g_window, SW_SHOWNOACTIVATE);
   g_morph.active = false;
   g_panel_open = false;
-  DisarmPanelKeys();
   ArmHoverTab();  // 同上：把 Tab 还给小条，随时按都能进框选
   LogToFile("面板收起");
 }
@@ -1834,6 +1825,15 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         HidePanel();
         return 0;
       }
+      // 「完成」按钮：这一颗做完了，指针前进一格
+      {
+        const D2D1_RECT_F done =
+            dshwork::ui::AdvanceRectAt(g_panel_dip_w, g_panel_dip_h, g_dpiScale);
+        if (x >= done.left && x <= done.right && y >= done.top && y <= done.bottom) {
+          PostIntent("node.advance");
+          return 0;
+        }
+      }
       // 一排点：点哪颗就把焦点挪过去，右边就写那件事
       const int count = static_cast<int>(g_panel_model.items.size());
       if (count > 0) {
@@ -1900,7 +1900,7 @@ int HitTestDot(int px, int py) {
  * 代价说清楚：RegisterHotKey 是独占的，注册期间别的程序收不到 Tab。
  */
 void ArmHoverTab() {
-  if (g_hover_tab_armed || g_keys_armed) return;
+  if (g_hover_tab_armed) return;
   if (!RegisterHotKey(g_window, kTabHotkeyId, MOD_NOREPEAT, VK_TAB)) {
     LogToFile("Tab 常驻注册失败（多半被别的程序占了）");
     return;
@@ -2051,46 +2051,6 @@ void DispatchKey(int action) {
 
 
 
-/**
- * 面板按键：用 RegisterHotKey 临时独占，而不是全局低级键盘钩子。
- *
- * lolPing 走的是 WH_KEYBOARD_LL——那是"吞掉手势"最贴切的做法，但它的行为
- * 和键盘记录器一模一样，卡巴斯基会把整个 exe 拦掉（实测：读都读不了）。
- * 面板本来就只在鼠标停上去那几秒存在，用 RegisterHotKey 独占同样几个键
- * 代价更小：申请的是"这个键归我"，不是"所有键都给我看一眼"。
- *
- * 代价说清楚：面板开着的时候，这几个键在全系统都被我们接管（比如你在别的
- * 窗口按 Enter 也会进面板）。所以面板一收，立刻全部释放。
- */
-struct ArmedKey {
-  UINT vk;
-  int action;
-};
-constexpr ArmedKey kArmedKeys[] = {
-    {VK_RETURN, 1}, {VK_BACK, 2}, {VK_ESCAPE, 3}, {VK_LEFT, 4}, {VK_RIGHT, 5}, {VK_TAB, 6},
-};
-void ArmPanelKeys() {
-  if (g_keys_armed) return;
-  // 面板自己会独占 Tab，先把"悬停期独占"的那个撤掉，免得同一个键注册两次
-  DisarmHoverTab();
-  int ok = 0;
-  for (const ArmedKey& key : kArmedKeys) {
-    // MOD_NOREPEAT 关掉连发：按住 Enter 不该一路推进到底
-    if (RegisterHotKey(g_window, kArmedKeyIdBase + key.action, MOD_NOREPEAT, key.vk)) {
-      ++ok;
-    } else {
-      LogToFile("面板按键注册失败 vk=" + std::to_string(key.vk));
-    }
-  }
-  g_keys_armed = true;
-  LogToFile("面板按键已独占 " + std::to_string(ok) + "/6");
-}
-
-void DisarmPanelKeys() {
-  if (!g_keys_armed) return;
-  for (const ArmedKey& key : kArmedKeys) UnregisterHotKey(g_window, kArmedKeyIdBase + key.action);
-  g_keys_armed = false;
-}
 }  // namespace
 
 /**

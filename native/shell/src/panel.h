@@ -46,6 +46,22 @@ constexpr float kDotRadiusNow = 5.5f;  // 当前任务那颗点稍大
 constexpr float kMinWidth = 940.0f;
 constexpr float kMaxWidth = 1560.0f;
 
+/**
+ * 「完成」按钮的矩形（像素坐标）。
+ *
+ * 面板不抢焦点、也不注册全局热键——键位那种做法会在用户打字时把字吞掉。
+ * 所以动作只能落在鼠标上，这个矩形同时被绘制和命中测试用到，两处必须是同一个函数，
+ * 否则按钮看着在哪、点着不在哪。
+ */
+inline D2D1_RECT_F AdvanceRectAt(float width_dip, float height_dip, float scale) {
+  (void)height_dip;
+  const float right = (width_dip - kPadX) * scale;
+  const float wide = 64.0f * scale;
+  const float top = 54.0f * scale;
+  const float tall = 26.0f * scale;
+  return D2D1::RectF(right - wide, top, right, top + tall);
+}
+
 constexpr UINT32 kText = 0xFFF5F5F7;
 constexpr UINT32 kTextDim = 0xFF9A9AA0;
 constexpr UINT32 kAccent = 0xFF0A84FF;
@@ -305,13 +321,16 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
 
   }
 
-  // ── 最右：键位与连接状态 ─────────────────────────────
+  // ── 最右：完成按钮与连接状态 ─────────────────────────
   const float right_x = w - (kPadX + kRightBlock) * scale;
   const std::wstring status = model.state == WorkModel::State::Online ? L"已连接" : L"未连接";
-  Text(target, status, fmt.meta, D2D1::RectF(right_x, 30.0f * scale, w - kPadX * scale, 52.0f * scale), fmt.brush,
+  Text(target, status, fmt.meta, D2D1::RectF(right_x, 26.0f * scale, w - kPadX * scale, 46.0f * scale), fmt.brush,
        model.state == WorkModel::State::Online ? dim : Fade(kWarn, alpha));
-  Text(target, L"Esc 收起", fmt.meta, D2D1::RectF(right_x, 72.0f * scale, w - kPadX * scale, 94.0f * scale),
-       fmt.brush, dim);
+  // 「完成」是个真按钮：面板不抢焦点、也不注册全局键，所以动作只能靠点。
+  const D2D1_RECT_F done = AdvanceRectAt(w / scale, h / scale, scale);
+  FillRound(target, fmt.brush, done, 13.0f * scale, Fade(kAccent, alpha * 0.92f));
+  Text(target, L"完成", fmt.meta, D2D1::RectF(done.left + 20.0f * scale, done.top + 5.0f * scale, done.right, done.bottom),
+       fmt.brush, Fade(0xFFFFFFFF, alpha));
 
   // 交给 AI 之后，最右列常驻一行交接状态（面板只有 132 DIP 高，别处放不下）
   std::wstring handoff_line;
