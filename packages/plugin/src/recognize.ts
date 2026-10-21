@@ -67,6 +67,61 @@ export interface RecognizeInputs {
 /** collectText 只需要模型三件套，不需要附件——建议链路不传图。 */
 export type LlmInputs = Pick<RecognizeInputs, 'llm' | 'provider' | 'model' | 'timeoutMs'>;
 
+/**
+ * 二次解构：把草稿里的一颗节点再拆细。
+ *
+ * 刻意只处理「补全」而不是「重做」：补全只往子层加节点，已经看过、满意的兄弟节点
+ * 一个都不动；重做会打乱顺序，是另一件事。
+ */
+export const EXPAND_PROMPT = [
+  '下面这张任务树里的某一个节点，现在要把它拆成可以直接动手的几个小步骤。',
+  '',
+  '只输出 JSON：{"title":"…","nodes":[{"title":"…","detail":"…","acceptance":"…"}]}',
+  '要求：',
+  '1. 2~5 个步骤，按先后顺序排；',
+  '2. 每一步都要能在一次坐下来里做完，标题不超过 18 个字；',
+  '3. acceptance 写“怎么算做完了”，必须能被外人检查；',
+  '4. 不要重复父节点的标题，直接写动作；',
+  '5. 不要输出 JSON 以外的任何东西。',
+].join('\n');
+
+export async function expandNode(
+  inputs: LlmInputs,
+  node: { title: string; detail: string; acceptance: string },
+  signal?: AbortSignal,
+): Promise<Recognized> {
+  const ask = [
+    EXPAND_PROMPT,
+    '',
+    `父节点：${node.title}`,
+    node.detail === '' ? '' : `目标：${node.detail}`,
+    node.acceptance === '' ? '' : `原来的验收：${node.acceptance}`,
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+
+  const raw = await collectText(inputs, [{ role: 'user', content: [{ type: 'text', text: ask }] }], signal);
+  const first = parseRecognizedPlan(raw);
+  if (first.specs.length > 0) return { ...first, raw, attempts: 1 };
+
+  const repaired = await collectText(
+    inputs,
+    [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: ask },
+          { type: 'text', text: REPAIR_PROMPT },
+        ],
+      },
+    ],
+    signal,
+  ).catch(() => '');
+
+  const second = parseRecognizedPlan(repaired === '' ? raw : repaired);
+  return { ...second, raw: repaired === '' ? raw : repaired, attempts: 2 };
+}
+
 export interface RecognizedPlan {
   title: string;
   specs: PlanSpec[];
@@ -147,6 +202,33 @@ export function planSetFromSpecs(
 ): Extract<Intent, { type: 'plan.set' }> {
   const plan = materializePlan(specs, { now: options.now, newId: options.newId });
   return planSetIntent(plan.roots, plan.nodes, options.title);
+}
+
+/**
+ * 草稿：已经物化成节点、但**还没有进文档**的一张计划树。
+ *
+ * 为什么要这一层：解构结果现在要先给人看一眼、允许就地再拆，满意了才落库。
+ * 把「草稿」和「文档」分开存，用户中途关掉什么都不留；这条和「识别失败不写任何东西」
+ * 是同一条原则的下半句。
+ */
+export interface DraftPlan {
+  title: string;
+  roots: readonly string[];
+  nodes: readonly WorkNode[];
+}
+
+/** 生成草稿：同样的 materialize，只是不提交。 */
+export function draftFromSpecs(
+  specs: readonly PlanSpec[],
+  options: { now: number; newId: () => string; title?: string },
+): DraftPlan {
+  const plan = materializePlan(specs, { now: options.now, newId: options.newId });
+  return { title: options.title ?? '', roots: plan.roots, nodes: plan.nodes };
+}
+
+/** 草稿 → plan.set：确认之后才走这一步，落库只有这一条路。 */
+export function planSetFromDraft(draft: DraftPlan): Extract<Intent, { type: 'plan.set' }> {
+  return planSetIntent([...draft.roots], [...draft.nodes], draft.title);
 }
 
 function planSetIntent(

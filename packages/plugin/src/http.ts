@@ -25,7 +25,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import type { Actor, ApplyResult, Intent, WorkDoc } from '@dshwork/core';
+import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 
 export const ROUTE_PREFIX = '/dsh-work';
 
@@ -63,6 +63,8 @@ export interface RecognizeJobView {
   title?: string;
   count?: number;
   reason?: string;
+  /** 作业 id：拿到它才能去 /api/plan/<id> 取草稿、或者提交草稿。 */
+  draft?: string;
 }
 
 export interface RecognizeApi {
@@ -70,6 +72,14 @@ export interface RecognizeApi {
   start(png: Buffer): { ok: true; id: string } | { ok: false; status: number; reason: string };
   /** 查询作业；不存在（含已过期）返回 null。 */
   get(id: string): RecognizeJobView | null;
+  /** 确认草稿：到这一步才落库。 */
+  commit(id: string): Promise<{ ok: true; count: number } | { ok: false; reason: string }>;
+  /** 丢掉草稿；不写文档。 */
+  discard(id: string): boolean;
+  /** 取草稿树；没有就 null。 */
+  draft(id: string): { title: string; roots: readonly string[]; nodes: readonly WorkNode[] } | null;
+  /** 二次解构：把一颗节点再拆细，成功后草稿就地更新。 */
+  expand(id: string, nodeId: string): Promise<{ ok: true; added: number } | { ok: false; reason: string }>;
 }
 
 
@@ -295,11 +305,108 @@ export function createHttpHandler(options: HttpOptions) {
       return;
     }
 
+    if (pathname === '/api/plan/commit' && req.method === 'POST') {
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { jobId?: unknown };
+      const jobId = typeof payload.jobId === 'string' ? payload.jobId : '';
+      if (jobId === '') {
+        sendJson(res, 400, { ok: false, error: '缺少 jobId' });
+        return;
+      }
+      const result = await options.recognize.commit(jobId);
+      sendJson(res, result.ok ? 200 : 409, { ...result, ok: result.ok });
+      return;
+    }
+
+    if (pathname === '/api/plan/discard' && req.method === 'POST') {
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { jobId?: unknown };
+      const jobId = typeof payload.jobId === 'string' ? payload.jobId : '';
+      if (jobId === '') {
+        sendJson(res, 400, { ok: false, error: '缺少 jobId' });
+        return;
+      }
+      options.recognize.discard(jobId);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (pathname === '/api/plan/expand' && req.method === 'POST') {
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { jobId?: unknown; nodeId?: unknown };
+      const jobId = typeof payload.jobId === 'string' ? payload.jobId : '';
+      const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId : '';
+      if (jobId === '' || nodeId === '') {
+        sendJson(res, 400, { ok: false, error: '缺少 jobId 或 nodeId' });
+        return;
+      }
+      const result = await options.recognize.expand(jobId, nodeId);
+      sendJson(res, result.ok ? 200 : 502, { ...result, ok: result.ok });
+      return;
+    }
+
+    // 草稿树：给审阅窗口渲染用。刻意和 /api/state 分开——草稿不属于文档。
+    if (pathname.startsWith('/api/plan/')) {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const id = decodeURIComponent(pathname.slice('/api/plan/'.length));
+      const draft = options.recognize.draft(id);
+      if (draft === null) {
+        sendJson(res, 404, { ok: false, error: '没有这张草稿（可能已过期）' });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        title: draft.title,
+        roots: draft.roots,
+        nodes: draft.nodes.map((node) => ({
+          id: node.id,
+          parentId: node.parentId,
+          title: node.title,
+          detail: node.detail,
+          acceptance: node.acceptance,
+          children: node.children,
+          status: node.status,
+          kind: node.kind,
+        })),
+      });
+      return;
+    }
+
     if (pathname === '/api/events') {
       openStream(req, res);
       return;
     }
-
     sendJson(res, 404, { error: 'not found' });
   }
 

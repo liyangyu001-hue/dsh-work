@@ -77,6 +77,22 @@ function fakeApi(views: Map<string, RecognizeJobView>): { api: RecognizeApi; cal
       calls.push(`get:${id}`);
       return views.get(id) ?? null;
     },
+    async commit(id: string) {
+      calls.push(`commit:${id}`);
+      return { ok: true as const, count: 3 };
+    },
+    discard(id: string) {
+      calls.push(`discard:${id}`);
+      return true;
+    },
+    draft(id: string) {
+      calls.push(`draft:${id}`);
+      return null;
+    },
+    async expand(id: string, nodeId: string) {
+      calls.push(`expand:${id}:${nodeId}`);
+      return { ok: true as const, added: 2 };
+    },
   };
   return { api, calls };
 }
@@ -112,6 +128,10 @@ test('识别：同一时刻只认一张图（409 原样透传）', async () => {
   const api: RecognizeApi = {
     start: () => ({ ok: false, status: 409, reason: '上一张截图还在识别中' }),
     get: () => null,
+    commit: async () => ({ ok: false as const, reason: '未使用' }),
+    discard: () => true,
+    draft: () => null,
+    expand: async () => ({ ok: false as const, reason: '未使用' }),
   };
   const h = await start({ recognize: api });
   try {

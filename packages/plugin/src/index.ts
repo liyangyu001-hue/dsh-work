@@ -23,7 +23,8 @@ import { createId } from '@dshwork/core';
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
 import type { AdviseApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
-import { planSetFromSpecs, recognizePlan } from './recognize.ts';
+import type { DraftPlan } from './recognize.ts';
+import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviseNode } from './advise.ts';
 import { planFromText } from './planning.ts';
 import { WorkStore } from './store.ts';
@@ -185,6 +186,78 @@ export function apply(ctx: any, config?: PluginConfig): void {
         const job = jobs.get(id);
         return job === undefined ? null : job.view;
       },
+      /**
+       * 确认这张草稿：到这一步才真的落库。
+       *
+       * 幂等：同一份草稿提交两次，第二次只会拿到「已经提交过了」。
+       */
+      async commit(id: string) {
+        const job = jobs.get(id);
+        if (job === undefined) return { ok: false, reason: '没有这张草稿（可能已经过期）' };
+        if (job.draft === undefined) return { ok: false, reason: '这张草稿是空的' };
+        if (job.committed) return { ok: false, reason: '这张草稿已经提交过了' };
+        const result = await store.commit(planSetFromDraft(job.draft), 'ai');
+        if (!result.ok) return { ok: false, reason: result.reason };
+        job.committed = true;
+        return { ok: true, count: job.draft.nodes.length };
+      },
+      /** 丢掉草稿。不写文档，只把内存里那份清掉。 */
+      discard(id: string) {
+        const job = jobs.get(id);
+        if (job === undefined) return true;
+        job.draft = undefined;
+        return true;
+      },
+      draft(id: string) {
+        const job = jobs.get(id);
+        return job?.draft ?? null;
+      },
+      /**
+       * 二次解构：把草稿里的一颗节点再拆细。
+       *
+       * 只动这颗节点的子层：它的兄弟、它自己的状态一个都不碰。
+       * 失败只回可读原因，草稿原样不动——半张拆坏的子树比没拆更糟。
+       */
+      async expand(id: string, nodeId: string) {
+        const job = jobs.get(id);
+        if (job?.draft === undefined) return { ok: false, reason: '没有这张草稿（可能已过期）' };
+        const node = job.draft.nodes.find((item) => item.id === nodeId);
+        if (node === undefined) return { ok: false, reason: '草稿里没有这颗节点' };
+
+        const llm = readService(ctx, 'llm');
+        if (llm === null) return { ok: false, reason: '宿主没有提供 llm 服务' };
+        const selection = resolveLlmSelection(ctx, cfg);
+        try {
+          const expanded = await expandNode(
+            {
+              llm,
+              provider: selection.provider,
+              model: selection.model,
+              ...(cfg.llm?.timeoutMs === undefined ? {} : { timeoutMs: cfg.llm.timeoutMs }),
+            },
+            { title: node.title, detail: node.detail ?? '', acceptance: node.acceptance ?? '' },
+            AbortSignal.any([unload.signal, job.controller.signal]),
+          );
+          if (expanded.specs.length === 0) {
+            return { ok: false, reason: `模型没有给出可解析的拆分（试了 ${expanded.attempts} 次）` };
+          }
+
+          const children = draftFromSpecs(expanded.specs, {
+            now: Date.now(),
+            newId: () => createId('nd'),
+          }).nodes.map((child) => ({ ...child, parentId: nodeId }));
+
+          const grafted = { ...node, children: children.map((child) => child.id) };
+          job.draft = {
+            ...job.draft,
+            nodes: [...job.draft.nodes.filter((item) => item.id !== nodeId), grafted, ...children],
+          };
+          job.at = Date.now();
+          return { ok: true, added: children.length };
+        } catch (error) {
+          return { ok: false, reason: describe(error) };
+        }
+      },
     };
 
     /**
@@ -329,18 +402,14 @@ export function apply(ctx: any, config?: PluginConfig): void {
           return;
         }
 
-        const intent = planSetFromSpecs(recognized.specs, {
+        const draft = draftFromSpecs(recognized.specs, {
           now: Date.now(),
           newId: () => createId('nd'),
           title: recognized.title,
         });
-        const result = await store.commit(intent, 'ai');
-        if (!result.ok) {
-          finishRecognize(job, result.reason);
-          return;
-        }
-
-        job.view = { state: 'done', title: recognized.title, count: intent.nodes.length };
+        // 只挂到作业上，不落库：等人看过、点过「就这样」再提交。
+        job.draft = draft;
+        job.view = { state: 'done', title: recognized.title, count: draft.nodes.length };
         job.at = Date.now();
       } catch (error) {
         finishRecognize(job, describe(error));
@@ -534,6 +603,10 @@ interface RecognizeJob {
   at: number;
   /** 预留：将来要「手动取消识别」时，abort 这一个即可。 */
   controller: AbortController;
+  /** 拆出来但还没落库的计划树；人确认后才会变成 plan.set。 */
+  draft?: DraftPlan;
+  /** 提交过就不再提交：同一张草稿重复提交是用户手滑，不是新计划。 */
+  committed?: boolean;
 }
 
 /** 失败的作业统一走这里：状态与原因一起落定，调用方无需重复写。 */

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { LlmChunk } from './recognize.ts';
-import { parseRecognizedPlan, planSetFromSpecs, recognizePlan, REPAIR_PROMPT } from './recognize.ts';
+import { draftFromSpecs, parseRecognizedPlan, planSetFromDraft, planSetFromSpecs, recognizePlan, REPAIR_PROMPT } from './recognize.ts';
 
 /* ─────────────────────────── 解析 ─────────────────────────── */
 
@@ -176,4 +176,27 @@ test('落库：计划树变成一条 plan.set，id 由调用方给', () => {
 test('落库：没有标题时不带 title 字段', () => {
   const intent = planSetFromSpecs([{ title: 'A' }], { now: 0, newId: () => 'nd_1' });
   assert.equal('title' in intent, false);
+});
+
+
+test('草稿：先生成不落库，确认后才变成 plan.set', () => {
+  let n = 0;
+  const specs = [{ title: '父', children: [{ title: '子一', acceptance: '看得见' }] }];
+  const draft = draftFromSpecs(specs, { now: 1000, newId: () => `nd_${++n}`, title: '母题' });
+  assert.equal(draft.title, '母题');
+  assert.equal(draft.nodes.length, 2);
+  assert.equal(draft.roots.length, 1);
+
+  const intent = planSetFromDraft(draft);
+  assert.equal(intent.type, 'plan.set');
+  assert.equal(intent.nodes.length, 2);
+  assert.equal(intent.title, '母题');
+  // 草稿本身不含任何「已提交」痕迹：它只是节点数组。
+  assert.equal(Object.prototype.hasOwnProperty.call(draft, 'committed'), false);
+});
+
+test('草稿：没有标题时不带多余字段', () => {
+  const draft = draftFromSpecs([{ title: '一件事' }], { now: 1, newId: () => 'nd_1' });
+  const intent = planSetFromDraft(draft);
+  assert.equal(Object.prototype.hasOwnProperty.call(intent, 'title'), false);
 });

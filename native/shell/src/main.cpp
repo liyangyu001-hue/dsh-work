@@ -30,6 +30,9 @@
 #include <fstream>
 #include <chrono>
 #include <mutex>
+#include <functional>
+#include <map>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -39,6 +42,7 @@
 #include "prompt.h"
 #include "capture.h"
 #include "json.h"
+#include "review.h"
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -152,6 +156,30 @@ std::wstring g_capture_path;
 constexpr UINT kMsgRecognize = WM_APP + 6;
 std::mutex g_recognize_mutex;
 std::wstring g_recognize_text;
+std::wstring g_recognize_job;  // 作业号：审阅窗要靠它去拉草稿
+
+// 审阅窗的全局与前置声明：WindowProc 在定义之前就要用到它们
+constexpr UINT kMsgReview = WM_APP + 10;
+constexpr int kReviewKeyBase = 0x90;  // 0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc
+
+bool g_review_open = false;
+HWND g_review = nullptr;
+std::wstring g_review_job;
+dshwork::review::Model g_review_model;
+std::wstring g_review_note = L"正在再拆一层…";
+bool g_review_busy = false;
+std::set<std::string> g_review_expanded;  // 记住拆开过哪些，刷新后不塌回去
+/** 刚点了「再拆一层」的那颗：拆完自动摊开，免得人再去按一次。 */
+std::string g_review_pending_expand;
+
+void ShowReview(const std::wstring& job);
+bool ReloadReviewDraft();
+void RepaintReview();
+void ReviewKey(int which);
+void LayoutReview();
+void ReviewExpandSelected();
+void ReviewCommit();
+void CloseReview();
 bool g_recognize_ok = false;
 void StartRecognize(const std::wstring& path);
 void OfferHandoffToAi();
@@ -700,15 +728,67 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       ShowNotice(text, 3600);
 
-      // 拆完了就把面板推出来：让人立刻看见新长出来的任务树，而不是自己去悬停
-
+      // 拆完了先开审阅窗：让人看过、再拆过，才落库。
+      std::wstring job;
+      {
+        std::lock_guard<std::mutex> lock(g_recognize_mutex);
+        job = g_recognize_job;
+      }
+      if (wparam != 0 && !job.empty()) {
+        ShowReview(job);
+        return 0;
+      }
       if (wparam != 0 && !g_panel_open) ShowPanel();
       return 0;
+    }
+    case kMsgReview: {
+      switch (wparam) {
+        case 1: {  // 再拆一层回来了：重拉草稿，并把刚拆过的那颗默认展开
+          g_review_busy = false;
+          if (ReloadReviewDraft()) {
+            if (g_review_model.selected >= 0 &&
+                g_review_model.selected < static_cast<int>(g_review_model.rows.size())) {
+              g_review_expanded.insert(g_review_model.rows[static_cast<size_t>(g_review_model.selected)].id);
+              ReloadReviewDraft();  // 展开后再摊一次，子行才会出现
+            }
+            LayoutReview();
+            RepaintReview();
+            ShowNotice(L"又拆细了一层", 1600);
+          } else {
+            RepaintReview();
+          }
+          return 0;
+        }
+        case 2:
+          ReviewExpandSelected();
+          return 0;
+        case 3:
+          ReviewCommit();
+          return 0;
+        case 4:
+          g_review_busy = false;
+          ShowNotice(L"这一步没成，看看日志", 2400);
+          RepaintReview();
+          return 0;
+        case 5: {  // 提交成功：关窗、把面板推出来看新进度
+          CloseReview();
+          ShowNotice(L"收下了，开工", 2000);
+          if (!g_panel_open) ShowPanel();
+          return 0;
+        }
+        default:
+          return 0;
+      }
     }
     case kMsgKey:
       DispatchKey(static_cast<int>(wparam));
       return 0;
     case WM_HOTKEY:
+      // 审阅窗自己的一组键，先认掉，别落到下面的全局分支里
+      if (wparam >= static_cast<WPARAM>(kReviewKeyBase) && wparam < static_cast<WPARAM>(kReviewKeyBase + 8)) {
+        ReviewKey(static_cast<int>(wparam) - kReviewKeyBase);
+        return 0;
+      }
       if (wparam == kPromptHotkeyId) {
       OpenPrompt();
       return 0;
@@ -1026,6 +1106,338 @@ void RepaintPanel() {
   DeleteDC(memory);
 }
 
+/* ─────────────── 解构审阅窗：先看，再决定要不要 ─────────────── */
+
+constexpr wchar_t kReviewClass[] = L"DSHWorkNativeReview";
+
+void RepaintReview();
+
+/** 把草稿 JSON 摊平成行：结构折进 depth，绘制与命中只认行。 */
+void BuildReviewModel(const dshwork::JValue& root) {
+  using dshwork::JValue;
+  dshwork::review::Model model;
+  model.title = dshwork::Widen(root.GetString("title"));
+  // 注意：这里不要清 g_review_expanded —— 它是「哪几颗摊开着」的跨次记忆，
+  // 每次重建都清掉的话，子行刚放出来就会在下一帧塌回去。
+  model.selected = g_review_model.selected;
+
+  const JValue* nodes = root.Get("nodes");
+  const JValue* roots = root.Get("roots");
+  if (nodes == nullptr || roots == nullptr || !nodes->IsArray() || !roots->IsArray()) {
+    g_review_model = model;
+    return;
+  }
+
+  std::map<std::string, const JValue*> by_id;
+  for (const JValue& node : nodes->array) by_id[node.GetString("id")] = &node;
+  model.total = static_cast<int>(roots->array.size());
+
+  // 递归展开：只把「已经点开过」的那一层放出来，其余收着。
+  std::function<void(const std::string&, int)> walk = [&](const std::string& id, int depth) {
+    const auto it = by_id.find(id);
+    if (it == by_id.end()) return;
+    const JValue& node = *it->second;
+    dshwork::review::Row row;
+    row.id = id;
+    row.depth = depth;
+    row.title = dshwork::Widen(node.GetString("title"));
+    row.detail = dshwork::Widen(node.GetString("detail"));
+    row.acceptance = dshwork::Widen(node.GetString("acceptance"));
+    row.status = node.GetString("status", "todo");
+    if (const JValue* children = node.Get("children"); children != nullptr && children->IsArray()) {
+      row.child_count = static_cast<int>(children->array.size());
+      row.has_children = row.child_count > 0;
+    }
+    row.expanded = row.has_children && g_review_expanded.count(id) > 0;
+    model.rows.push_back(row);
+    if (!row.expanded) return;
+    const JValue* children = node.Get("children");
+    for (const JValue& child : children->array) walk(child.text, depth + 1);
+  };
+
+  for (const JValue& id : roots->array) walk(id.text, 0);
+  if (model.selected >= static_cast<int>(model.rows.size())) model.selected = 0;
+  g_review_model = model;
+}
+
+void LayoutReview() {
+  if (g_review == nullptr) return;
+  const float width_dip = dshwork::review::WindowWidth(g_review_model);
+  const float height_dip = dshwork::review::WindowHeight(g_review_model);
+  MONITORINFO info = {};
+  info.cbSize = sizeof(info);
+  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
+  const int px_w = static_cast<int>(width_dip * g_dpiScale);
+  const int px_h = static_cast<int>(height_dip * g_dpiScale);
+  const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
+  const int y = info.rcWork.top + static_cast<int>(96 * g_dpiScale);
+  SetWindowPos(g_review, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
+}
+
+void RepaintReview() {
+  if (g_review == nullptr) return;
+  RECT rect = {};
+  GetWindowRect(g_review, &rect);
+  const int px_w = rect.right - rect.left;
+  const int px_h = rect.bottom - rect.top;
+  if (px_w <= 0 || px_h <= 0) return;
+
+  HDC screen = GetDC(nullptr);
+  HDC memory = CreateCompatibleDC(screen);
+  ReleaseDC(nullptr, screen);
+
+  BITMAPINFO info = {};
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biWidth = px_w;
+  info.bmiHeader.biHeight = -px_h;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+  HGDIOBJ old_bitmap = SelectObject(memory, bitmap);
+
+  RECT bounds = {0, 0, px_w, px_h};
+  g_target->BindDC(memory, &bounds);
+  g_target->BeginDraw();
+  g_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+  dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
+  dshwork::review::Model model = g_review_model;
+  if (g_review_busy) {
+    model.busy = true;
+    model.busy_text = g_review_note;
+  }
+  dshwork::review::Draw(g_target, model, formats, g_dpiScale, static_cast<float>(px_w) / g_dpiScale,
+                        static_cast<float>(px_h) / g_dpiScale, 1.0f);
+  if (FAILED(g_target->EndDraw())) LogToFile("审阅窗绘制失败");
+
+  POINT source = {0, 0};
+  SIZE size = {px_w, px_h};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  UpdateLayeredWindow(g_review, nullptr, nullptr, &size, memory, &source, 0, &blend, ULW_ALPHA);
+
+  SelectObject(memory, old_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(memory);
+}
+
+/** 拉一次草稿并重画。失败只写日志 + 一句提示，不关窗。 */
+bool ReloadReviewDraft() {
+  const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+  if (!endpoint.ok) {
+    g_review_note = L"没连上宿主";
+    return false;
+  }
+  std::string body;
+  std::string reason;
+  if (!dshwork::HttpGetJson(endpoint, L"/dsh-work/api/plan/" + g_review_job, body, reason)) {
+    g_review_note = L"读不到草稿：" + dshwork::Widen(reason);
+    LogToFile("读草稿失败：" + reason);
+    return false;
+  }
+  dshwork::JValue root;
+  if (!dshwork::ParseJson(body, root)) {
+    g_review_note = L"草稿解析失败";
+    return false;
+  }
+  BuildReviewModel(root);
+  // 刚拆开的那颗：草稿里已经有子节点了，就顺手摊开，省掉一次多余按键。
+  if (!g_review_pending_expand.empty()) {
+    for (const dshwork::review::Row& row : g_review_model.rows) {
+      if (row.id == g_review_pending_expand && row.has_children) {
+        g_review_expanded.insert(row.id);
+        break;
+      }
+    }
+    g_review_pending_expand.clear();
+    BuildReviewModel(root);  // 摊开后行数变了，重建一次
+    LayoutReview();
+  }
+  g_review_note.clear();
+  return true;
+}
+
+void DisarmReviewKeys() {
+  for (int i = 0; i < 5; ++i) UnregisterHotKey(g_window, kReviewKeyBase + i);
+}
+
+void ArmReviewKeys() {
+  DisarmReviewKeys();
+  // 注册失败要说出来：按键收不到时最难查的就是「到底注册上没有」。
+  const struct {
+    int slot;
+    UINT mods;
+    UINT vk;
+    const char* name;
+  } keys[] = {
+      {0, MOD_NOREPEAT, VK_UP, "Up"},        {1, MOD_NOREPEAT, VK_DOWN, "Down"},
+      {2, MOD_NOREPEAT, VK_RETURN, "Enter"},  {3, MOD_CONTROL | MOD_NOREPEAT, VK_RETURN, "Ctrl+Enter"},
+      {4, MOD_NOREPEAT, VK_ESCAPE, "Esc"},
+  };
+  int ok = 0;
+  std::string failed;
+  for (const auto& key : keys) {
+    if (RegisterHotKey(g_window, kReviewKeyBase + key.slot, key.mods, key.vk)) {
+      ++ok;
+    } else {
+      if (!failed.empty()) failed += ",";
+      failed += key.name;
+    }
+  }
+  LogToFile("审阅按键已注册 " + std::to_string(ok) + "/5" + (failed.empty() ? "" : "，失败：" + failed));
+}
+
+LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_LBUTTONDOWN) {
+    const float x = static_cast<float>(GET_X_LPARAM(lparam));
+    const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+    if (dshwork::review::CommitHit(g_review_model, x, y, g_dpiScale)) {
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
+      return 0;
+    }
+    const int index = dshwork::review::RowAt(g_review_model, x, y, g_dpiScale);
+    if (index >= 0) {
+      const bool again = index == g_review_model.selected;
+      g_review_model.selected = index;
+      // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
+      if (again) {
+        const auto& row = g_review_model.rows[static_cast<size_t>(index)];
+        if (row.has_children && g_review_expanded.count(row.id) > 0) {
+          g_review_expanded.erase(row.id);
+          RepaintReview();
+        } else if (g_window != nullptr) {
+          PostMessageW(g_window, kMsgReview, 2, 0);
+        }
+      }
+      RepaintReview();
+    }
+    return 0;
+  }
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void CloseReview() {
+  g_review_open = false;
+  g_review_busy = false;
+  DisarmReviewKeys();
+  if (g_review != nullptr) ShowWindow(g_review, SW_HIDE);
+  g_review_job.clear();
+  if (g_window != nullptr) ArmHoverTab();
+  if (!g_panel_open) ShowWindow(g_window, SW_SHOWNOACTIVATE);
+}
+
+/* 动作都在后台线程做，回来后用消息让 UI 线程收尾。 */
+void ReviewExpandSelected() {
+  const int index = g_review_model.selected;
+  if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) return;
+  const dshwork::review::Row row = g_review_model.rows[static_cast<size_t>(index)];
+
+  // 已经拆过的：本地展开/收起就够了，不必再花一次模型调用。
+  if (row.has_children) {
+    if (g_review_expanded.count(row.id) > 0) {
+      g_review_expanded.erase(row.id);
+    } else {
+      g_review_expanded.insert(row.id);
+    }
+    RepaintReview();
+    LogToFile(std::string("审阅：本地") + (g_review_expanded.count(row.id) > 0 ? "展开 " : "收起 ") + row.id);
+    return;
+  }
+
+  const std::string node_id = row.id;
+  const std::wstring job = g_review_job;
+  g_review_busy = true;
+  g_review_note = L"正在再拆一层…";
+  g_review_pending_expand = node_id;  // 拆完自动摊开这颗，不用再按一次
+  RepaintReview();
+  std::thread([job, node_id]() {
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (!endpoint.ok) {
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 4, 0);
+      return;
+    }
+    std::string body;
+    std::string reason;
+    const std::string payload = "{\"jobId\":\"" + dshwork::Narrow(job) + "\",\"nodeId\":\"" + node_id + "\"}";
+    const bool ok = dshwork::HttpPostJson(endpoint, L"/dsh-work/api/plan/expand", payload, body, reason);
+    LogToFile(std::string("审阅再拆 ") + (ok ? "成功：" : "失败：") + body);
+    if (g_window != nullptr) PostMessageW(g_window, kMsgReview, ok ? 1 : 4, 0);
+  }).detach();
+}
+
+void ReviewCommit() {
+  if (g_review_busy) return;
+  const std::wstring job = g_review_job;
+  g_review_busy = true;
+  g_review_note = L"正在收下…";
+  RepaintReview();
+  std::thread([job]() {
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (!endpoint.ok) {
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 4, 0);
+      return;
+    }
+    std::string body;
+    std::string reason;
+    const std::string payload = "{\"jobId\":\"" + dshwork::Narrow(job) + "\"}";
+    const bool ok = dshwork::HttpPostJson(endpoint, L"/dsh-work/api/plan/commit", payload, body, reason);
+    LogToFile(std::string("审阅提交 ") + (ok ? "成功：" : "失败：") + body);
+    if (g_window != nullptr) PostMessageW(g_window, kMsgReview, ok ? 5 : 4, 0);
+  }).detach();
+}
+
+void ShowReview(const std::wstring& job) {
+  g_review_job = job;
+  g_review_busy = false;
+  g_review_note = L"正在再拆一层…";
+  g_review_expanded.clear();
+  if (!ReloadReviewDraft()) LogToFile("审阅窗：草稿拉不下来");
+
+  if (g_review == nullptr) {
+    WNDCLASSEXW cls = {};
+    cls.cbSize = sizeof(cls);
+    cls.lpfnWndProc = ReviewProc;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.lpszClassName = kReviewClass;
+    RegisterClassExW(&cls);
+    g_review = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kReviewClass,
+                               L"DSH Work 审阅", WS_POPUP, 0, 0, 100, 100, nullptr, nullptr,
+                               GetModuleHandleW(nullptr), nullptr);
+  }
+  LayoutReview();
+  ShowWindow(g_review, SW_SHOWNOACTIVATE);
+  g_review_open = true;
+  ArmReviewKeys();
+  RepaintReview();
+  LogToFile("审阅窗打开 job=" + dshwork::Narrow(job) + " 行数=" + std::to_string(g_review_model.rows.size()));
+}
+
+/** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
+void ReviewKey(int which) {
+  if (!g_review_open) return;
+  const int count = static_cast<int>(g_review_model.rows.size());
+  switch (which) {
+    case 0:
+      if (count > 0) g_review_model.selected = (g_review_model.selected + count - 1) % count;
+      RepaintReview();
+      return;
+    case 1:
+      if (count > 0) g_review_model.selected = (g_review_model.selected + 1) % count;
+      RepaintReview();
+      return;
+    case 2:
+      ReviewExpandSelected();
+      return;
+    case 3:
+      ReviewCommit();
+      return;
+    default:
+      CloseReview();
+      return;
+  }
+}
+
 /** 意图一律交给宿主判定：本地不改状态，下一次轮询自然会把新状态带回来。 */
 void PostIntent(const std::string& type, const std::string& node_id = std::string()) {
   dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
@@ -1135,6 +1547,10 @@ void StartRecognize(const std::wstring& path) {
     if (job_id.empty()) {
       FinishRecognize(false, L"宿主没有返回作业号");
       return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_recognize_mutex);
+      g_recognize_job = dshwork::Widen(job_id);
     }
     LogToFile("识别作业 " + job_id);
 
