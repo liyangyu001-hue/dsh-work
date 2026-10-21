@@ -76,6 +76,11 @@ struct State {
   int stage = 0;
   int menu_index = 2;
   int pending_action = 2;  // 1=解构 2=直接保存，随结果一起回给宿主
+  /** 打开覆盖层时 Tab 若是按着的，要先等它抬起来一次才认后续的 Tab。
+   *  原因：同一个键重新注册热键时，某些键盘/远程桌面会立刻补一个 WM_HOTKEY，
+   *  被当成「用户又按了一次」就会莫名其妙退出——长按有几率掉出来就是这么来的。 */
+  bool tab_need_release = false;
+  ULONGLONG tab_armed_at = 0;
   int wheel_cx = 0;  // 轮盘圆心（覆盖层坐标系，物理像素）
   int wheel_cy = 0;
   float wheel_t = 0.0f;     // 张开动画进度 0→1（每帧由 elapsed 重算，不按 tick 累加）
@@ -867,6 +872,16 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       Teardown(0);
       return 0;
     case WM_HOTKEY:
+      // 闸门：开覆盖层那一刻 Tab 还按着的话，忽略掉第一批 Tab 事件，
+      // 直到真的看到它抬起来（3 秒兜底，避免状态卡死）。
+      if (wparam == 0x72 && s.tab_need_release) {
+        const bool still_down = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
+        if (!still_down || GetTickCount64() - s.tab_armed_at > 3000) {
+          s.tab_need_release = false;
+        } else {
+          return 0;
+        }
+      }
       if (wparam == 0x71) {  // Esc：随时收摊
         s.dragging = false;
         Teardown(0);
@@ -1066,6 +1081,8 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   SetWindowPos(s.window, HWND_TOPMOST, s.vx, s.vy, s.vw, s.vh, SWP_NOACTIVATE);
   // Esc 用热键接：覆盖层不抢焦点，收不到键盘。
   // Tab/Enter/空格 同理——菜单里要用它们，一样得走热键。
+  s.tab_need_release = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
+  s.tab_armed_at = GetTickCount64();
   RegisterHotKey(s.window, 0x71, MOD_NOREPEAT, VK_ESCAPE);
   RegisterHotKey(s.window, 0x72, MOD_NOREPEAT, VK_TAB);
   RegisterHotKey(s.window, 0x73, MOD_NOREPEAT, VK_RETURN);
