@@ -317,40 +317,58 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   }
 
   // ── 右侧：指到的那件事（没指就写当前这件）────────────────
+  //
+  // 排版规则（上一版乱在这）：标签占固定 46 DIP 一列、值从固定位置起排，
+  // 三行等距（每行 20 DIP + 4 DIP 间距），每行只给一行字、超出用省略号。
+  // 这样无论哪件事、有没有建议，右列都长得一样，眼睛不用重新找位置。
   const float detail_left = w - (kDetailBlock + kRightBlock + kPadX) * scale;
+  const float detail_right = w - (kRightBlock + kPadX) * scale;
+  const float label_w = 46.0f * scale;
+  const float value_left = detail_left + label_w;
+  const float value_w = (detail_right - value_left) / scale;
+
   if (focus_index >= 0 && focus_index < count) {
     const NodeView& node = model.items[static_cast<size_t>(focus_index)];
-    const float status_w = 56.0f * scale;
-    Text(target, StatusLabel(node.status), fmt.meta,
-         D2D1::RectF(detail_left, 28.0f * scale, detail_left + status_w, 48.0f * scale), fmt.brush,
-         node.status == "active" ? Fade(kAccent, alpha) : dim);
 
-    const std::wstring title = FitText(node.title, kDetailBlock - status_w - 20.0f, 13.0f);
+    // 第一行：状态标签 + 标题。状态用小药丸，标题最多一行。
+    const std::wstring status_text = StatusLabel(node.status);
+    const bool running = node.status == "active";
+    const float chip_w = 44.0f * scale;
+    const D2D1_RECT_F chip =
+        D2D1::RectF(detail_left, 22.0f * scale, detail_left + chip_w, 40.0f * scale);
+    FillRound(target, fmt.brush, chip, 5.0f * scale, running ? Fade(0x260A84FF, alpha) : Fade(0x12FFFFFF, alpha));
+    TextCentered(target, status_text, fmt.meta, chip, fmt.brush, running ? Fade(kAccent, alpha) : dim);
+
+    const std::wstring title = FitText(node.title, value_w + 60.0f, 13.0f);
     Text(target, title, fmt.title,
-         D2D1::RectF(detail_left + status_w, 26.0f * scale, w - (kRightBlock + kPadX) * scale, 54.0f * scale),
-         fmt.brush, text);
+         D2D1::RectF(value_left, 20.0f * scale, detail_right, 44.0f * scale), fmt.brush, text);
 
+    // 之后三行：标签 + 值，行高固定。
+    const float row1 = 50.0f * scale;
+    const float row2 = 74.0f * scale;
+    const float row3 = 98.0f * scale;
+    const float row_h = 20.0f * scale;
+
+    // 验收
+    Text(target, L"验收", fmt.meta, D2D1::RectF(detail_left, row1, value_left, row1 + row_h), fmt.brush, dim);
     const std::wstring acceptance =
-        node.acceptance.empty() ? L"（还没写验收）" : (L"验收 · " + node.acceptance);
-    Text(target, FitText(acceptance, kDetailBlock - 10.0f, 12.0f), fmt.body,
-         D2D1::RectF(detail_left, 58.0f * scale, w - (kRightBlock + kPadX) * scale, 84.0f * scale), fmt.brush,
-         dim);
+        node.acceptance.empty() ? L"（还没写验收）" : FitText(node.acceptance, value_w, 12.0f);
+    Text(target, acceptance, fmt.body, D2D1::RectF(value_left, row1, detail_right, row1 + row_h), fmt.brush, dim);
 
-    // 建议是"AI 替你想过一手的下一步"，所以给它强调色；没有就整行不画，
-    // 不摆一句"暂无建议"占地方。
+    // 建议（有才画，强调色）
     if (!node.advice.empty()) {
-      const std::wstring line = L"建议 · " + node.advice;
-      Text(target, FitText(line, kDetailBlock - 10.0f, 12.0f), fmt.body,
-           D2D1::RectF(detail_left, 88.0f * scale, w - (kRightBlock + kPadX) * scale, 112.0f * scale),
-           fmt.brush, Fade(kAccent, alpha));
-      if (!node.advice_alt.empty()) {
-        const std::wstring alt = L"更优解 · " + node.advice_alt;
-        Text(target, FitText(alt, kDetailBlock - 10.0f, 11.5f), fmt.meta,
-             D2D1::RectF(detail_left, 114.0f * scale, w - (kRightBlock + kPadX) * scale, 136.0f * scale),
-             fmt.brush, dim);
-      }
+      Text(target, L"建议", fmt.meta, D2D1::RectF(detail_left, row2, value_left, row2 + row_h), fmt.brush,
+           Fade(kAccent, alpha * 0.85f));
+      Text(target, FitText(node.advice, value_w, 12.0f), fmt.body,
+           D2D1::RectF(value_left, row2, detail_right, row2 + row_h), fmt.brush, Fade(kAccent, alpha));
     }
 
+    // 更优解（有才画，最弱的一档）
+    if (!node.advice_alt.empty()) {
+      Text(target, L"更优解", fmt.meta, D2D1::RectF(detail_left, row3, value_left, row3 + row_h), fmt.brush, dim);
+      Text(target, FitText(node.advice_alt, value_w, 11.5f), fmt.meta,
+           D2D1::RectF(value_left, row3, detail_right, row3 + row_h), fmt.brush, Fade(0xB0B0B6FF, alpha * 0.9f));
+    }
   }
 
   // ── 最右：完成按钮与连接状态 ─────────────────────────

@@ -160,6 +160,7 @@ std::wstring g_recognize_job;  // 作业号：审阅窗要靠它去拉草稿
 
 // 审阅窗的全局与前置声明：WindowProc 在定义之前就要用到它们
 constexpr UINT kMsgReview = WM_APP + 10;
+constexpr UINT kMsgDocGraph = WM_APP + 11;  // 面板 → 主窗口：打开已落库文档的节点图
 constexpr int kReviewKeyBase = 0x90;  // 0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc
 
 bool g_review_open = false;
@@ -173,8 +174,15 @@ bool g_review_busy = false;
 std::set<std::string> g_review_expanded;  // 记住拆开过哪些，刷新后不塌回去
 /** 刚点了「再拆一层」的那颗：拆完自动摊开，免得人再去按一次。 */
 std::string g_review_pending_expand;
+// 最近一次构建用的 JSON 根（草稿或文档）。本地展开/收起只要重建模型，
+// 不该为此再跑一趟 HTTP —— 那是白白多一次往返。
+dshwork::JValue g_review_root;
 
 void ShowReview(const std::wstring& job);
+void ShowReviewDoc();
+void EnsureReviewWindow();
+void ForceForeground(HWND hwnd);
+bool g_review_read_only = false;
 bool ReloadReviewDraft();
 // 审阅窗的动画状态：打开进度 + 选中块的当前位置（DIP，body 顶部起算）。
 // 逐帧在这里推进，review.h 的 Draw 只负责按这两个值画。
@@ -387,10 +395,32 @@ void TickReviewAnim() {
   const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
   g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
   RepaintReview();
+  // 打开动画收尾后不立刻停表：连线上的流光还在走，只要窗口开着就按刷新率跑。
+  // 这是唯一一个"长期运行"的动画，代价是几颗方框 + 几条折线，可接受；
+  // 窗口一收（CloseReview）就把表停掉，静止时不留任何后台开销。
   if (g_review_anim_open >= 1.0f && now - g_review_anim_at > 320) {
     g_review_anim_open = 1.0f;
-    RepaintReview();
-    KillTimer(g_window, kReviewAnimTimerId);
+  }
+
+  // 键盘：只"看"，不"抢"。
+  //
+  // 这个窗口是从一个 WS_EX_NOACTIVATE 的面板点开的，系统经常不肯把前台权交过来，
+  // 于是 WM_KEYDOWN 根本到不了这里（踩过两次）。但 RegisterHotKey 会真的把键吃掉，
+  // 用户在任何输入框打字都会被吞——也不行。
+  // 折中：定时器里用 GetAsyncKeyState 观测按下沿，只处理我们自己关心的那五个键，
+  // 其它键概不干预，用户该打什么打什么。
+  struct Watch { UINT vk; int code; };
+  static const Watch kWatched[] = {{VK_UP, 0}, {VK_DOWN, 1}, {VK_RETURN, 2}, {VK_BACK, 3}, {VK_ESCAPE, 4}};
+  static bool was_down[5] = {};
+  for (int i = 0; i < 5; ++i) {
+    const bool down = (GetAsyncKeyState(static_cast<int>(kWatched[i].vk)) & 0x8000) != 0;
+    if (down && !was_down[i]) {
+      const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+      // Ctrl+Enter = 就这样；单独 Enter = 展开/收起
+      const int code = (kWatched[i].code == 2 && ctrl) ? 5 : kWatched[i].code;
+      ReviewKey(code);
+    }
+    was_down[i] = down;
   }
 }
 
@@ -770,6 +800,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (wparam != 0 && !g_panel_open) ShowPanel();
       return 0;
     }
+    case kMsgDocGraph:
+      // 面板里点了当前任务那段文字：把人送进整张地图。
+      ShowReviewDoc();
+      return 0;
     case kMsgReview: {
       switch (wparam) {
         case 1: {  // 再拆一层回来了：重拉草稿，并把刚拆过的那颗默认展开
@@ -1146,6 +1180,7 @@ void TickReviewAnim();
 /** 把草稿 JSON 摊平成行：结构折进 depth，绘制与命中只认行。 */
 void BuildReviewModel(const dshwork::JValue& root) {
   using dshwork::JValue;
+  g_review_root = root;
   dshwork::review::Model model;
   model.title = dshwork::Widen(root.GetString("title"));
   // 注意：这里不要清 g_review_expanded —— 它是「哪几颗摊开着」的跨次记忆，
@@ -1154,13 +1189,24 @@ void BuildReviewModel(const dshwork::JValue& root) {
 
   const JValue* nodes = root.Get("nodes");
   const JValue* roots = root.Get("roots");
-  if (nodes == nullptr || roots == nullptr || !nodes->IsArray() || !roots->IsArray()) {
+  if (nodes == nullptr || roots == nullptr || !roots->IsArray()) {
     g_review_model = model;
     return;
   }
 
+  // 两种形态都要认：
+  //   · 草稿（/api/plan/<job>）的 nodes 是数组，每项自带 id
+  //   · 落库文档（/api/state 的 doc）的 nodes 是「id → 节点」的对象
+  // 只认数组的话，从面板进文档地图会看到一张空图（已踩过一次）。
   std::map<std::string, const JValue*> by_id;
-  for (const JValue& node : nodes->array) by_id[node.GetString("id")] = &node;
+  if (nodes->IsArray()) {
+    for (const JValue& node : nodes->array) by_id[node.GetString("id")] = &node;
+  } else if (nodes->IsObject()) {
+    for (const auto& kv : nodes->object) by_id[kv.first] = &kv.second;
+  } else {
+    g_review_model = model;
+    return;
+  }
   model.total = static_cast<int>(roots->array.size());
 
   // 递归展开：只把「已经点开过」的那一层放出来，其余收着。
@@ -1257,6 +1303,7 @@ void RepaintReview() {
 
   dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_brush};
   dshwork::review::Model model = g_review_model;
+  model.read_only = g_review_read_only;
   if (g_review_busy) {
     model.busy = true;
     model.busy_text = g_review_note;
@@ -1417,6 +1464,10 @@ void ReviewExpandSelected() {
     } else {
       g_review_expanded.insert(row.id);
     }
+    // 光改这个集合界面是不会动的：行是 BuildReviewModel 摊平出来的，
+    // 必须拿同一份 JSON 重建一次模型，再重新布局。（这一步漏过，表现就是点了没反应。）
+    BuildReviewModel(g_review_root);
+    LayoutReview();
     RepaintReview();
     LogToFile(std::string("审阅：本地") + (g_review_expanded.count(row.id) > 0 ? "展开 " : "收起 ") + row.id);
     return;
@@ -1480,6 +1531,10 @@ void ReviewCollapseSelected() {
 }
 
 void ReviewCommit() {
+  if (g_review_read_only) {
+    CloseReview();
+    return;
+  }
   if (g_review_busy) return;  const std::wstring job = g_review_job;
   g_review_busy = true;
   g_review_note = L"正在收下…";
@@ -1501,11 +1556,87 @@ void ReviewCommit() {
 
 void ShowReview(const std::wstring& job) {
   g_review_job = job;
+  g_review_read_only = false;
   g_review_busy = false;
   g_review_note = L"正在再拆一层…";
   g_review_expanded.clear();
   if (!ReloadReviewDraft()) LogToFile("审阅窗：草稿拉不下来");
 
+  EnsureReviewWindow();
+  RepaintReview();
+  LogToFile("审阅窗打开 job=" + dshwork::Narrow(job) + " 行数=" + std::to_string(g_review_model.rows.size()));
+}
+
+/**
+ * 打开"已经落库的那份文档"的节点图。
+ *
+ * 和审阅窗共用同一个窗口和同一套排版，区别只有两点：数据来自 /api/state 的 doc，
+ * 以及它是只读的（没有"就这样"，不能拆）。入口是面板右侧那段当前任务的描述——
+ * 人在"我做到哪了"和"整张地图长什么样"之间来回切，这是唯一自然的通道。
+ */
+void ShowReviewDoc() {
+  const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+  if (!endpoint.ok) {
+    ShowNotice(L"没连上宿主", 2000);
+    return;
+  }
+  std::string body;
+  std::string reason;
+  if (!dshwork::HttpGetJson(endpoint, L"/dsh-work/api/state", body, reason)) {
+    ShowNotice(L"读不到任务：" + dshwork::Widen(reason), 2600);
+    return;
+  }
+  dshwork::JValue root;
+  if (!dshwork::ParseJson(body, root)) {
+    ShowNotice(L"任务解析失败", 2400);
+    return;
+  }
+  const dshwork::JValue* doc = root.Get("doc");
+  if (doc == nullptr) return;
+
+  g_review_read_only = true;
+  g_review_job.clear();
+  g_review_busy = false;
+  g_review_note.clear();
+  g_review_expanded.clear();
+  BuildReviewModel(*doc);
+  // 必须做一次自适应：NodeAt 以 model.fitted 为前置条件，
+  // 没 fit 过的模型点哪都返回 -1 —— 表现就是「图能看，点不动」。
+  dshwork::review::FitView(g_review_model);
+  dshwork::review::ClampPan(g_review_model);
+
+  // 面板是"点了一下就进地图"的门，进门之后它该退场：
+  // 两个窗口叠着会互相挡，而且面板不抢焦点，留着它也接不到键。
+  HidePanel(false);
+  EnsureReviewWindow();
+  // 刚点完我们自己的面板，前台权还在本进程手上，这里可以直接把焦点交给地图窗口；
+  // 少了这一步，地图显示出来了但 Enter/↑↓ 全被系统发给别的窗口（踩过）。
+  ForceForeground(g_review);
+  RepaintReview();
+  LogToFile("节点图打开（文档） 行数=" + std::to_string(g_review_model.rows.size()));
+}
+
+/**
+ * 把键盘焦点硬塞给我们的窗口。
+ *
+ * 为什么不只是一句 SetForegroundWindow：面板是 WS_EX_NOACTIVATE 的，
+ * 点它不会把前台权交给本进程，于是紧接着的 SetForegroundWindow 会被系统
+ * 静默拒绝——窗口显示出来了，按键却全发给别的窗口（踩过）。
+ * 标准解法是把输入队列临时挂到当前前台线程上，做完再摘开。
+ */
+void ForceForeground(HWND hwnd) {
+  if (hwnd == nullptr) return;
+  const DWORD target = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+  const DWORD self = GetCurrentThreadId();
+  const bool attached = (target != 0 && target != self && AttachThreadInput(self, target, TRUE));
+  SetForegroundWindow(hwnd);
+  SetActiveWindow(hwnd);
+  SetFocus(hwnd);
+  if (attached) AttachThreadInput(self, target, FALSE);
+}
+
+/** 两个入口共用的开窗动作：建窗口、定位、抢焦点、放动画。 */
+void EnsureReviewWindow() {
   if (g_review == nullptr) {
     WNDCLASSEXW cls = {};
     cls.cbSize = sizeof(cls);
@@ -1525,13 +1656,11 @@ void ShowReview(const std::wstring& job) {
   SetForegroundWindow(g_review);
   SetFocus(g_review);
   g_review_open = true;
-  // 从头放一遍：淡入 + 每行错开落下 + 选中块从原位滑过来。
+  // 从头放一遍淡入。
   g_review_anim_open = 0.0f;
   g_review_anim_at = GetTickCount64();
   g_review_hl_y = -1.0f;
   SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
-  RepaintReview();
-  LogToFile("审阅窗打开 job=" + dshwork::Narrow(job) + " 行数=" + std::to_string(g_review_model.rows.size()));
 }
 
 /** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
@@ -1974,9 +2103,16 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         if (hit >= 0) {
           g_focus = hit;
           RepaintPanel();
+          return 0;
         }
         (void)dots_x;
         (void)first;
+      }
+      // 右侧那一段就是「当前这件事」的描述。点它 = 进节点图看全貌。
+      // 这是人从"我做到哪了"切到"整张地图长什么样"的入口。
+      if (x > static_cast<int>(g_panel_dip_w * 0.42 * g_dpiScale)) {
+        if (g_window != nullptr) PostMessageW(g_window, kMsgDocGraph, 0, 0);
+        return 0;
       }
       return 0;
     }

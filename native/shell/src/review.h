@@ -46,6 +46,8 @@ struct Model {
   int total = 0;
   bool busy = false;
   std::wstring busy_text;
+  // 只读模式：看的是已经落库的文档，不是草稿。按钮变成「知道了」，Enter 只展开/收起。
+  bool read_only = false;
 
   // 视图：世界坐标 → 窗口，先乘 zoom 再平移。缩放围绕面板中心，不做鼠标锚定，
   // 因为这个窗口是用来"看清结构"的，不是看图软件。
@@ -159,14 +161,17 @@ inline void Layout(Model& model) {
     }
   }
 
-  // 落到行上：x 按深度排，y 取子树的垂直中点
+  // 落到行上：横向流程 + 分层。
+  //
+  // 为什么不是"按深度排成一列"（上一版）：根节点会全部竖着堆在左边，
+  // 读起来像清单而不是流程。现在 x 按 DFS 顺序一格一格往右排、y 按层级下沉，
+  // 展开谁就在它右边长出它的下一步，方向感来自坐标本身，不靠箭头。
   for (int i = 0; i < count; ++i) {
     Row& row = model.rows[static_cast<size_t>(i)];
-    const int depth = row.depth;
     row.w = kNodeW;
     row.h = kNodeH;
-    row.x = static_cast<float>(depth) * (kNodeW + kGapX);
-    row.y = top[static_cast<size_t>(i)] + (height[static_cast<size_t>(i)] - kNodeH) * 0.5f;
+    row.x = static_cast<float>(i) * (kNodeW + kGapX);
+    row.y = static_cast<float>(row.depth) * (kNodeH + kGapY);
   }
 }
 
@@ -324,7 +329,14 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
                        D2D1::Matrix3x2F::Translation(model.pan_x, kHeader + model.pan_y) *
                        D2D1::Matrix3x2F::Scale(scale, scale));
 
-  // 连线：父的右边中点 → 子的左边中点，用三次贝塞尔，角度按水平切线收，像 Blender 那样。
+  // 连线：父的右边中点 → 子的左边中点，三次贝塞尔，角度按水平切线收。
+  //
+  // 线上跑一颗「光点」：把曲线采样成折线、按长度归一化，再让一段亮弧随时间
+  // 平移。方向是父→子，所以光是朝思路前进的方向流的，扫一眼就知道下一步在哪。
+  // 采样 24 段足够顺滑，且比求贝塞尔弧长公式便宜得多。
+  static ID2D1Factory* factory = nullptr;
+  if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
+  const float flow_phase = static_cast<float>((anim.now % 100000) * 0.00022);
   for (size_t i = 0; i < model.rows.size(); ++i) {
     const Row& row = model.rows[i];
     if (row.parent < 0 || row.parent >= static_cast<int>(model.rows.size())) continue;
@@ -332,24 +344,50 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     const D2D1_POINT_2F from = D2D1::Point2F(parent.x + parent.w, parent.y + parent.h * 0.5f);
     const D2D1_POINT_2F to = D2D1::Point2F(row.x, row.y + row.h * 0.5f);
     const float bend = (to.x - from.x) * 0.5f;
-    ID2D1PathGeometry* path = nullptr;
-    if (dshwork::g_ui_dwrite == nullptr) continue;  // 工厂还没就绪，这一帧不画线
-    static ID2D1Factory* factory = nullptr;
-    if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
-    if (factory == nullptr || FAILED(factory->CreatePathGeometry(&path)) || path == nullptr) continue;
-    ID2D1GeometrySink* sink = nullptr;
-    if (FAILED(path->Open(&sink)) || sink == nullptr) {
-      path->Release();
-      continue;
+
+    // 采样并累计长度
+    constexpr int kSamples = 24;
+    D2D1_POINT_2F points[kSamples + 1];
+    float lengths[kSamples + 1] = {};
+    float total = 0.0f;
+    for (int s = 0; s <= kSamples; ++s) {
+      const float t = static_cast<float>(s) / kSamples;
+      const float u = 1.0f - t;
+      // 三次贝塞尔，控制点按水平切线摆
+      const D2D1_POINT_2F c1 = D2D1::Point2F(from.x + bend, from.y);
+      const D2D1_POINT_2F c2 = D2D1::Point2F(to.x - bend, to.y);
+      points[s].x = u * u * u * from.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * to.x;
+      points[s].y = u * u * u * from.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * to.y;
+      if (s > 0) {
+        const float dx = points[s].x - points[s - 1].x;
+        const float dy = points[s].y - points[s - 1].y;
+        total += std::sqrt(dx * dx + dy * dy);
+      }
+      lengths[s] = total;
     }
-    sink->BeginFigure(from, D2D1_FIGURE_BEGIN_HOLLOW);
-    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(from.x + bend, from.y), D2D1::Point2F(to.x - bend, to.y), to));
-    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-    sink->Close();
-    sink->Release();
-    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.16f * a)));
-    target->DrawGeometry(path, fmt.brush, 1.4f);
-    path->Release();
+    if (total <= 0.01f) continue;
+
+    // 底线
+    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.14f * a)));
+    for (int s = 0; s < kSamples; ++s) target->DrawLine(points[s], points[s + 1], fmt.brush, 1.3f);
+
+    // 流光：一段 18% 长度的亮弧，每条边错开相位，整体朝前流
+    const float phase = flow_phase + static_cast<float>(i) * 0.11f;
+    const float head = phase - std::floor(phase);
+    for (int s = 0; s < kSamples; ++s) {
+      const float p = (lengths[s] / total) - head;
+      float u = p - std::floor(p);              // 0..1 的循环位置
+      const float tail_len = 0.18f;
+      float d = head - (lengths[s] / total);    // 当前段相对光头的距离（负=在光头之后）
+      d -= std::floor(d);
+      (void)u;
+      if (d > 1.0f - tail_len) {
+        const float k = (d - (1.0f - tail_len)) / tail_len;  // 0..1，越接近光头越亮
+        fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.10f + 0.55f * k) * a)));
+        target->DrawLine(points[s], points[s + 1], fmt.brush, 1.9f);
+      }
+    }
+    (void)factory;
   }
 
   // 节点
@@ -361,6 +399,52 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     ui::FillRound(target, fmt.brush, box, kNodeRadius, fill);
     ui::StrokeRound(target, fmt.brush, box, kNodeRadius,
                     selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a), selected ? 1.6f : 0.5f);
+
+    // 「正在做」的框：一圈常亮蓝边 + 沿边跑的一段光。
+    // 静态粗边只说明"被选中"，说明不了"此刻在跑"；光在走，才知道进度是活的。
+    if (row.status == "active") {
+      ui::StrokeRound(target, fmt.brush, box, kNodeRadius, ui::Fade(ui::kAccent, 0.55f * a), 1.6f);
+      constexpr int kPerim = 72;
+      D2D1_POINT_2F pt[kPerim + 1];
+      const float r = kNodeRadius;
+      const float x0 = row.x, y0 = row.y, x1 = row.x + row.w, y1 = row.y + row.h;
+      // 圆角矩形的周长按 8 段折线近似：四条边 + 四个角，够顺滑且写起来短。
+      const float straight_x = (x1 - x0) - 2.0f * r;
+      const float straight_y = (y1 - y0) - 2.0f * r;
+      const float arc = 1.5707963f * r;
+      const float total = 2.0f * straight_x + 2.0f * straight_y + 4.0f * arc;
+      for (int s = 0; s <= kPerim; ++s) {
+        float d = static_cast<float>(s) / kPerim * total;
+        // 从左上角弧的中点起绕
+        if (d < straight_x) { pt[s] = D2D1::Point2F(x0 + r + d, y0); continue; }
+        d -= straight_x;
+        if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x1 - r + r * std::sin(k), y0 + r - r * std::cos(k)); continue; }
+        d -= arc;
+        if (d < straight_y) { pt[s] = D2D1::Point2F(x1, y0 + r + d); continue; }
+        d -= straight_y;
+        if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x1 - r + r * std::cos(k), y1 - r + r * std::sin(k)); continue; }
+        d -= arc;
+        if (d < straight_x) { pt[s] = D2D1::Point2F(x1 - r - d, y1); continue; }
+        d -= straight_x;
+        if (d < arc) { const float k = d / arc * 1.5707963f; pt[s] = D2D1::Point2F(x0 + r - r * std::sin(k), y1 - r + r * std::cos(k)); continue; }
+        d -= arc;
+        if (d < straight_y) { pt[s] = D2D1::Point2F(x0, y1 - r - d); continue; }
+        d -= straight_y;
+        const float k = d / arc * 1.5707963f;
+        pt[s] = D2D1::Point2F(x0 + r - r * std::cos(k), y0 + r - r * std::sin(k));
+      }
+      const float head = static_cast<float>(anim.now % 100000) * 0.00033f;
+      const float hl = head - std::floor(head);
+      for (int s = 0; s < kPerim; ++s) {
+        float d = (static_cast<float>(s) / kPerim) - hl;
+        d -= std::floor(d);
+        if (d < 0.15f) {
+          const float k = 1.0f - d / 0.15f;
+          fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, (0.10f + 0.80f * k) * a)));
+          target->DrawLine(pt[s], pt[s + 1], fmt.brush, 2.4f);
+        }
+      }
+    }
 
     // 状态点
     fmt.brush->SetColor(ui::Color(ui::Fade(StatusInk(row.status, row.depth > 0), a)));
@@ -399,9 +483,11 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   ui::StrokeRound(target, fmt.brush,
                   D2D1::RectF(kPad, height_dip - kFooter + 6.0f, width_dip - kPad, height_dip - kFooter + 6.5f),
                   0.0f, ui::Fade(0xFFFFFFFF, 0.06f * a), 0.5f);
-  const std::wstring hint = model.busy
-                                ? model.busy_text
-                                : L"↑↓ 选 · Enter 再拆一层 · 拖空白平移 · 滚轮缩放 · Ctrl+Enter 就这样 · Esc 不要了";
+  const std::wstring hint =
+      model.busy ? model.busy_text
+                 : (model.read_only
+                        ? L"↑↓ 选 · Enter 展开/收起 · 拖空白平移 · 滚轮缩放 · Esc 关闭"
+                        : L"↑↓ 选 · Enter 再拆一层 · 拖空白平移 · 滚轮缩放 · Ctrl+Enter 就这样 · Esc 不要了");
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
            fmt.brush, ui::Fade(ui::kTextDim, a));
@@ -409,7 +495,8 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   const D2D1_RECT_F commit = CommitRectAt(width_dip, height_dip);
   ui::FillRound(target, fmt.brush, commit, kCommitH * 0.5f,
                 model.busy ? ui::Fade(0xFF3A3A40, a) : ui::Fade(ui::kAccent, a));
-  ui::TextCentered(target, L"就这样", fmt.body, commit, fmt.brush, ui::Fade(0xFFFFFFFF, a));
+  ui::TextCentered(target, model.read_only ? L"知道了" : L"就这样", fmt.body, commit, fmt.brush,
+                  ui::Fade(0xFFFFFFFF, a));
 
   target->SetTransform(D2D1::Matrix3x2F::Identity());
 }
