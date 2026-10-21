@@ -888,7 +888,30 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
         const bool still_down = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
         if (!still_down || GetTickCount64() - s.tab_armed_at > 3000) {
           s.tab_need_release = false;
+          // 这就是"松手之后又按的第二下"。第一下开了这层，第二下若是 600ms 内的
+          // 快速连按，就是"把眼下这件标记完成"；否则当作普通的取消。
+          //
+          // 之前这里只是把闸门放下来、继续往下走，于是第二下被当成"没框选就取消"，
+          // 双击永远失效 —— 真正的症结在这，不在时间戳。
+          if (GetTickCount64() - s.opened_at < 600) {
+            const bool has_selection =
+                (s.selection.right - s.selection.left) >= kMinSide &&
+                (s.selection.bottom - s.selection.top) >= kMinSide;
+            if (!has_selection) {
+              TeardownWithAction(7);
+              return 0;
+            }
+          }
         } else {
+          // 键还按着：可能是自动重复，也可能是人手又按了一下。600ms 内按连按处理。
+          if (GetTickCount64() - s.opened_at < 600) {
+            const bool has_sel = (s.selection.right - s.selection.left) >= kMinSide &&
+                                 (s.selection.bottom - s.selection.top) >= kMinSide;
+            if (!has_sel) {
+              TeardownWithAction(7);
+              return 0;
+            }
+          }
           return 0;
         }
       }
@@ -907,9 +930,12 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
         if (ready) {
           Finish();
         } else if (wparam == 0x72) {
-          //
-          //
-          Teardown(0);
+          // 600ms 内的第二下 = 快速连按 → 标记完成；更慢就是普通取消。
+          if (GetTickCount64() - s.opened_at < 600) {
+            TeardownWithAction(7);
+          } else {
+            Teardown(0);
+          }
         }
       }
       return 0;    case WM_TIMER:

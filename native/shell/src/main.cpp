@@ -828,7 +828,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (wparam != 0) {
         wchar_t text[96];
         const int action = static_cast<int>(lparam);
-        if (action == 2) {
+        if (action == 7) {
+          // 双击 Tab：不截图，只把眼下这件标记完成
+          std::thread([]() {
+            const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+            std::string body, reason;
+            if (!dshwork::HttpPostJson(endpoint, L"/dsh-work/api/intent",
+                                       "{\"intent\":{\"type\":\"node.advance\"},\"by\":\"human\"}", body,
+                                       reason)) {
+              LogToFile("双击 Tab 失败：" + reason);
+            }
+          }).detach();
+          ShowNotice(L"已标记完成", 1600);
+          return 0;
+        }        if (action == 2) {
           // 解构：截图已经落盘，这里把它交给宿主模型去拆任务树
           StartRecognize(g_capture_path);
           return 0;
