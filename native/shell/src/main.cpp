@@ -199,6 +199,13 @@ float g_review_pan_ly = 0.0f;
 bool g_review_closing = false;
 bool g_review_tracking_leave = false;
 constexpr float kReviewCloseMs = 190.0f;
+// 动画帧间隔：固定 60fps。跟屏幕刷新率绑定过一版，240Hz 下等于 4ms 一帧，
+// 画不完就堆积，反而卡。动画本身是按时间算的，帧率低也不会变慢。
+constexpr UINT kReviewFrameMs = 16;
+// 悬停多久自动展开。太短会误触，太长又像没反应。
+constexpr ULONGLONG kHoverExpandMs = 260;
+int g_review_hover_row = -1;
+ULONGLONG g_review_hover_at = 0;
 
 void RepaintReview();
 void ReviewKey(int which);
@@ -416,6 +423,22 @@ void TickReviewAnim() {
   const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
   g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
   RepaintReview();
+  // 悬停自动展开：指针在某一颗上停够 kHoverExpandMs、它有子节点且还没展开，就展开。
+  // 放在定时器里而不是鼠标消息里，是因为"停够久"需要一个时钟 —— 一次扫过整排
+  // 不该连着开好几颗。
+  if (!g_review_closing && !g_review_panning && g_review_hover_row >= 0 &&
+      g_review_hover_row < static_cast<int>(g_review_model.rows.size())) {
+    const dshwork::review::Row& hovered =
+        g_review_model.rows[static_cast<size_t>(g_review_hover_row)];
+    if (hovered.has_children && !hovered.expanded && now - g_review_hover_at >= kHoverExpandMs) {
+      g_review_model.selected = g_review_hover_row;
+      g_review_hover_row = -1;  // 先清掉：展开后行会被重建，索引立刻失效
+      g_review_hover_at = now;
+      ReviewExpandSelected();
+      return;
+    }
+  }
+
   // 打开动画收尾后不立刻停表：连线上的流光还在走，只要窗口开着就按刷新率跑。
   // 这是唯一一个"长期运行"的动画，代价是几颗方框 + 几条折线，可接受；
   // 窗口一收（CloseReview）就把表停掉，静止时不留任何后台开销。
@@ -1458,7 +1481,19 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       TrackMouseEvent(&tme);
       g_review_tracking_leave = true;
     }
-    if (g_review_panning) {
+    if (!g_review_panning) {
+      // 记住指针停在哪一颗上；"停够久了没有"由动画定时器判断，
+      // 而不是在这里直接展开 —— 一次扫过整排会连开好几颗。
+      const float hdpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+      const float hk = hdpi > 0.1f ? hdpi : 1.0f;
+      const int hover = dshwork::review::NodeAt(
+          g_review_model, static_cast<float>(GET_X_LPARAM(lparam)) / hk,
+          static_cast<float>(GET_Y_LPARAM(lparam)) / hk);
+      if (hover != g_review_hover_row) {
+        g_review_hover_row = hover;
+        g_review_hover_at = GetTickCount64();
+      }
+    }    if (g_review_panning) {
       const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
       const float k = dpi > 0.1f ? dpi : 1.0f;
       const float mx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
@@ -1479,7 +1514,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (!g_review_panning && g_review_open && !g_review_closing) {
       g_review_closing = true;
       g_review_anim_at = GetTickCount64();
-      SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
+      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
     }
     return 0;
   }
@@ -1505,7 +1540,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (index >= 0) {
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
-      SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
+      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
       // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
       if (again) {
         const auto& row = g_review_model.rows[static_cast<size_t>(index)];
@@ -1749,7 +1784,7 @@ void EnsureReviewWindow() {
   g_review_anim_open = 0.0f;
   g_review_anim_at = GetTickCount64();
   g_review_hl_y = -1.0f;
-  SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
+  SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
 }
 
 /** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
