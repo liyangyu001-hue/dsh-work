@@ -36,6 +36,7 @@
 #include "doc.h"
 #include "host.h"
 #include "panel.h"
+#include "prompt.h"
 #include "capture.h"
 #include "json.h"
 
@@ -238,6 +239,17 @@ constexpr int kArmedKeyIdBase = 0x60;  // 0x60..0x66 给面板按键用
 
 constexpr wchar_t kPanelClass[] = L"DSHWorkNativePanel";
 constexpr UINT kMsgTray = WM_APP + 3;
+constexpr UINT kMsgPlanTextDone = WM_APP + 9;
+constexpr int kPromptHotkeyId = 0x76;
+
+/** 后台线程算出来的提示语，回到 UI 线程才拿去 ShowNotice。 */
+std::wstring g_plan_note;
+std::mutex g_plan_mutex;
+
+void OpenPrompt();
+void SubmitPrompt(const std::wstring& text);
+void RefreshPanelModel();
+void ShowPanel();
 constexpr UINT kHotkeyId = 0x51;
 constexpr UINT kTabHotkeyId = 0x70;   // Tab 常驻热键：开着 DSH Work 就一直监听
 bool g_hover_tab_armed = false;
@@ -697,7 +709,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       DispatchKey(static_cast<int>(wparam));
       return 0;
     case WM_HOTKEY:
-      if (wparam == kHotkeyId) {
+      if (wparam == kPromptHotkeyId) {
+      OpenPrompt();
+      return 0;
+    }
+    if (wparam == kHotkeyId) {
         // 双屏：唤起到光标所在的那块屏，而不是永远粘在主屏
         PositionWindow(MonitorUnderCursor());
         TogglePanel();
@@ -745,6 +761,29 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
       }
       break;
+    case dshwork::ui::prompt::kMsgPromptSubmit: {
+      const std::wstring typed = dshwork::ui::prompt::Text();
+      dshwork::ui::prompt::Close();
+      SubmitPrompt(typed);
+      return 0;
+    }
+    case dshwork::ui::prompt::kMsgPromptCancel:
+      dshwork::ui::prompt::Close();
+      ShowWindow(g_window, SW_SHOWNOACTIVATE);
+      return 0;
+    case kMsgPlanTextDone: {
+      std::wstring note;
+      {
+        std::lock_guard<std::mutex> guard(g_plan_mutex);
+        note.swap(g_plan_note);
+      }
+      if (!note.empty()) ShowNotice(note, wparam == 1 ? 3600 : 4000);
+      if (wparam == 1) {
+        RefreshPanelModel();
+        ShowPanel();
+      }
+      return 0;
+    }
     case kMsgTray:
       if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
         ShowTrayMenu();
@@ -1460,6 +1499,76 @@ void DisarmHoverTab() {
 }
 
 /** 托盘：右键菜单里至少要有"退出"，否则这进程只能去任务管理器杀。 */
+/** 打开「说一件事」输入框（Ctrl+Alt+N）。 */
+void OpenPrompt() {
+  HidePanel();
+  ShowWindow(g_window, SW_HIDE);
+  if (dshwork::ui::prompt::Open(g_window) == nullptr) {
+    ShowWindow(g_window, SW_SHOWNOACTIVATE);
+    ShowNotice(L"输入框打不开", 2000);
+  }
+}
+
+std::string JsonEscape(const std::string& utf8) {
+  std::string out;
+  out.reserve(utf8.size() + 16);
+  for (const char ch : utf8) {
+    const unsigned char byte = static_cast<unsigned char>(ch);
+    if (ch == '"' || ch == '\\') {
+      out.push_back('\\');
+      out.push_back(ch);
+    } else if (ch == '\n') {
+      out += "\\n";
+    } else if (ch == '\r') {
+      out += "\\r";
+    } else if (ch == '\t') {
+      out += "\\t";
+    } else if (byte < 0x20) {
+      char buffer[8] = {};
+      sprintf_s(buffer, "\\u%04x", byte);
+      out += buffer;
+    } else {
+      out.push_back(ch);
+    }
+  }
+  return out;
+}
+
+/** 提交一句话：后台请求 /api/plan-text，结果用消息回 UI 线程。 */
+void SubmitPrompt(const std::wstring& text) {
+  if (text.empty()) return;
+  ShowWindow(g_window, SW_SHOWNOACTIVATE);
+  ShowNotice(L"正在拆…", 120000);
+  const std::string utf8 = dshwork::Narrow(text);
+  std::thread([utf8]() {
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    std::string body;
+    std::string reason;
+    if (!endpoint.ok) {
+      PostMessageW(g_window, kMsgPlanTextDone, 0, 0);
+      return;
+    }
+    const std::string payload = "{\"text\":\"" + JsonEscape(utf8) + "\"}";
+    const bool ok = dshwork::HttpPostJson(endpoint, L"/dsh-work/api/plan-text", payload, body, reason);
+    std::wstring note;
+    if (ok) {
+      // {"ok":true,"title":"…","count":7}
+      const std::string marker = "\"count\":";
+      const size_t at = body.find(marker);
+      int count = 0;
+      if (at != std::string::npos) count = std::atoi(body.c_str() + at + marker.size());
+      note = L"已拆成 " + std::to_wstring(count) + L" 个任务";
+    } else {
+      note = L"规划失败：" + dshwork::Widen(reason.empty() ? std::string("未知原因") : reason);
+    }
+    {
+      std::lock_guard<std::mutex> guard(g_plan_mutex);
+      g_plan_note = note;
+    }
+    PostMessageW(g_window, kMsgPlanTextDone, ok ? 1 : 0, 0);
+  }).detach();
+}
+
 void CreateTrayIcon() {
   NOTIFYICONDATAW data = {};
   data.cbSize = sizeof(data);
@@ -1638,6 +1747,9 @@ int main() {
   Repaint();
   CreateTrayIcon();
   ArmHoverTab();  // Tab 常驻：随时按都该能进框选／菜单
+  if (!RegisterHotKey(g_window, kPromptHotkeyId, MOD_CONTROL | MOD_ALT, 'N')) {
+    LogToFile("说一件事热键注册失败（Ctrl+Alt+N 可能被占用）");
+  }
   if (!RegisterHotKey(g_window, kHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE)) {
     LogToFile("全局热键 Ctrl+Alt+Space 注册失败（可能被别的软件占了）");
   }

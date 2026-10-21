@@ -22,9 +22,10 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import { planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviseNode } from './advise.ts';
+import { planFromText } from './planning.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
@@ -120,6 +121,27 @@ export function apply(ctx: any, config?: PluginConfig): void {
           console.log(`[dsh-work] ${target} 探测失败：${String(error)}`);
         }
       }
+      // 再往下探一层：会话列表到底能不能拿到 id、agent 能不能按 id 取。
+      // 只读，不改任何东西；结果只用来决定「自动唤醒」怎么写。
+      const preview = (value: unknown): string => {
+        try {
+          const text = JSON.stringify(value, (_k, v) => (typeof v === 'function' ? '[fn]' : v));
+          return text === undefined ? String(value) : text.slice(0, 420);
+        } catch {
+          return String(value);
+        }
+      };
+      try {
+        const sessions = ctx.get('sessions' as never) as unknown as Record<string, unknown>;
+        if (typeof sessions?.['list'] === 'function') {
+          const listed = await (sessions['list'] as () => Promise<unknown>)();
+          console.log(`[dsh-work] sessions.list() => ${preview(listed)}`);
+        } else {
+          console.log('[dsh-work] sessions.list 不是函数');
+        }
+      } catch (error) {
+        console.log(`[dsh-work] sessions.list() 抛：${String(error)}`);
+      }
     }
 
     const host: ToolHost = {
@@ -171,6 +193,48 @@ export function apply(ctx: any, config?: PluginConfig): void {
      * 这里刻意做成"同步等"：一句话建议几百 token，用户按下去就要看到，
      * 拖成作业反而更麻烦。失败只回可读原因，绝不写文档。
      */
+    /**
+     * 一段人话 → 一张任务树。
+     *
+     * 和识别走同一条落库路径（plan.set），区别只在输入：那边是 PNG，这边是文字。
+     * 模型给的形状不对就如实回错，**绝不写文档**——半张错任务树比没有更糟。
+     */
+    const planText: PlanTextApi = {
+      async plan(text) {
+        const llm = readService(ctx, 'llm');
+        if (llm === null) {
+          return { ok: false, status: 503, reason: '宿主没有提供 llm 服务' };
+        }
+        const selection = resolveLlmSelection(ctx, cfg);
+        try {
+          const planned = await planFromText(
+            {
+              llm,
+              provider: selection.provider,
+              model: selection.model,
+              ...(cfg.llm?.timeoutMs === undefined ? {} : { timeoutMs: cfg.llm.timeoutMs }),
+            },
+            text,
+          );
+          if (planned.specs.length === 0) {
+            return { ok: false, status: 422, reason: '模型这次没给出可解析的计划，换个说法再试' };
+          }
+          const intent = planSetFromSpecs(planned.specs, {
+            now: Date.now(),
+            newId: () => createId('nd', Date.now()),
+            title: planned.title,
+          });
+          const result = await store.commit(intent, 'ai');
+          if (!result.ok) {
+            return { ok: false, status: 409, reason: result.reason };
+          }
+          return { ok: true, title: planned.title === '' ? '未命名计划' : planned.title, count: planned.specs.length };
+        } catch (error) {
+          return { ok: false, status: 502, reason: `规划失败：${String(error)}` };
+        }
+      },
+    };
+
     const advise: AdviseApi = {
       async request(nodeId) {
         const llm = readService(ctx, 'llm');
@@ -295,6 +359,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       authorize: (req) => authorizeRequest(ctx, req),
       recognize,
       advise,
+      planText,
     });
 
     // 令牌先就位：伴随层的请求可能在路由注册后几十毫秒内就打进来。

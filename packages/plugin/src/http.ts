@@ -11,6 +11,7 @@
  *   POST /api/intent    提交一条意图
  *   POST /api/recognize 一张 PNG → 提交识别作业（立即返回 jobId）
  *   GET  /api/recognize/<jobId> 查询识别进度 / 结果
+ *   POST /api/plan-text 一段人话 → 一张任务树（同步）
  *   GET  /api/events    SSE：快照 + 增量
  *
  * 识别**不**走同步响应：一次视觉模型调用要几十秒，挂在 HTTP 上会被任何一层
@@ -52,6 +53,8 @@ export interface HttpOptions {
   recognize?: RecognizeApi;
   /** 节点建议：同上，没注入就 503。 */
   advise?: AdviseApi;
+  /** 一句话生成计划：同样可选，没注入就 503。 */
+  planText?: PlanTextApi;
 }
 
 /** 识别作业的对外视图：状态 + 一句人话，不含模型原文与图片。 */
@@ -71,6 +74,14 @@ export interface RecognizeApi {
 
 
 /** 节点建议：现在要一条，回来一句话。失败给可读原因，不给半成品。 */
+/** 一段人话 → 一张计划。同步返回，模型慢时由调用方超时兜底。 */
+export interface PlanTextApi {
+  plan(text: string): Promise<
+    | { ok: true; title: string; count: number }
+    | { ok: false; status: number; reason: string }
+  >;
+}
+
 export interface AdviseApi {
   request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
 }
@@ -206,6 +217,35 @@ export function createHttpHandler(options: HttpOptions) {
       sendJson(res, 200, { ok: true, text: result.text, ...(result.alt === undefined ? {} : { alt: result.alt }) });
       return;
     }
+    if (pathname === '/api/plan-text') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      if (options.planText === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供规划能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const record = body.value as Record<string, unknown>;
+      const text = typeof record['text'] === 'string' ? record['text'].trim() : '';
+      if (text === '') {
+        sendJson(res, 400, { ok: false, error: 'text 不能为空' });
+        return;
+      }
+      const result = await options.planText.plan(text);
+      if (!result.ok) {
+        sendJson(res, result.status, { ok: false, error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true, title: result.title, count: result.count });
+      return;
+    }
+
     if (pathname === '/api/recognize' && req.method !== 'POST') {
       sendJson(res, 405, { error: 'method not allowed' });
       return;
