@@ -59,7 +59,7 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`9718733`（2026-10-21 21:16，tree 与本地 `b90e096` 一致）
+> 当前远端 sha：`384d55c`（2026-10-21 21:31，tree 与本地 `9863ef7` 一致）
 
 ## 当前任务（只做一个，做完就停）
 
