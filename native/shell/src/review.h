@@ -76,7 +76,7 @@ constexpr float kGapX = 74.0f;   // 列间距：够画一条明显的连线
 constexpr float kGapY = 26.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
 
-constexpr float kMinZoom = 0.45f;
+constexpr float kMinZoom = 0.28f;  // 展开一层后内容会很宽，允许缩得更小才装得下
 constexpr float kMaxZoom = 1.60f;
 
 constexpr float kWindowW = 980.0f;
@@ -368,8 +368,8 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     if (total <= 0.01f) continue;
 
     // 底线
-    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.14f * a)));
-    for (int s = 0; s < kSamples; ++s) target->DrawLine(points[s], points[s + 1], fmt.brush, 1.3f);
+    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.22f * a)));
+    for (int s = 0; s < kSamples; ++s) target->DrawLine(points[s], points[s + 1], fmt.brush, 1.6f);
 
     // 流光：一段 18% 长度的亮弧，每条边错开相位，整体朝前流
     const float phase = flow_phase + static_cast<float>(i) * 0.11f;
@@ -409,7 +409,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     if (row.status == "active") {
       ui::StrokeRound(target, fmt.brush, box, kNodeRadius, ui::Fade(ui::kAccent, 0.50f * a), 1.5f);
 
-      constexpr int kN = 96;
+      constexpr int kN = 480;  // 采样密到圆点能互相压住，尾巴才是连续的一根锥形
       D2D1_POINT_2F pt[kN + 1];
       const float r = kNodeRadius;
       const float x0 = row.x, y0 = row.y, x1 = row.x + row.w, y1 = row.y + row.h;
@@ -438,27 +438,27 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
         pt[s] = D2D1::Point2F(x0 + r - r * std::cos(k), y0 + r - r * std::sin(k));
       }
 
-      // 0.55 圈/秒：比"扫一眼跟得上"慢一点，iOS 的活动环大概是这个节奏。
+      // 0.55 圈/秒；光头在最前、尾巴往回收。
+      //
+      // 上一版画反了：亮的一端跑在后面，看起来像被拖着走。
+      // 现在用「离光头多远」当自变量：0 就是光头，越大越靠后、越淡越细。
+      // 每一段不画线、画圆点：DrawLine 默认是平头，一段段接起来会出现明显缺口
+      // （就是之前看到的"断层"），圆点叠起来才是连续的锥形。
       const float head = static_cast<float>(anim.now % 100000) * 0.00055f;
       const float hl = head - std::floor(head);
-      constexpr float kTail = 0.42f;
-      for (int pass = 0; pass < 2; ++pass) {
-        for (int s = 0; s < kN; ++s) {
-          float d = (static_cast<float>(s) / kN) - hl;
-          d -= std::floor(d);
-          if (d > kTail) continue;
-          const float k = 1.0f - d / kTail;
-          const float ease = k * k * k;  // 尾巴收得快，头部才显得集中
-          if (pass == 0) {
-            fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.05f + 0.22f * ease) * a)));
-            target->DrawLine(pt[s], pt[s + 1], fmt.brush, 7.0f);
-          } else {
-            // 头部偏白，像有光从边里透出来
-            const UINT32 core = ui::Fade(0xFFFFFFFF, (0.20f + 0.80f * ease) * a);
-            fmt.brush->SetColor(ui::Color(core));
-            target->DrawLine(pt[s], pt[s + 1], fmt.brush, 2.0f + 1.6f * ease);
-          }
-        }
+      constexpr float kTail = 0.40f;
+      for (int s = 0; s <= kN; ++s) {
+        float d = hl - static_cast<float>(s) / kN;
+        d -= std::floor(d);                    // 0 = 光头，越大越靠后
+        if (d > kTail) continue;
+        const float k = 1.0f - d / kTail;      // 光头 1，尾端 0
+        const float ease = k * k;              // 二次就够，三次会显得头特别短
+        // 外层辉光：宽、淡，像光从边框后面泄出来
+        fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.03f + 0.20f * ease) * a)));
+        target->FillEllipse(D2D1::Ellipse(pt[s], 3.2f + 2.2f * ease, 3.2f + 2.2f * ease), fmt.brush);
+        // 芯：白，头部最亮最粗，尾巴细成一根线
+        fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, (0.10f + 0.90f * ease) * a)));
+        target->FillEllipse(D2D1::Ellipse(pt[s], 0.9f + 1.5f * ease, 0.9f + 1.5f * ease), fmt.brush);
       }
     }
     // 状态点

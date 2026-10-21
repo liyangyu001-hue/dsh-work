@@ -1409,8 +1409,19 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     return 0;
   }
   if (message == WM_LBUTTONDOWN) {
-    const float x = static_cast<float>(GET_X_LPARAM(lparam));
-    const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+    // 鼠标坐标是物理像素，而模型与布局全是 DIP。不换算就永远命中不到任何一颗
+    // （实测 click y=488 实际落在 DIP 325，差 1.5 倍，被算到节点下方去了）。
+    const float dpi_scale = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+    const float scale_ok = dpi_scale > 0.1f ? dpi_scale : 1.0f;
+    const float x = static_cast<float>(GET_X_LPARAM(lparam)) / scale_ok;
+    const float y = static_cast<float>(GET_Y_LPARAM(lparam)) / scale_ok;
+    // 临时诊断：确认点击有没有进来、命中哪一颗（定位完就删）。
+    LogToFile("review click x=" + std::to_string(static_cast<int>(x)) + " y=" + std::to_string(static_cast<int>(y)) +
+              " fit=" + std::to_string(g_review_model.fitted ? 1 : 0) +
+              " zoom=" + std::to_string(g_review_model.zoom) +
+              " pan=" + std::to_string(static_cast<int>(g_review_model.pan_x)) + "," +
+              std::to_string(static_cast<int>(g_review_model.pan_y)) +
+              " hit=" + std::to_string(dshwork::review::NodeAt(g_review_model, x, y)));
     if (dshwork::review::CommitHit(g_review_model, x, y)) {
       if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
       return 0;
@@ -1467,6 +1478,9 @@ void ReviewExpandSelected() {
     // 光改这个集合界面是不会动的：行是 BuildReviewModel 摊平出来的，
     // 必须拿同一份 JSON 重建一次模型，再重新布局。（这一步漏过，表现就是点了没反应。）
     BuildReviewModel(g_review_root);
+    // 展开会把内容撑宽，不重新自适应的话新节点会跑到窗口外（踩过）。
+    dshwork::review::FitView(g_review_model);
+    dshwork::review::ClampPan(g_review_model);
     LayoutReview();
     RepaintReview();
     LogToFile(std::string("审阅：本地") + (g_review_expanded.count(row.id) > 0 ? "展开 " : "收起 ") + row.id);
