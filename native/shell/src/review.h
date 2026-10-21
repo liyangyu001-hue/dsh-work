@@ -495,8 +495,9 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 7.0f, row.x + row.w - 14.0f, row.y + 31.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
-      ui::Text(target, line2, fmt.body,
-               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 14.0f, row.y + 55.0f), fmt.brush,
+      // 第二行也是标题的一部分，用同一个字号；不要降成正文，否则标题读起来像正文带注释。
+      ui::Text(target, line2, fmt.node,
+               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 14.0f, row.y + 59.0f), fmt.brush,
                ui::Fade(ui::kText, a));
     }
 
