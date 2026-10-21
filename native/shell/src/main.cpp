@@ -775,6 +775,15 @@ HMONITOR MonitorUnderCursor() {
   if (!GetCursorPos(&point)) return MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
   return MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
 }
+// 动画帧间隔：跟着屏幕的高刷能力走，但不让主线程被它拖垮。
+// 120Hz 以上给 8ms（约 120fps），普通屏 16ms；动画一律按真实时间算，
+// 所以两档跑出来是同一个时长，只是细腻程度不同。
+UINT kReviewFrameMsForScreen() {
+  const UINT hz = RefreshHzOf(MonitorUnderCursor());
+  return hz >= 120 ? 8 : 16;
+}
+
+
 
 void UpdateDpi();  // 前向声明：PositionWindow 里要先按目标屏重算 DPI
 
@@ -1514,7 +1523,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (!g_review_panning && g_review_open && !g_review_closing) {
       g_review_closing = true;
       g_review_anim_at = GetTickCount64();
-      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
+      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
     }
     return 0;
   }
@@ -1540,7 +1549,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (index >= 0) {
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
-      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
+      SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
       // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
       if (again) {
         const auto& row = g_review_model.rows[static_cast<size_t>(index)];
@@ -1784,7 +1793,7 @@ void EnsureReviewWindow() {
   g_review_anim_open = 0.0f;
   g_review_anim_at = GetTickCount64();
   g_review_hl_y = -1.0f;
-  SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMs, nullptr);
+  SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
 }
 
 /** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
@@ -2119,6 +2128,18 @@ void HidePanel(bool animated) {
  */
 void UpdateHover() {
   if (g_window == nullptr) return;
+  // 节点图开着的时候，整条小条一律不认鼠标。
+  //
+  // 不然会连环触发：鼠标落在图上 → 小条以为要展开面板 → 面板一开又去开图 →
+  // 图叠图，节点越堆越多。图上操作期间，小条就当自己不在。
+  if (g_review != nullptr && IsWindowVisible(g_review)) {
+    if (g_bar_hovered) {
+      g_bar_hovered = false;
+      Repaint();
+    }
+    if (g_panel_by_hover && g_panel_open) HidePanel();
+    return;
+  }
   RECT window_rect = {};
   GetWindowRect(g_window, &window_rect);
   POINT cursor = {};

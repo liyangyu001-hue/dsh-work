@@ -89,6 +89,7 @@ struct State {
   POINT anchor = {};
   RECT selection = {};
   ULONGLONG last_paint = 0;
+  ULONGLONG opened_at = 0;   // 覆盖层这一轮是什么时候开的（双击 Tab 靠它判断）
 
   // 最近一次截取的 PNG：有它，Tab 之后摆出来的就是"这块拿去做什么"那一层
   std::wstring pending_path;
@@ -904,6 +905,8 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
         if (ready) {
           Finish();
         } else if (wparam == 0x72) {
+          //
+          //
           Teardown(0);
         }
       }
@@ -1090,6 +1093,7 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   // Tab/Enter/空格 同理——菜单里要用它们，一样得走热键。
   s.tab_need_release = (GetAsyncKeyState(VK_TAB) & 0x8000) != 0;
   s.tab_armed_at = GetTickCount64();
+  s.opened_at = GetTickCount64();
   RegisterHotKey(s.window, 0x71, MOD_NOREPEAT, VK_ESCAPE);
   RegisterHotKey(s.window, 0x72, MOD_NOREPEAT, VK_TAB);
   RegisterHotKey(s.window, 0x73, MOD_NOREPEAT, VK_RETURN);

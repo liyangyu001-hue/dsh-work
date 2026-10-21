@@ -409,7 +409,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     if (row.status == "active") {
       ui::StrokeRound(target, fmt.brush, box, kNodeRadius, ui::Fade(ui::kAccent, 0.50f * a), 1.5f);
 
-      constexpr int kN = 480;  // 采样密到圆点能互相压住，尾巴才是连续的一根锥形
+      constexpr int kN = 168;  // 采样密到圆点能互相压住，尾巴才是连续的一根锥形
       D2D1_POINT_2F pt[kN + 1];
       const float r = kNodeRadius;
       const float x0 = row.x, y0 = row.y, x1 = row.x + row.w, y1 = row.y + row.h;
