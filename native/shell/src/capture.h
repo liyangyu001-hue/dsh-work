@@ -447,14 +447,21 @@ inline void DrawWheel() {
             if (d < inner - corner || d > outer + corner) continue;
             float ang = static_cast<float>(std::atan2(static_cast<double>(dx), static_cast<double>(-dy)));
             if (ang < 0.0f) ang += two_pi;
-            if (ang < a0 - 0.2f || ang > a1 + 0.2f) continue;
+            // 角度必须按「相对起始边、绕一圈取模」来判，直接比 a0/a1 会踩两个坑：
+            // 1) 正上方那瓣的跨度是 [-86.6°, +86.6°]，a0 为负；一取模整瓣只剩右半边；
+            // 2) 跨 0° 的瓣永远进不来 —— 表现就是某一瓣被削掉一条边。
+            const float span = a1 - a0;
+            float rel = ang - a0;
+            while (rel < 0.0f) rel += two_pi;
+            while (rel >= two_pi) rel -= two_pi;
+            if (rel > span + 0.0035f) continue;
 
             // 圆角扇区的有符号距离场：把 (径向, 切向) 当成一张长方形的局部坐标，
             // 用圆角矩形的 SDF 判内外。这样四个角是真的圆角，而不是一刀切到圆心。
             const float u = d - inner;                 // 0 = 内沿
-            const float arc = (a1 - a0) * d;           // 这一瓣在当前半径上的弧长
+            const float arc = span * d;                // 这一瓣在当前半径上的弧长
             if (arc < 1.0f) continue;
-            const float v = (ang - a0) * d;            // 0 = 起始边
+            const float v = rel * d;                   // 0 = 起始边
             const float hw = (outer - inner) * 0.5f;
             const float hh = arc * 0.5f;
             const float r = corner < hw ? (corner < hh ? corner : hh) : (hw < hh ? hw : hh);
