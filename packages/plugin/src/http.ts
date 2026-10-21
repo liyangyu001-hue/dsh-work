@@ -80,6 +80,8 @@ export interface RecognizeApi {
   draft(id: string): { title: string; roots: readonly string[]; nodes: readonly WorkNode[] } | null;
   /** 二次解构：把一颗节点再拆细，成功后草稿就地更新。 */
   expand(id: string, nodeId: string): Promise<{ ok: true; added: number } | { ok: false; reason: string }>;
+  /** 撤销一次二次解构：把这颗节点的子树删掉，退回没拆过的样子。 */
+  collapse(id: string, nodeId: string): { ok: true; removed: number } | { ok: false; reason: string };
 }
 
 
@@ -366,6 +368,29 @@ export function createHttpHandler(options: HttpOptions) {
       }
       const result = await options.recognize.expand(jobId, nodeId);
       sendJson(res, result.ok ? 200 : 502, { ...result, ok: result.ok });
+      return;
+    }
+
+    // 撤销二次解构：删子树，不碰这颗节点本身。同步完成，不需要作业。
+    if (pathname === '/api/plan/collapse' && req.method === 'POST') {
+      if (options.recognize === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供识别能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { jobId?: unknown; nodeId?: unknown };
+      const jobId = typeof payload.jobId === 'string' ? payload.jobId : '';
+      const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId : '';
+      if (jobId === '' || nodeId === '') {
+        sendJson(res, 400, { ok: false, error: '缺少 jobId 或 nodeId' });
+        return;
+      }
+      const result = options.recognize.collapse(jobId, nodeId);
+      sendJson(res, result.ok ? 200 : 409, { ...result, ok: result.ok });
       return;
     }
 

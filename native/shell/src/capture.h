@@ -868,8 +868,15 @@ inline LRESULT CALLBACK CaptureProc(HWND window, UINT message, WPARAM wparam, LP
       return 0;
     }
     case WM_RBUTTONDOWN:
+      // 右键取消要等到 UP 再动手：DOWN 就拆窗口的话，随后那个 UP 会落到底下的
+      // 桌面/资源管理器上，Windows 顺手弹出右键菜单（踩过）。
+      return 0;
+    case WM_RBUTTONUP:
       s.dragging = false;
       Teardown(0);
+      return 0;
+    case WM_CONTEXTMENU:
+      // 兜底：任何路径送来的右键菜单请求一律吃掉，别让系统菜单冒出来。
       return 0;
     case WM_HOTKEY:
       // 闸门：开覆盖层那一刻 Tab 还按着的话，忽略掉第一批 Tab 事件，

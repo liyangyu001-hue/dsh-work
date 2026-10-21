@@ -187,6 +187,7 @@ void RepaintReview();
 void ReviewKey(int which);
 void LayoutReview();
 void ReviewExpandSelected();
+void ReviewCollapseSelected();
 void ReviewCommit();
 void CloseReview();
 bool g_recognize_ok = false;
@@ -385,26 +386,9 @@ void TickReviewAnim() {
   const ULONGLONG now = GetTickCount64();
   const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
   g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
-
-  // 可见窗口先夹好，选中块的目标位置才准。
-  const int visible = static_cast<int>(dshwork::review::kMaxRowsVisible);
-  const int count = static_cast<int>(g_review_model.rows.size());
-  if (g_review_model.selected < g_review_model.scroll) g_review_model.scroll = g_review_model.selected;
-  if (g_review_model.selected >= g_review_model.scroll + visible) {
-    g_review_model.scroll = g_review_model.selected - visible + 1;
-  }
-  if (g_review_model.scroll > count - visible) g_review_model.scroll = count - visible;
-  if (g_review_model.scroll < 0) g_review_model.scroll = 0;
-
-  const float target = static_cast<float>(g_review_model.selected - g_review_model.scroll) * dshwork::review::kRowH;
-  if (g_review_hl_y < 0.0f) g_review_hl_y = target;
-  g_review_hl_y += (target - g_review_hl_y) * 0.40f;
   RepaintReview();
-
-  const float gap = target - g_review_hl_y;
-  const bool settled = g_review_anim_open >= 1.0f && gap < 0.3f && gap > -0.3f && (now - g_review_anim_at) > 420;
-  if (settled) {
-    g_review_hl_y = target;
+  if (g_review_anim_open >= 1.0f && now - g_review_anim_at > 320) {
+    g_review_anim_open = 1.0f;
     RepaintReview();
     KillTimer(g_window, kReviewAnimTimerId);
   }
@@ -1180,16 +1164,17 @@ void BuildReviewModel(const dshwork::JValue& root) {
   model.total = static_cast<int>(roots->array.size());
 
   // 递归展开：只把「已经点开过」的那一层放出来，其余收着。
-  std::function<void(const std::string&, int)> walk = [&](const std::string& id, int depth) {
+  std::function<void(const std::string&, int, int)> walk = [&](const std::string& id, int depth, int parent) {
     const auto it = by_id.find(id);
     if (it == by_id.end()) return;
     const JValue& node = *it->second;
     dshwork::review::Row row;
     row.id = id;
     row.depth = depth;
-    row.title = dshwork::Widen(node.GetString("title"));
-    row.detail = dshwork::Widen(node.GetString("detail"));
-    row.acceptance = dshwork::Widen(node.GetString("acceptance"));
+    row.parent = parent;
+    row.title = node.GetString("title");
+    row.detail = node.GetString("detail");
+    row.acceptance = node.GetString("acceptance");
     row.status = node.GetString("status", "todo");
     if (const JValue* children = node.Get("children"); children != nullptr && children->IsArray()) {
       row.child_count = static_cast<int>(children->array.size());
@@ -1197,12 +1182,13 @@ void BuildReviewModel(const dshwork::JValue& root) {
     }
     row.expanded = row.has_children && g_review_expanded.count(id) > 0;
     model.rows.push_back(row);
+    const int my_index = static_cast<int>(model.rows.size()) - 1;
     if (!row.expanded) return;
     const JValue* children = node.Get("children");
-    for (const JValue& child : children->array) walk(child.text, depth + 1);
+    for (const JValue& child : children->array) walk(child.text, depth + 1, my_index);
   };
 
-  for (const JValue& id : roots->array) walk(id.text, 0);
+  for (const JValue& id : roots->array) walk(id.text, 0, -1);
   if (model.selected >= static_cast<int>(model.rows.size())) model.selected = 0;
 
   // 记住每一行「第一次被看到」的时间：老行沿用之前的时间戳（不重播动画），
@@ -1220,6 +1206,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
   }
 
   g_review_model = model;
+  dshwork::review::Layout(g_review_model);
+  if (!g_review_model.fitted) dshwork::review::FitView(g_review_model);
 }
 
 void LayoutReview() {
@@ -1238,16 +1226,8 @@ void LayoutReview() {
 
 void RepaintReview() {
   if (g_review == nullptr) return;
-  // 滚动窗口跟着选中行走：选中跑到可见区外面时，自动把可见区挪过去。
-  // 放在这里而不是每个改 selected 的地方，是为了不漏（方向键、点击、展开都会调它）。
-  const int visible = static_cast<int>(dshwork::review::kMaxRowsVisible);
-  const int count = static_cast<int>(g_review_model.rows.size());
-  if (g_review_model.selected < g_review_model.scroll) g_review_model.scroll = g_review_model.selected;
-  if (g_review_model.selected >= g_review_model.scroll + visible) {
-    g_review_model.scroll = g_review_model.selected - visible + 1;
-  }
-  if (g_review_model.scroll > count - visible) g_review_model.scroll = count - visible;
-  if (g_review_model.scroll < 0) g_review_model.scroll = 0;
+  // 图模式没有滚动位置：把平移量夹住，别让整张图被拖出视野。
+  dshwork::review::ClampPan(g_review_model);
 
   RECT rect = {};
   GetWindowRect(g_review, &rect);
@@ -1351,6 +1331,9 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       case VK_RETURN:
         ReviewKey(ctrl ? 3 : 2);
         return 0;
+      case VK_BACK:
+        ReviewCollapseSelected();
+        return 0;
       case VK_ESCAPE:
         ReviewKey(4);
         return 0;
@@ -1360,16 +1343,20 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     return 0;
   }
   if (message == WM_MOUSEWHEEL) {
-    // 滚轮翻列表：一次三行，够快又不至于一滑就飞出去
+    // 滚轮缩放：以面板中心为锚，一次 12%，夹在 0.45~1.6 之间。
     const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-    const int rows = static_cast<int>(dshwork::review::kMaxRowsVisible);
-    const int count = static_cast<int>(g_review_model.rows.size());
-    const int step = delta > 0 ? -3 : 3;
-    int next = g_review_model.scroll + step;
-    if (next > count - rows) next = count - rows;
-    if (next < 0) next = 0;
-    if (next != g_review_model.scroll) {
-      g_review_model.scroll = next;
+    const float step = delta > 0 ? 1.12f : (1.0f / 1.12f);
+    float next = g_review_model.zoom * step;
+    if (next > dshwork::review::kMaxZoom) next = dshwork::review::kMaxZoom;
+    if (next < dshwork::review::kMinZoom) next = dshwork::review::kMinZoom;
+    if (next != g_review_model.zoom) {
+      // 保持中心那个点不动：先算出中心对应的世界坐标，缩放后再把它放回中心。
+      const float cx = (dshwork::review::BodyWidth(g_review_model) * 0.5f - g_review_model.pan_x) / g_review_model.zoom;
+      const float cy = (dshwork::review::BodyHeight(g_review_model) * 0.5f - g_review_model.pan_y) / g_review_model.zoom;
+      g_review_model.zoom = next;
+      g_review_model.pan_x = dshwork::review::BodyWidth(g_review_model) * 0.5f - cx * next;
+      g_review_model.pan_y = dshwork::review::BodyHeight(g_review_model) * 0.5f - cy * next;
+      dshwork::review::ClampPan(g_review_model);
       RepaintReview();
     }
     return 0;
@@ -1377,11 +1364,11 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
   if (message == WM_LBUTTONDOWN) {
     const float x = static_cast<float>(GET_X_LPARAM(lparam));
     const float y = static_cast<float>(GET_Y_LPARAM(lparam));
-    if (dshwork::review::CommitHit(g_review_model, x, y, g_dpiScale)) {
+    if (dshwork::review::CommitHit(g_review_model, x, y)) {
       if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
       return 0;
     }
-    const int index = dshwork::review::RowAt(g_review_model, x, y, g_dpiScale);
+    const int index = dshwork::review::NodeAt(g_review_model, x, y);
     if (index >= 0) {
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
@@ -1456,9 +1443,44 @@ void ReviewExpandSelected() {
   }).detach();
 }
 
-void ReviewCommit() {
-  if (g_review_busy) return;
+/**
+ * 撤销这一层：把这颗节点刚拆出来的子树整棵删掉，退回没拆过的样子。
+ *
+ * 只对"拆过"的行有效。撤销是就地完成的（宿主那边同步删），不需要作业轮询；
+ * 撤销后同一次会话里可以再拆一次，结果不会越滚越脏。
+ */
+void ReviewCollapseSelected() {
+  const int index = g_review_model.selected;
+  if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) return;
+  const dshwork::review::Row row = g_review_model.rows[static_cast<size_t>(index)];
+  if (!row.has_children) {
+    g_review_note = L"这颗还没拆过";
+    RepaintReview();
+    return;
+  }
+
   const std::wstring job = g_review_job;
+  const std::string node_id = row.id;
+  g_review_busy = true;
+  g_review_note = L"正在撤掉这一层…";
+  RepaintReview();
+  std::thread([job, node_id]() {
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (!endpoint.ok) {
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 4, 0);
+      return;
+    }
+    std::string body;
+    std::string reason;
+    const std::string payload = "{\"jobId\":\"" + dshwork::Narrow(job) + "\",\"nodeId\":\"" + node_id + "\"}";
+    const bool ok = dshwork::HttpPostJson(endpoint, L"/dsh-work/api/plan/collapse", payload, body, reason);
+    LogToFile(std::string("审阅撤销 ") + (ok ? "成功：" : "失败：") + body);
+    if (g_window != nullptr) PostMessageW(g_window, kMsgReview, ok ? 1 : 4, 0);
+  }).detach();
+}
+
+void ReviewCommit() {
+  if (g_review_busy) return;  const std::wstring job = g_review_job;
   g_review_busy = true;
   g_review_note = L"正在收下…";
   RepaintReview();

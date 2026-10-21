@@ -1,309 +1,416 @@
+// 审阅窗的「节点图」：解构出来的任务树，一个任务一个框，用连线表示父子。
+//
+// 为什么是图而不是列表：任务之间只有"先后"和"从属"两种关系，可这两件事
+// 在缩进列表里要读很久；画成从左往右的流程树，一眼就能看出"从哪开始、
+// 走到哪、哪颗还想再拆"。排版用的是经典的 tidy-tree：叶子按顺序占位，
+// 父节点垂直居中在自己的孩子之间。
+//
+// 这个文件只做三件事：排版（Layout/FitView）、命中（NodeAt）、绘制（Draw）。
+// 键盘、网络、窗口生命周期都在 main.cpp —— 这里保持成可以被单测的纯计算。
 #pragma once
-/**
- * 解构审阅窗：模型拆出来的计划先在这里给人看，满意了才落库。
- *
- * 为什么要有这一步：解构原来是一把梭 —— 模型给出七八个节点就直接进文档，
- * 人只能接受或者重来。审阅窗把「拆」变成可以商量的事：哪颗看懂了就过，
- * 哪颗太粗就当场再拆一层，全部满意再按 Enter。
- *
- * 形态取舍：做成**带缩进的竖向流程树**而不是自由布局节点图。
- *   - 我们要表达的是先后顺序，不是依赖关系，没有需要汇合的边；
- *   - 任意深度都能读（二次、三次解构会越来越深），自由布局越深越乱；
- *   - 每行等高，键盘上下选和鼠标命中都是 O(1)。
- * 左侧的树线 + 每行那颗状态点，始终在告诉人「你走到第几步了」。
- */
 
+#include <algorithm>
+#include <cmath>
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
-#include "doc.h"
-#include "panel.h"
+#include "panel.h"  // PanelFormats / ui::kAccent / Text 等公共绘制件
 
 namespace dshwork::review {
 
-/** 扁平化之后的一行：树的结构已经折进 depth，绘制只认这一层。 */
 struct Row {
-  std::string id;  // 草稿里的节点 id：二次解构与确认都要用它
+  std::string id;
   int depth = 0;
+  int parent = -1;  // 父行索引；-1 是根
   bool has_children = false;
   bool expanded = false;
   int child_count = 0;
-  std::string status;  // 'todo' | 'active' | 'done' | 'skipped'
-  std::wstring title;
-  std::wstring detail;
-  std::wstring acceptance;
+  std::string status;
+  std::string title;
+  std::string detail;
+  std::string acceptance;
+  std::string kind;
+
+  // 排版结果（世界坐标，DIP）。父节点用它的孩子算垂直位置。
+  float x = 0.0f;
+  float y = 0.0f;
+  float w = 0.0f;
+  float h = 0.0f;
 };
 
 struct Model {
   std::wstring title;
   std::vector<Row> rows;
-  int selected = 0;
+  int selected = -1;
   int total = 0;
-  int scroll = 0;  // 第一行可见的索引；窗口只露 kMaxRowsVisible 行
   bool busy = false;
   std::wstring busy_text;
-  // 每个行 id 第一次出现的时间：用来做「新行逐条淡入」，已存在的老行不会重播。
+
+  // 视图：世界坐标 → 窗口，先乘 zoom 再平移。缩放围绕面板中心，不做鼠标锚定，
+  // 因为这个窗口是用来"看清结构"的，不是看图软件。
+  float pan_x = 0.0f;
+  float pan_y = 0.0f;
+  float zoom = 1.0f;
+  bool fitted = false;  // 第一次排版后自动缩放到合适大小，之后尊重用户的手动视图
+
+  // 每颗节点「第一次被看到」的时刻，用来让新长出来的框错开淡入。
   std::unordered_map<std::string, ULONGLONG> appear;
 };
 
-/** 一帧的动画状态。所有值都由 main.cpp 每帧算好，这里只负责画。 */
 struct Anim {
-  float open = 1.0f;         // 窗口打开进度 0..1
-  float highlight_y = -1.0f; // 选中块的 y（body 顶部起算，DIP）；<0 表示还没初始化
-  ULONGLONG now = 0;         // 本帧时间，用来算每行 reveal
+  float open = 1.0f;
+  float highlight_y = -1.0f;  // 旧版列表的高亮位置；图模式不再用它，留着接口不折腾调用方
+  ULONGLONG now = 0;
 };
 
-constexpr float kHeader = 56.0f;
-constexpr float kFooter = 46.0f;
-constexpr float kRowH = 48.0f;
-constexpr float kIndentStep = 22.0f;
-constexpr float kPad = 24.0f;
-constexpr float kRightW = 250.0f;  // 右侧详情列
-constexpr float kMinW = 740.0f;
-constexpr float kMaxW = 1120.0f;
-constexpr float kMaxRowsVisible = 9.0f;
-constexpr float kCommitW = 96.0f;
-constexpr float kCommitH = 30.0f;
+constexpr float kHeader = 58.0f;
+constexpr float kFooter = 48.0f;
+constexpr float kPad = 26.0f;
 
-inline float VisibleRows(const Model& model) {
-  const float rows = static_cast<float>(model.rows.size());
-  if (rows < 1.0f) return 1.0f;
-  return rows > kMaxRowsVisible ? kMaxRowsVisible : rows;
-}
+constexpr float kNodeW = 214.0f;
+constexpr float kNodeH = 86.0f;
+constexpr float kGapX = 74.0f;   // 列间距：够画一条明显的连线
+constexpr float kGapY = 26.0f;   // 行间距
+constexpr float kNodeRadius = 14.0f;
 
-inline float BodyHeight(const Model& model) { return VisibleRows(model) * kRowH; }
+constexpr float kMinZoom = 0.45f;
+constexpr float kMaxZoom = 1.60f;
 
-/** 宽度按最长的一行估：中文 1 字 ≈ 字号，英文约一半，宁可宽一点也不要折行。 */
-inline float WindowWidth(const Model& model) {
-  float widest = kMinW;
-  for (const Row& row : model.rows) {
-    float text = 0.0f;
-    for (const wchar_t ch : row.title) text += (ch < 0x2E80 ? 7.0f : 13.5f);
-    const float estimate = kPad * 2 + kRightW + 78.0f + text + static_cast<float>(row.depth) * kIndentStep;
-    if (estimate > widest) widest = estimate;
-  }
-  return widest > kMaxW ? kMaxW : widest;
-}
+constexpr float kWindowW = 980.0f;
+constexpr float kWindowH = 640.0f;
+constexpr float kCommitW = 108.0f;
+constexpr float kCommitH = 32.0f;
 
-inline float WindowHeight(const Model& model) { return kHeader + BodyHeight(model) + kFooter; }
+inline float WindowWidth(const Model&) { return kWindowW; }
+inline float WindowHeight(const Model&) { return kWindowH; }
+inline float BodyWidth(const Model&) { return kWindowW; }
+inline float BodyHeight(const Model&) { return kWindowH - kHeader - kFooter; }
 
-/** 命中：点到第几行（-1 = 没点到行）。 */
-inline int RowAt(const Model& model, float x, float y, float scale) {
-  const float top = kHeader * scale;
-  const float bottom = top + BodyHeight(model) * scale;
-  if (y < top || y >= bottom) return -1;
-  if (x < kPad * scale) return -1;
-  const int index = model.scroll + static_cast<int>((y - top) / (kRowH * scale));
-  return index >= 0 && index < static_cast<int>(model.rows.size()) ? index : -1;
-}
-
-inline D2D1_RECT_F CommitRectAt(float width_dip, float height_dip, float scale) {
-  const float w = kCommitW * scale;
-  const float h = kCommitH * scale;
-  const float right = (width_dip - kPad) * scale;
-  const float bottom = height_dip * scale - ((kFooter - kCommitH) * 0.5f) * scale;
-  return D2D1::RectF(right - w, bottom - h, right, bottom);
-}
-
-inline bool CommitHit(const Model& model, float x, float y, float scale) {
-  const D2D1_RECT_F r = CommitRectAt(WindowWidth(model), WindowHeight(model), scale);
-  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-}
-
-/** 缓出：开头快、收尾慢，用于行的淡入。 */
 inline float EaseOut(float t) {
-  const float u = 1.0f - t;
-  return 1.0f - u * u * u;
+  if (t <= 0.0f) return 0.0f;
+  if (t >= 1.0f) return 1.0f;
+  const float inv = 1.0f - t;
+  return 1.0f - inv * inv * inv;
+}
+
+/** 状态点的颜色：做完绿、在做强调蓝、跳过暗、待办按层级分两档。 */
+inline UINT32 StatusInk(const std::string& status, bool child) {
+  if (status == "done") return 0xFF30D158;
+  if (status == "active") return ui::kAccent;
+  if (status == "skipped") return 0xFF5C5C63;
+  return child ? 0xFF7C7C85 : 0xFFA0A0A8;
 }
 
 /**
- * 状态点颜色：做完是绿的、正在做是强调蓝且稍大、跳过是暗灰、待办是浅灰。
+ * 排版：叶子按出现顺序占位，父节点垂直居中在孩子中间。
  *
- * 之前只有一种灰，一屏树看下去分不出"这行到底做没做"——颜色就是最省字的标注。
+ * 两趟递归：先量每棵子树需要多高，再按这个高度往下摆。
+ * 行数组本身是 DFS 先序（main.cpp 摊平出来的），所以子节点在父节点后面，
+ * 用 parent 索引就能把树建起来。
  */
-inline UINT32 StatusInk(const std::string& status, bool child) {
-  if (status == "active") return ui::kAccent;
-  if (status == "done") return 0xFF30D158;
-  if (status == "skipped") return 0xFF5C5C63;
-  return child ? 0xFF8A8A92 : 0xFFB9B9BE;
+inline void Layout(Model& model) {
+  const int count = static_cast<int>(model.rows.size());
+  if (count == 0) return;
+
+  std::vector<std::vector<int>> kids(static_cast<size_t>(count));
+  std::vector<int> roots;
+  for (int i = 0; i < count; ++i) {
+    const int parent = model.rows[static_cast<size_t>(i)].parent;
+    if (parent >= 0 && parent < count) {
+      kids[static_cast<size_t>(parent)].push_back(i);
+    } else {
+      roots.push_back(i);
+    }
+  }
+
+  // 第一趟：子树高度（叶子 = kNodeH）
+  std::vector<float> height(static_cast<size_t>(count), kNodeH);
+  // 逆序处理即可保证孩子先于父亲算完：DFS 先序里孩子一定排在父亲后面。
+  for (int i = count - 1; i >= 0; --i) {
+    const std::vector<int>& children = kids[static_cast<size_t>(i)];
+    if (children.empty()) continue;
+    float sum = 0.0f;
+    for (size_t c = 0; c < children.size(); ++c) {
+      sum += height[static_cast<size_t>(children[c])];
+      if (c + 1 < children.size()) sum += kGapY;
+    }
+    height[static_cast<size_t>(i)] = sum;
+  }
+
+  // 第二趟：给每棵子树一个纵向游标
+  std::vector<float> top(static_cast<size_t>(count), 0.0f);
+  float cursor = 0.0f;
+  for (size_t r = 0; r < roots.size(); ++r) {
+    const int root = roots[r];
+    top[static_cast<size_t>(root)] = cursor;
+    cursor += height[static_cast<size_t>(root)] + kGapY * 2.0f;
+  }
+  // 顺着 DFS 顺序把孩子摆进父亲的地盘
+  for (int i = 0; i < count; ++i) {
+    const std::vector<int>& children = kids[static_cast<size_t>(i)];
+    if (children.empty()) continue;
+    const float children_total = height[static_cast<size_t>(i)];
+    float y = top[static_cast<size_t>(i)] + (height[static_cast<size_t>(i)] - children_total) * 0.5f;
+    for (size_t c = 0; c < children.size(); ++c) {
+      const int child = children[c];
+      top[static_cast<size_t>(child)] = y;
+      y += height[static_cast<size_t>(child)] + kGapY;
+    }
+  }
+
+  // 落到行上：x 按深度排，y 取子树的垂直中点
+  for (int i = 0; i < count; ++i) {
+    Row& row = model.rows[static_cast<size_t>(i)];
+    const int depth = row.depth;
+    row.w = kNodeW;
+    row.h = kNodeH;
+    row.x = static_cast<float>(depth) * (kNodeW + kGapX);
+    row.y = top[static_cast<size_t>(i)] + (height[static_cast<size_t>(i)] - kNodeH) * 0.5f;
+  }
 }
 
+/** 世界坐标的包围盒（用来做自动适配视图）。 */
+inline void Bounds(const Model& model, float& min_x, float& min_y, float& max_x, float& max_y) {
+  min_x = 0.0f;
+  min_y = 0.0f;
+  max_x = kNodeW;
+  max_y = kNodeH;
+  if (model.rows.empty()) return;
+  min_x = model.rows[0].x;
+  max_x = model.rows[0].x + model.rows[0].w;
+  min_y = model.rows[0].y;
+  max_y = model.rows[0].y + model.rows[0].h;
+  for (const Row& row : model.rows) {
+    min_x = row.x < min_x ? row.x : min_x;
+    min_y = row.y < min_y ? row.y : min_y;
+    max_x = row.x + row.w > max_x ? row.x + row.w : max_x;
+    max_y = row.y + row.h > max_y ? row.y + row.h : max_y;
+  }
+}
+
+/**
+ * 把整张图缩到面板里。
+ *
+ * 只在第一次排版时自动跑一次（model.fitted），之后用户拖过、缩过就尊重用户，
+ * 否则每次展开一层视图都会自己跳一下，很难受。
+ */
+inline void FitView(Model& model) {
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  float max_x = 0.0f;
+  float max_y = 0.0f;
+  Bounds(model, min_x, min_y, max_x, max_y);
+  const float content_w = max_x - min_x;
+  const float content_h = max_y - min_y;
+  const float avail_w = BodyWidth(model) - kPad * 2.0f;
+  const float avail_h = BodyHeight(model) - kPad * 2.0f;
+
+  float zoom = 1.0f;
+  if (content_w > 0.0f && content_h > 0.0f) {
+    const float zx = avail_w / content_w;
+    const float zy = avail_h / content_h;
+    zoom = zx < zy ? zx : zy;  // 手写比较：windows.h 的 min 宏会吃掉 std::min
+  }
+  if (zoom > 1.0f) zoom = 1.0f;
+  if (zoom < kMinZoom) zoom = kMinZoom;
+  model.zoom = zoom;
+
+  // 居中：把内容中心搬到面板中心
+  const float content_cx = (min_x + max_x) * 0.5f;
+  const float content_cy = (min_y + max_y) * 0.5f;
+  model.pan_x = BodyWidth(model) * 0.5f - content_cx * zoom;
+  model.pan_y = BodyHeight(model) * 0.5f - content_cy * zoom;
+  model.fitted = true;
+}
+
+/** 把平移量夹住，别让用户把整张图拖出视野找不回来。 */
+inline void ClampPan(Model& model) {
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  float max_x = 0.0f;
+  float max_y = 0.0f;
+  Bounds(model, min_x, min_y, max_x, max_y);
+  const float slack = 120.0f;  // 允许露一点空白，手感更松
+  const float left = -max_x * model.zoom - slack;
+  const float right = BodyWidth(model) + slack;
+  const float top = -max_y * model.zoom - slack;
+  const float bottom = BodyHeight(model) + slack;
+  if (model.pan_x < left) model.pan_x = left;
+  if (model.pan_x > right) model.pan_x = right;
+  if (model.pan_y < top) model.pan_y = top;
+  if (model.pan_y > bottom) model.pan_y = bottom;
+}
+
+/** 鼠标点在哪个框上；点在空白返回 -1。坐标是窗口 DIP。 */
+inline int NodeAt(const Model& model, float x, float y) {
+  if (!model.fitted) return -1;
+  const float wx = (x - model.pan_x) / model.zoom;
+  const float wy = (y - kHeader - model.pan_y) / model.zoom;
+  for (int i = static_cast<int>(model.rows.size()) - 1; i >= 0; --i) {
+    const Row& row = model.rows[static_cast<size_t>(i)];
+    if (wx >= row.x && wx <= row.x + row.w && wy >= row.y && wy <= row.y + row.h) return i;
+  }
+  return -1;
+}
+
+inline D2D1_RECT_F CommitRectAt(float width_dip, float height_dip) {
+  return D2D1::RectF(width_dip - kPad - kCommitW, height_dip - kFooter + (kFooter - kCommitH) * 0.5f,
+                     width_dip - kPad, height_dip - kFooter + (kFooter + kCommitH) * 0.5f);
+}
+
+inline bool CommitHit(const Model& model, float x, float y) {
+  const D2D1_RECT_F rect = CommitRectAt(WindowWidth(model), WindowHeight(model));
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+
+/** UTF-8 → UTF-16。节点标题从 JSON 进来，窗口这边只认宽字符。 */
+inline std::wstring WidenNode(const std::string& text) {
+  if (text.empty()) return std::wstring();
+  const int need = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0);
+  if (need <= 0) return std::wstring();
+  std::wstring out(static_cast<size_t>(need), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), need);
+  return out;
+}
+
+/** 一行字放不下就拆成两行：第一行尽量长，第二行给省略号。 */
+inline void SplitTwoLines(const std::wstring& text, float max_w, float font_dip, std::wstring& line1,
+                          std::wstring& line2) {
+  const std::wstring fitted = ui::FitText(text, max_w, font_dip);
+  if (fitted.size() >= text.size()) {
+    line1 = fitted;
+    line2.clear();
+    return;
+  }
+  size_t cut = fitted.size();
+  if (cut > 0 && fitted[cut - 1] == L'…') --cut;
+  if (cut == 0) cut = 1;
+  line1 = text.substr(0, cut);
+  line2 = ui::FitText(text.substr(cut), max_w, font_dip);
+}
+
+/**
+ * 画整张节点图。
+ *
+ * 顺序是刻意的：先连线再画框，线头就被框压住；选中框最后画，永远在最上层。
+ * 世界坐标的换算只有一处（SetTransform），命中测试用的是同一组参数，
+ * 所以"看到的位置"和"点到的位置"不会分叉。
+ */
 inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelFormats& fmt, float scale,
                  float width_dip, float height_dip, float alpha, const Anim& anim) {
-  using namespace ui;
-  const float w = width_dip * scale;
-  const float h = height_dip * scale;
-  // 打开时整体从下方 10 DIP 浮上来；alpha 也跟着走，避免"砰"地出现。
-  const float open = anim.open < 0.0f ? 0.0f : (anim.open > 1.0f ? 1.0f : anim.open);
-  const float body_dy = (1.0f - open) * 10.0f * scale;
-  alpha *= open;
-  if (alpha <= 0.0f) return;
+  if (target == nullptr) return;
+  const float a = alpha * EaseOut(anim.open * 1.15f);  // 稍微提前收尾，读起来更利落
+  target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 
-  // 底：近乎不透明的深色压住桌面，顶边一道发丝高光。
-  FillRound(target, fmt.brush, D2D1::RectF(0, 0, w, h), 22.0f * scale, Fade(0xFF14161C, alpha));
-  StrokeRound(target, fmt.brush, D2D1::RectF(0.5f, 0.5f, w - 1.0f, h - 1.0f), 21.0f * scale, Fade(0x22FFFFFF, alpha),
-              1.0f);
+  const UINT32 bg = ui::Fade(0xFF14161C, a);
+  ui::FillRound(target, fmt.brush, D2D1::RectF(0.0f, 0.0f, width_dip, height_dip), 22.0f, bg);
+  ui::StrokeRound(target, fmt.brush, D2D1::RectF(0.5f, 0.5f, width_dip - 0.5f, height_dip - 0.5f), 22.0f,
+                  ui::Fade(0xFFFFFFFF, 0.08f * a), 0.5f);
 
-  // 头部
-  const std::wstring head = model.title.empty() ? L"解构结果" : model.title;
-  Text(target, FitText(head, width_dip - kPad * 2 - 90.0f, 14.0f), fmt.title,
-       D2D1::RectF(kPad * scale, 14.0f * scale, w - kPad * scale - 80.0f * scale, 42.0f * scale), fmt.brush,
-       Fade(kText, alpha));
+  // ---- 标题栏 ----
+  const std::wstring heading = model.title.empty() ? L"任务树" : model.title;
+  ui::Text(target, heading, fmt.title, D2D1::RectF(kPad, 16.0f, width_dip - kPad - 90.0f, 42.0f), fmt.brush,
+           ui::Fade(ui::kText, a));
   const std::wstring count = std::to_wstring(model.total) + L" 件事";
-  Text(target, count, fmt.meta,
-       D2D1::RectF(w - kPad * scale - 78.0f * scale, 14.0f * scale, w - kPad * scale, 42.0f * scale), fmt.brush,
-       Fade(kTextDim, alpha));
+  ui::Text(target, count, fmt.meta, D2D1::RectF(width_dip - kPad - 130.0f, 20.0f, width_dip - kPad, 40.0f),
+           fmt.brush, ui::Fade(ui::kTextDim, a));
 
-  FillRound(target, fmt.brush, D2D1::RectF(kPad * scale, kHeader * scale - 0.5f, w - kPad * scale, kHeader * scale + 0.5f),
-            0.5f, Fade(0x1AFFFFFF, alpha));
+  // ---- 图区 ----
+  const D2D1_RECT_F body = D2D1::RectF(0.0f, kHeader, width_dip, height_dip - kFooter);
+  target->PushAxisAlignedClip(body, D2D1_ANTIALIAS_MODE_ALIASED);
+  target->SetTransform(D2D1::Matrix3x2F::Scale(model.zoom, model.zoom) *
+                       D2D1::Matrix3x2F::Translation(model.pan_x, kHeader + model.pan_y) *
+                       D2D1::Matrix3x2F::Scale(scale, scale));
 
-  // 行（只画可见的那一段，scroll 是窗口顶端对应的索引）
-  const int first = model.scroll < 0 ? 0 : model.scroll;
-  const int last = static_cast<int>(model.rows.size()) < first + static_cast<int>(kMaxRowsVisible)
-                       ? static_cast<int>(model.rows.size())
-                       : first + static_cast<int>(kMaxRowsVisible);
-
-  // 选中块单独画在最底层：它会在行之间滑动，不能被行的淡入淡出切碎。
-  {
-    const float target_y = (kHeader + static_cast<float>(model.selected - first) * kRowH + 3.0f) * scale;
-    const float hl_y = anim.highlight_y >= 0.0f ? (kHeader + anim.highlight_y + 3.0f) * scale : target_y;
-    if (model.selected >= first && model.selected < last) {
-      FillRound(target, fmt.brush,
-                D2D1::RectF(kPad * scale, hl_y + body_dy, w - (kPad + kRightW) * scale, hl_y + kRowH * scale - 3.0f * scale + body_dy),
-                10.0f * scale, Fade(0x1F0A84FF, alpha));
-      FillRound(target, fmt.brush,
-                D2D1::RectF(kPad * scale, hl_y + 12.0f * scale + body_dy, kPad * scale + 3.0f * scale,
-                            hl_y + kRowH * scale - 12.0f * scale + body_dy),
-                1.5f * scale, Fade(kAccent, alpha));
+  // 连线：父的右边中点 → 子的左边中点，用三次贝塞尔，角度按水平切线收，像 Blender 那样。
+  for (size_t i = 0; i < model.rows.size(); ++i) {
+    const Row& row = model.rows[i];
+    if (row.parent < 0 || row.parent >= static_cast<int>(model.rows.size())) continue;
+    const Row& parent = model.rows[static_cast<size_t>(row.parent)];
+    const D2D1_POINT_2F from = D2D1::Point2F(parent.x + parent.w, parent.y + parent.h * 0.5f);
+    const D2D1_POINT_2F to = D2D1::Point2F(row.x, row.y + row.h * 0.5f);
+    const float bend = (to.x - from.x) * 0.5f;
+    ID2D1PathGeometry* path = nullptr;
+    if (dshwork::g_ui_dwrite == nullptr) continue;  // 工厂还没就绪，这一帧不画线
+    static ID2D1Factory* factory = nullptr;
+    if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
+    if (factory == nullptr || FAILED(factory->CreatePathGeometry(&path)) || path == nullptr) continue;
+    ID2D1GeometrySink* sink = nullptr;
+    if (FAILED(path->Open(&sink)) || sink == nullptr) {
+      path->Release();
+      continue;
     }
+    sink->BeginFigure(from, D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(from.x + bend, from.y), D2D1::Point2F(to.x - bend, to.y), to));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+    sink->Release();
+    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.16f * a)));
+    target->DrawGeometry(path, fmt.brush, 1.4f);
+    path->Release();
   }
 
-  for (int i = first; i < last; ++i) {
-    const Row& row = model.rows[static_cast<size_t>(i)];
-    const float row_h = kRowH * scale;
+  // 节点
+  for (size_t i = 0; i < model.rows.size(); ++i) {
+    const Row& row = model.rows[i];
+    const bool selected = static_cast<int>(i) == model.selected;
+    const D2D1_RECT_F box = D2D1::RectF(row.x, row.y, row.x + row.w, row.y + row.h);
+    const UINT32 fill = selected ? ui::Fade(0xFF1B2A44, a) : ui::Fade(0xFF1B1D24, a);
+    ui::FillRound(target, fmt.brush, box, kNodeRadius, fill);
+    ui::StrokeRound(target, fmt.brush, box, kNodeRadius,
+                    selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a), selected ? 1.6f : 0.5f);
 
-    // 每行自己的出现进度：新行从 0 淡入并右移 8 DIP，老行直接是 1。
-    float reveal = 1.0f;
-    const auto found = model.appear.find(row.id);
-    if (found != model.appear.end() && anim.now > found->second) {
-      const float k = static_cast<float>(anim.now - found->second) / 170.0f;
-      reveal = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : k);
-      reveal = review::EaseOut(reveal);
-    }
-    if (reveal <= 0.001f) continue;
-    const float row_alpha = alpha * reveal;
-    const float slide = (1.0f - reveal) * -8.0f * scale;
+    // 状态点
+    fmt.brush->SetColor(ui::Color(ui::Fade(StatusInk(row.status, row.depth > 0), a)));
+    const D2D1_POINT_2F dot = D2D1::Point2F(row.x + 16.0f, row.y + 20.0f);
+    const float dot_r = row.status == "active" ? 4.6f : 3.6f;
+    target->FillEllipse(D2D1::Ellipse(dot, dot_r, dot_r), fmt.brush);
 
-    const float top = (kHeader + static_cast<float>(i - first) * kRowH) * scale + body_dy + slide;
-    const bool picked = i == model.selected;
-    const float indent = (kPad + static_cast<float>(row.depth) * kIndentStep) * scale;
-
-    // 树线：竖线 + 到底部直角折向右边，像真正的一棵树，而不是几条孤立竖线。
-    if (row.depth > 0) {
-      const float lx = (kPad + static_cast<float>(row.depth) * kIndentStep - 12.0f) * scale;
-      const bool last_sibling = (i + 1 >= last) || (model.rows[static_cast<size_t>(i + 1)].depth < row.depth);
-      const float bottom = last_sibling ? top + row_h * 0.5f : top + row_h;
-      FillRound(target, fmt.brush, D2D1::RectF(lx, top, lx + 1.0f, bottom), 0.5f, Fade(0x1FFFFFFF, row_alpha));
-      if (last_sibling) {
-        FillRound(target, fmt.brush, D2D1::RectF(lx, top + row_h * 0.5f - 0.5f, lx + 10.0f * scale, top + row_h * 0.5f + 0.5f),
-                  0.5f, Fade(0x1FFFFFFF, row_alpha));
-      }
+    // 标题：最多两行
+    std::wstring line1;
+    std::wstring line2;
+    SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 12.5f, line1, line2);
+    ui::Text(target, line1, fmt.body, D2D1::RectF(row.x + 28.0f, row.y + 11.0f, row.x + row.w - 16.0f, row.y + 32.0f),
+             fmt.brush, ui::Fade(ui::kText, a));
+    if (!line2.empty()) {
+      ui::Text(target, line2, fmt.body,
+               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 16.0f, row.y + 52.0f), fmt.brush,
+               ui::Fade(ui::kText, a));
     }
 
-    const UINT32 ink = StatusInk(row.status, row.depth > 0);
-    const float cx = indent + 6.0f * scale;
-    const float cy = top + row_h * 0.5f;
-    const float dr = 3.6f * scale;
-    FillRound(target, fmt.brush, D2D1::RectF(cx - dr, cy - dr, cx + dr, cy + dr), dr, Fade(ink, row_alpha));
-
-    // 拆过的行右边有个小胶囊：收起是 +N，展开是 −N（颜色也跟着变）。
-    const float badge_w = row.has_children ? 34.0f * scale : 0.0f;
-    const float text_left = indent + 18.0f * scale;
-    const float text_right = w - kPad * scale - kRightW * scale - badge_w;
-    Text(target, FitText(row.title, (text_right - text_left) / scale, picked ? 13.5f : 13.0f),
-         picked ? fmt.title : fmt.body, D2D1::RectF(text_left, top + 12.0f * scale, text_right, top + row_h - 8.0f * scale),
-         fmt.brush, Fade(picked ? kText : (row.depth > 0 ? 0xFFC8C8CE : 0xFFE2E2E6), row_alpha));
-
-    if (row.has_children) {
+    // 右下角徽标：拆过就显示子节点数，没收起用强调色
+    if (row.child_count > 0) {
       const std::wstring badge = (row.expanded ? L"−" : L"+") + std::to_wstring(row.child_count);
-      const float bx = w - kPad * scale - kRightW * scale - badge_w + 4.0f * scale;
-      FillRound(target, fmt.brush, D2D1::RectF(bx, cy - 9.0f * scale, bx + 28.0f * scale, cy + 9.0f * scale),
-                9.0f * scale, Fade(row.expanded ? 0x260A84FF : 0x14FFFFFF, row_alpha));
-      Text(target, badge, fmt.meta, D2D1::RectF(bx + 6.0f * scale, cy - 8.0f * scale, bx + 28.0f * scale, cy + 8.0f * scale),
-           fmt.brush, Fade(row.expanded ? kAccent : kTextDim, row_alpha));
+      const D2D1_RECT_F chip = D2D1::RectF(row.x + row.w - 44.0f, row.y + row.h - 26.0f, row.x + row.w - 10.0f,
+                                          row.y + row.h - 8.0f);
+      ui::FillRound(target, fmt.brush, chip, 6.0f,
+                    row.expanded ? ui::Fade(0x260A84FF, a) : ui::Fade(0x14FFFFFF, a));
+      ui::Text(target, badge, fmt.meta, D2D1::RectF(chip.left + 6.0f, chip.top + 1.0f, chip.right, chip.bottom),
+               fmt.brush, row.expanded ? ui::Fade(ui::kAccent, a) : ui::Fade(ui::kTextDim, a));
     }
   }
 
-  // 滚动条：只在装不下的时候出现。没有它，用户不知道下面还有东西。
-  {
-    const int total = static_cast<int>(model.rows.size());
-    const int visible = static_cast<int>(kMaxRowsVisible);
-    if (total > visible) {
-      // 放在标题列右缘、右列分隔线之前：滚动条在那儿最不抢戏，也不会挡到缩进线。
-      const float track_x = w - (kPad + kRightW + 9.0f) * scale;
-      const float top = kHeader * scale + 6.0f * scale;
-      const float bottom = (kHeader + static_cast<float>(visible) * kRowH) * scale - 6.0f * scale;
-      const float track_h = bottom - top;
-      FillRound(target, fmt.brush, D2D1::RectF(track_x, top, track_x + 2.5f * scale, bottom), 1.25f * scale,
-                Fade(0x14FFFFFF, alpha));
-      const float ratio = static_cast<float>(visible) / static_cast<float>(total);
-      const float thumb_h = track_h * ratio < 18.0f * scale ? 18.0f * scale : track_h * ratio;
-      const float max_scroll = static_cast<float>(total - visible);
-      const float t = max_scroll > 0.0f ? static_cast<float>(model.scroll) / max_scroll : 0.0f;
-      const float thumb_top = top + (track_h - thumb_h) * t;
-      FillRound(target, fmt.brush, D2D1::RectF(track_x, thumb_top, track_x + 2.5f * scale, thumb_top + thumb_h),
-                1.25f * scale, Fade(0x55FFFFFF, alpha));
-    }
-  }
+  target->PopAxisAlignedClip();
+  target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 
-  // 右列：指到那一颗的目标与验收
-  {
-    const float left = w - kPad * scale - kRightW * scale;
-    // 右列自己有底色，才像一块独立的详情面板，而不是飘在行标题右边。
-    FillRound(target, fmt.brush, D2D1::RectF(left, kHeader * scale, w - kPad * scale, h - kFooter * scale),
-              10.0f * scale, Fade(0x0DFFFFFF, alpha));
-    FillRound(target, fmt.brush, D2D1::RectF(left - 1.0f, kHeader * scale, left, h - kFooter * scale), 0.5f,
-              Fade(0x14FFFFFF, alpha));
-    if (model.selected >= 0 && model.selected < static_cast<int>(model.rows.size())) {
-      const Row& row = model.rows[static_cast<size_t>(model.selected)];
-      const float tx = left + 18.0f * scale;
-      const float tw = (kRightW - 36.0f) * scale;
-      float y = (kHeader + 16.0f) * scale;
-      Text(target, L"目标", fmt.meta, D2D1::RectF(tx, y, tx + tw, y + 18.0f * scale), fmt.brush, Fade(kTextDim, alpha));
-      y += 20.0f * scale;
-      Text(target, row.detail.empty() ? L"—" : row.detail, fmt.body,
-           D2D1::RectF(tx, y, tx + tw, y + 52.0f * scale), fmt.brush, Fade(0xFFE4E4E8, alpha));
-      y += 64.0f * scale;
-      Text(target, L"验收", fmt.meta, D2D1::RectF(tx, y, tx + tw, y + 18.0f * scale), fmt.brush, Fade(kTextDim, alpha));
-      y += 20.0f * scale;
-      Text(target, row.acceptance.empty() ? L"—" : row.acceptance, fmt.body,
-           D2D1::RectF(tx, y, tx + tw, y + 52.0f * scale), fmt.brush, Fade(0xFFE4E4E8, alpha));
-    }
-  }
+  // ---- 页脚 ----
+  ui::StrokeRound(target, fmt.brush,
+                  D2D1::RectF(kPad, height_dip - kFooter + 6.0f, width_dip - kPad, height_dip - kFooter + 6.5f),
+                  0.0f, ui::Fade(0xFFFFFFFF, 0.06f * a), 0.5f);
+  const std::wstring hint = model.busy
+                                ? model.busy_text
+                                : L"↑↓ 选 · Enter 再拆一层 · 拖空白平移 · 滚轮缩放 · Ctrl+Enter 就这样 · Esc 不要了";
+  ui::Text(target, hint, fmt.meta,
+           D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
+           fmt.brush, ui::Fade(ui::kTextDim, a));
 
-  // 页脚：键位提示 + 「就这样」
-  {
-    const float top = h - kFooter * scale;
-    FillRound(target, fmt.brush, D2D1::RectF(kPad * scale, top, w - kPad * scale, top + 1.0f), 0.5f,
-              Fade(0x1AFFFFFF, alpha));
+  const D2D1_RECT_F commit = CommitRectAt(width_dip, height_dip);
+  ui::FillRound(target, fmt.brush, commit, kCommitH * 0.5f,
+                model.busy ? ui::Fade(0xFF3A3A40, a) : ui::Fade(ui::kAccent, a));
+  ui::TextCentered(target, L"就这样", fmt.body, commit, fmt.brush, ui::Fade(0xFFFFFFFF, a));
 
-    // 先算按钮矩形，再让左边的提示文字与它同一套基线——
-    // 之前两边各自"看着差不多"给 y，结果字比按钮低了一截。
-    const D2D1_RECT_F cr = CommitRectAt(width_dip, height_dip, scale);
-    const float text_top = cr.top + 5.0f * scale;
-    const float text_bottom = cr.top + 21.0f * scale;
-    const std::wstring hint =
-        model.busy ? model.busy_text : L"↑↓ 选 · Enter 再拆一层 · Ctrl+Enter 就这样 · Esc 不要了";
-    Text(target, FitText(hint, width_dip - kPad * 2 - kCommitW - 20.0f, 11.5f), fmt.meta,
-         D2D1::RectF(kPad * scale, text_top, cr.left - 16.0f * scale, text_bottom), fmt.brush,
-         Fade(model.busy ? kAccent : kTextDim, alpha));
-
-    FillRound(target, fmt.brush, cr, 15.0f * scale, Fade(model.busy ? 0x33FFFFFF : kAccent, alpha));
-    // 居中交给 DWrite 算：不同缩放下字宽会变，手调偏移一定偏。
-    TextCentered(target, L"就这样", fmt.body,
-                 D2D1::RectF(cr.left, cr.top, cr.right, cr.bottom), fmt.brush, Fade(0xFFFFFFFF, alpha));
-  }
+  target->SetTransform(D2D1::Matrix3x2F::Identity());
 }
-
 }  // namespace dshwork::review

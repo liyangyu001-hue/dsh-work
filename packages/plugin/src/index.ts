@@ -258,6 +258,40 @@ export function apply(ctx: any, config?: PluginConfig): void {
           return { ok: false, reason: describe(error) };
         }
       },
+      /**
+       * 撤销一次二次解构：把这颗节点的子层整棵删掉，退回"没拆过"的样子。
+       *
+       * 只删子树，不碰这颗节点自己，也不碰它的兄弟——所以撤销之后
+       * 再拆一次的结果和第一次拆之前是同一种状态，可以反复试。
+       */
+      collapse(id: string, nodeId: string) {
+        const job = jobs.get(id);
+        if (job?.draft === undefined) return { ok: false, reason: '没有这张草稿（可能已过期）' };
+        const node = job.draft.nodes.find((item) => item.id === nodeId);
+        if (node === undefined) return { ok: false, reason: '草稿里没有这颗节点' };
+        if (node.children.length === 0) return { ok: false, reason: '这颗节点本来就没有拆过' };
+
+        // 沿着 children 收集整棵子树：草稿是树不是图，所以不会绕圈，
+        // 但仍用集合兜底，坏数据最多少删不会死循环。
+        const doomed = new Set<string>();
+        const queue = [...node.children];
+        while (queue.length > 0) {
+          const current = queue.pop();
+          if (current === undefined || doomed.has(current)) continue;
+          doomed.add(current);
+          const child = job.draft.nodes.find((item) => item.id === current);
+          if (child !== undefined) queue.push(...child.children);
+        }
+
+        job.draft = {
+          ...job.draft,
+          nodes: job.draft.nodes
+            .filter((item) => !doomed.has(item.id))
+            .map((item) => (item.id === nodeId ? { ...item, children: [] } : item)),
+        };
+        job.at = Date.now();
+        return { ok: true, removed: doomed.size };
+      },
     };
 
     /**

@@ -93,6 +93,10 @@ function fakeApi(views: Map<string, RecognizeJobView>): { api: RecognizeApi; cal
       calls.push(`expand:${id}:${nodeId}`);
       return { ok: true as const, added: 2 };
     },
+    collapse(id: string, nodeId: string) {
+      calls.push(`collapse:${id}:${nodeId}`);
+      return { ok: true as const, removed: 2 };
+    },
   };
   return { api, calls };
 }
@@ -132,6 +136,7 @@ test('识别：同一时刻只认一张图（409 原样透传）', async () => {
     discard: () => true,
     draft: () => null,
     expand: async () => ({ ok: false as const, reason: '未使用' }),
+    collapse: () => ({ ok: false as const, reason: '未使用' }),
   };
   const h = await start({ recognize: api });
   try {
