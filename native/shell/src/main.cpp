@@ -184,12 +184,21 @@ void EnsureReviewWindow();
 void ForceForeground(HWND hwnd);
 bool g_review_read_only = false;
 bool ReloadReviewDraft();
+float EaseInOutCubic(float t);
 // 审阅窗的动画状态：打开进度 + 选中块的当前位置（DIP，body 顶部起算）。
 // 逐帧在这里推进，review.h 的 Draw 只负责按这两个值画。
 float g_review_anim_open = 1.0f;
 float g_review_hl_y = -1.0f;
 ULONGLONG g_review_anim_at = 0;
 constexpr UINT kReviewAnimTimerId = 0x7B;
+// 拖动平移（中键）与「鼠标移出去就收窗」的状态。放在这里是因为
+// ReviewProc 和 TickReviewAnim 都要用，而两者都在下面。
+bool g_review_panning = false;
+float g_review_pan_lx = 0.0f;
+float g_review_pan_ly = 0.0f;
+bool g_review_closing = false;
+bool g_review_tracking_leave = false;
+constexpr float kReviewCloseMs = 190.0f;
 
 void RepaintReview();
 void ReviewKey(int which);
@@ -392,6 +401,18 @@ void TickReviewAnim() {
     return;
   }
   const ULONGLONG now = GetTickCount64();
+  // 收窗也是一段动效：open 从 1 走到 0（同时整体往下沉、淡出），走完才真正 HideWindow。
+  if (g_review_closing) {
+    const float k = static_cast<float>(now - g_review_anim_at) / kReviewCloseMs;
+    g_review_anim_open = k >= 1.0f ? 0.0f : (1.0f - (k <= 0.0f ? 0.0f : EaseInOutCubic(k)));
+    RepaintReview();
+    if (k >= 1.0f) {
+      g_review_closing = false;
+      g_review_anim_open = 1.0f;
+      CloseReview();
+    }
+    return;
+  }
   const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
   g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
   RepaintReview();
@@ -1405,6 +1426,60 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       g_review_model.pan_y = dshwork::review::BodyHeight(g_review_model) * 0.5f - cy * next;
       dshwork::review::ClampPan(g_review_model);
       RepaintReview();
+    }
+    return 0;
+  }
+  if (message == WM_MBUTTONDOWN) {
+    // 中键拖动平移。坐标同样要先换算成 DIP（理由见 WM_LBUTTONDOWN 那段）。
+    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+    const float k = dpi > 0.1f ? dpi : 1.0f;
+    g_review_panning = true;
+    g_review_pan_lx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
+    g_review_pan_ly = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
+    SetCapture(window);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    return 0;
+  }
+  if (message == WM_MBUTTONUP) {
+    if (g_review_panning) {
+      g_review_panning = false;
+      ReleaseCapture();
+      SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    }
+    return 0;
+  }
+  if (message == WM_MOUSEMOVE) {
+    if (!g_review_tracking_leave) {
+      // 只登记一次；之后指针离开窗口时系统会发 WM_MOUSELEAVE。
+      TRACKMOUSEEVENT tme = {};
+      tme.cbSize = sizeof(tme);
+      tme.dwFlags = TME_LEAVE;
+      tme.hwndTrack = window;
+      TrackMouseEvent(&tme);
+      g_review_tracking_leave = true;
+    }
+    if (g_review_panning) {
+      const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+      const float k = dpi > 0.1f ? dpi : 1.0f;
+      const float mx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
+      const float my = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
+      g_review_model.pan_x += mx - g_review_pan_lx;
+      g_review_model.pan_y += my - g_review_pan_ly;
+      g_review_pan_lx = mx;
+      g_review_pan_ly = my;
+      dshwork::review::ClampPan(g_review_model);
+      RepaintReview();
+    }
+    return 0;
+  }
+  if (message == WM_MOUSELEAVE) {
+    g_review_tracking_leave = false;
+    // 指针离开这张图 = 人已经不看它了，收起来；但必须是淡出，不能啪一下消失。
+    // 中键拖拽时偶尔会甩出边界，那不算"离开"。
+    if (!g_review_panning && g_review_open && !g_review_closing) {
+      g_review_closing = true;
+      g_review_anim_at = GetTickCount64();
+      SetTimer(g_window, kReviewAnimTimerId, FrameIntervalMs(), nullptr);
     }
     return 0;
   }
