@@ -18,6 +18,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "json.h"
 
@@ -175,11 +176,14 @@ inline bool HttpGetJson(const Endpoint& endpoint, const std::wstring& path, std:
 }
 
 /**
- * 提交一条意图（POST /api/intent）。这是原生层唯一会"改状态"的动作，
- * 而且它不碰本地状态——状态永远以宿主下一次返回的文档为准。
+ * POST 一段原始字节到宿主。
+ *
+ * 为什么不复用 HttpPostJson：那个函数的 Content-Type 写死成 application/json，
+ * 而截图识别要发的是 image/png 的二进制。两者除了这两处完全一样，所以抽出一层
+ * HttpPostRaw，让调用方各自给类型与数据——重复的 WinHTTP 细节只留一份。
  */
-inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, const std::string& payload,
-                         std::string& body, std::string& reason) {
+inline bool HttpPostRaw(const Endpoint& endpoint, const std::wstring& path, const void* data, size_t size,
+                        const std::wstring& content_type, std::string& body, std::string& reason) {
   URL_COMPONENTS parts = {};
   parts.dwStructSize = sizeof(parts);
   parts.dwHostNameLength = static_cast<DWORD>(-1);
@@ -200,7 +204,8 @@ inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, con
     reason = "WinHttpOpen 失败";
     return false;
   }
-  WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000);
+  // 识别要等模型，给的比轮询宽：连接 3s、发送 10s、接收 30s。
+  WinHttpSetTimeouts(session, 3000, 3000, 10000, 30000);
 
   bool ok = false;
   HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
@@ -209,17 +214,17 @@ inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, con
                                            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (request != nullptr) {
       const std::wstring headers = L"x-dsh-work-token: " + Widen(endpoint.token) +
-                                   L"\r\nContent-Type: application/json\r\n";
+                                   L"\r\nContent-Type: " + content_type + L"\r\n";
       WinHttpAddRequestHeaders(request, headers.c_str(), static_cast<DWORD>(-1),
                                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
       if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                             const_cast<char*>(payload.data()), static_cast<DWORD>(payload.size()),
-                             static_cast<DWORD>(payload.size()), 0) &&
+                             size == 0 ? WINHTTP_NO_REQUEST_DATA : const_cast<void*>(data),
+                             static_cast<DWORD>(size), static_cast<DWORD>(size), 0) &&
           WinHttpReceiveResponse(request, nullptr)) {
         DWORD status = 0;
-        DWORD size = sizeof(status);
+        DWORD size_in = sizeof(status);
         WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size_in, WINHTTP_NO_HEADER_INDEX);
         body.clear();
         DWORD available = 0;
         while (WinHttpQueryDataAvailable(request, &available) && available > 0) {
@@ -242,6 +247,21 @@ inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, con
   }
   WinHttpCloseHandle(session);
   return ok;
+}
+
+/**
+ * 提交一条意图（POST /api/intent）。这是原生层唯一会"改状态"的动作，
+ * 而且它不碰本地状态——状态永远以宿主下一次返回的文档为准。
+ */
+inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, const std::string& payload,
+                         std::string& body, std::string& reason) {
+  return HttpPostRaw(endpoint, path, payload.data(), payload.size(), L"application/json", body, reason);
+}
+
+/** 提交一张 PNG（POST /api/recognize）。宿主收下就返回 202 + jobId。 */
+inline bool HttpPostPng(const Endpoint& endpoint, const std::wstring& path, const std::vector<unsigned char>& png,
+                        std::string& body, std::string& reason) {
+  return HttpPostRaw(endpoint, path, png.data(), png.size(), L"image/png", body, reason);
 }
 
 }  // namespace dshwork

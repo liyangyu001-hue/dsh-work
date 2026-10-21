@@ -138,6 +138,15 @@ float g_motion_scale = 1.0f;
 
 /** 最近一次框选的结果，成功后由 kMsgCaptureDone 读出来做提示。 */
 std::wstring g_capture_path;
+
+/* 解构链路的跨线程共享：消息号、结果、以及 UI 线程的入口声明。
+   声明放这里是因为 WndProc 在上面，定义在下面。 */
+constexpr UINT kMsgRecognize = WM_APP + 6;
+std::mutex g_recognize_mutex;
+std::wstring g_recognize_text;
+bool g_recognize_ok = false;
+void StartRecognize(const std::wstring& path);
+
 int g_capture_w = 0;
 int g_capture_h = 0;
 
@@ -593,7 +602,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         wchar_t text[96];
         const int action = static_cast<int>(lparam);
         if (action == 2) {
-          swprintf_s(text, L"已截取 %d × %d · 解构待接", g_capture_w, g_capture_h);
+          // 解构：截图已经落盘，这里把它交给宿主模型去拆任务树
+          StartRecognize(g_capture_path);
+          return 0;
         } else if (action == 6) {
           swprintf_s(text, L"已截取 %d × %d · 自动后续待接", g_capture_w, g_capture_h);
         } else if (action == 3) {
@@ -608,6 +619,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         LogToFile("框选取消");
       }
       return 0;
+    case kMsgRecognize: {
+      std::wstring text;
+      {
+        std::lock_guard<std::mutex> lock(g_recognize_mutex);
+        text = g_recognize_text;
+      }
+      ShowNotice(text, 3600);
+      return 0;
+    }
     case kMsgKey:
       DispatchKey(static_cast<int>(wparam));
       return 0;
@@ -913,6 +933,112 @@ void PostIntent(const std::string& type, const std::string& node_id = std::strin
   }
 }
 
+/* ───────────────────── 解构：把截图交给宿主的模型 ───────────────────── */
+
+/**
+ * 识别是异步的：宿主受理后回 202 + jobId，真正的结果要再去查。
+ *
+ * 所以这条链路全在后台线程里跑，结果只通过 PostMessage 回 UI 线程，
+ * 网络等待期间小条照样能响应悬停和热键。
+ */
+
+
+/** 后台线程写、UI 线程读，只在这两处加锁。 */
+/** 把结果放到全局，再敲一下 UI 线程的门——不要在后台线程里碰窗口。 */
+void FinishRecognize(bool ok, const std::wstring& text) {
+  {
+    std::lock_guard<std::mutex> lock(g_recognize_mutex);
+    g_recognize_ok = ok;
+    g_recognize_text = text;
+  }
+  LogToFile(std::string("识别结束 ") + (ok ? "成功：" : "失败：") + dshwork::Narrow(text));
+  if (g_window != nullptr) PostMessageW(g_window, kMsgRecognize, ok ? 1 : 0, 0);
+}
+
+/** 整份读进内存。截图只有几百 KB，流式读没有意义。 */
+bool ReadWholeFile(const std::wstring& path, std::vector<unsigned char>& out, std::string& reason) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    reason = "打不开截图文件";
+    return false;
+  }
+  out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  if (out.empty()) {
+    reason = "截图是空的";
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 提交 → 轮询 → 回报。
+ *
+ * 超时给到 150 秒：模型拆一棵树通常十几秒，卡住时我们宁可明确报“超时”，
+ * 也不要让小条一直停在“识别中”让人猜。
+ */
+void StartRecognize(const std::wstring& path) {
+  ShowNotice(L"正在识别这块…", 150000);
+  std::thread([path]() {
+    std::vector<unsigned char> png;
+    std::string reason;
+    if (!ReadWholeFile(path, png, reason)) {
+      FinishRecognize(false, L"读不到截图：" + dshwork::Widen(reason));
+      return;
+    }
+
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (!endpoint.ok) {
+      FinishRecognize(false, L"没连上宿主（DSH 没开？）");
+      return;
+    }
+
+    std::string body;
+    if (!dshwork::HttpPostPng(endpoint, L"/dsh-work/api/recognize", png, body, reason)) {
+      FinishRecognize(false, L"提交失败：" + dshwork::Widen(reason));
+      return;
+    }
+
+    dshwork::JValue accepted;
+    const std::string job_id = dshwork::ParseJson(body, accepted) ? accepted.GetString("jobId") : std::string();
+    if (job_id.empty()) {
+      FinishRecognize(false, L"宿主没有返回作业号");
+      return;
+    }
+    LogToFile("识别作业 " + job_id);
+
+    const std::wstring poll_path = L"/dsh-work/api/recognize/" + dshwork::Widen(job_id);
+    for (int attempt = 0; attempt < 190; ++attempt) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(800));
+      std::string polled;
+      if (!dshwork::HttpGetJson(endpoint, poll_path, polled, reason)) continue;  // 抖动不算失败，接着等
+
+      dshwork::JValue job;
+      if (!dshwork::ParseJson(polled, job)) continue;
+      const std::string state = job.GetString("state");
+      if (state == "done") {
+        const std::wstring title = dshwork::Widen(job.GetString("title"));
+        const dshwork::JValue* count = job.Get("count");
+        const int n = count == nullptr ? 0 : static_cast<int>(count->number);
+        wchar_t text[128];
+        if (n > 0 && !title.empty()) {
+          swprintf_s(text, L"已拆成 %d 个任务 · %s", n, title.c_str());
+        } else if (n > 0) {
+          swprintf_s(text, L"已拆成 %d 个任务", n);
+        } else {
+          swprintf_s(text, L"识别完成，但没拆出任务");
+        }
+        FinishRecognize(true, text);
+        return;
+      }
+      if (state == "error") {
+        const std::wstring why = dshwork::Widen(job.GetString("reason", "模型没有给出可用的任务"));
+        FinishRecognize(false, L"识别失败：" + why);
+        return;
+      }
+    }
+    FinishRecognize(false, L"识别超时（150 秒没结果）");
+  }).detach();
+}
 void RefreshPanelModel() {
   std::lock_guard<std::mutex> lock(g_model_mutex);
   g_panel_model = g_model;
