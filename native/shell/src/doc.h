@@ -21,6 +21,7 @@ struct NodeView {
   std::wstring acceptance;  // 验收
   std::wstring advice;      // 模型给的一句话建议（可能没有）
   std::wstring advice_alt;  // 更优解（可选）
+  std::string handoff;      // 交接状态：offered / running / review / accepted / returned，空=没交给谁
   std::string status;       // todo / active / done / skipped
   std::string kind;         // task / concept
 };
@@ -54,6 +55,10 @@ inline void WalkNodes(const JValue& nodes, const JValue& roots, const std::strin
   if (const JValue* advice = node->Get("advice")) {
     view.advice = Widen(advice->GetString("text"));
     view.advice_alt = Widen(advice->GetString("alt"));
+  }
+  // handoff 同理：没有就是没交给任何人
+  if (const JValue* handoff = node->Get("handoff")) {
+    view.handoff = handoff->GetString("state");
   }
   out.push_back(std::move(view));
 

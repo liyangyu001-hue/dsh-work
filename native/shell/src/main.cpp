@@ -146,6 +146,7 @@ std::mutex g_recognize_mutex;
 std::wstring g_recognize_text;
 bool g_recognize_ok = false;
 void StartRecognize(const std::wstring& path);
+void OfferHandoffToAi();
 
 int g_capture_w = 0;
 int g_capture_h = 0;
@@ -605,6 +606,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
           // 解构：截图已经落盘，这里把它交给宿主模型去拆任务树
           StartRecognize(g_capture_path);
           return 0;
+        } else if (action == 4) {
+          // 交给 AI：不拆解，只把当前节点标成「已交给 AI」等它接。
+          // 真正的执行在宿主那一侧（会话/模型），这里只把意愿落到状态机。
+          OfferHandoffToAi();
+          swprintf_s(text, L"已交给 AI · 等它接手");
         } else if (action == 6) {
           swprintf_s(text, L"已截取 %d × %d · 自动后续待接", g_capture_w, g_capture_h);
         } else if (action == 3) {
@@ -935,6 +941,25 @@ void PostIntent(const std::string& type, const std::string& node_id = std::strin
   } else {
     LogToFile("意图失败：" + type + " " + reason);
   }
+}
+
+/* ───────────────────── 交给 AI：只落意愿，不冒充执行 ───────────────────── */
+
+/**
+ * 把「当前节点交给 AI」记进状态机。
+ *
+ * 这里刻意什么都不启动：真正的执行属于宿主那一侧（会话、模型、工具），
+ * 原生层只负责把「人已经把这块交出去了」这件事写进文档，
+ * 面板据此显示「已交给 AI · 等它接手」，AI 接手后状态会变 running。
+ */
+void OfferHandoffToAi() {
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+  if (g_model.current < 0 || static_cast<size_t>(g_model.current) >= g_model.items.size()) {
+    LogToFile("交接未提交：没有当前节点");
+    return;
+  }
+  const std::string node_id = g_model.items[static_cast<size_t>(g_model.current)].id;
+  std::thread([node_id]() { PostIntent("handoff.offer", node_id); }).detach();
 }
 
 /* ───────────────────── 解构：把截图交给宿主的模型 ───────────────────── */

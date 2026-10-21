@@ -255,18 +255,18 @@ inline void OpaqueRect(const RECT& r) {
 // ── 轮盘条目 ───────────────────────────────────────────────────────────────────
 // Tab 先进框选，框好了才摆这一圈——它问的是同一件事："这块拿去做什么"。
 // 顺序照最初构思：解构 / 继续框选 / 自动后续 / 直接收下。
-enum MenuKind { kMenuCancel = 0, kMenuCrop = 1, kMenuDeconstruct = 2, kMenuAccept = 3, kMenuAuto = 6 };
+enum MenuKind { kMenuCancel = 0, kMenuCrop = 1, kMenuDeconstruct = 2, kMenuAccept = 3, kMenuHandoff = 4 };
 
 inline int MenuItems() { return 4; }
 
 inline const wchar_t* MenuLabel(int index) {
-  static const wchar_t* items[] = {L"解构这块", L"继续框选", L"自动后续", L"直接收下"};
+  static const wchar_t* items[] = {L"解构这块", L"继续框选", L"交给 AI", L"直接收下"};
   if (index < 0 || index >= 4) return L"";
   return items[index];
 }
 
 inline int MenuAction(int index) {
-  static const int actions[] = {kMenuDeconstruct, kMenuCrop, kMenuAuto, kMenuAccept};
+  static const int actions[] = {kMenuDeconstruct, kMenuCrop, kMenuHandoff, kMenuAccept};
   if (index < 0 || index >= 4) return kMenuCancel;
   return actions[index];
 }
@@ -729,8 +729,8 @@ inline void ActivateMenu(int index) {
       s.pending_action = 2;
       Teardown(1);
       break;
-    case kMenuAuto:  // 自动后续：同样是宿主的活，先占位
-      s.pending_action = 6;
+    case kMenuHandoff:  // 交给 AI：只落意愿，执行在宿主那侧
+      s.pending_action = 4;
       Teardown(1);
       break;
     case kMenuAccept:  // 直接收下：只留文件
@@ -938,6 +938,11 @@ inline bool Begin(HWND owner, std::wstring* out_path, int* out_w, int* out_h) {
   s.dragging = false;
   s.selection = {};
   s.last_paint = 0;
+  // 每轮都必须从「拖框」开始：stage 不给 Teardown 清（它要留给结果用），
+  // 忘了复位的话，下一轮一进来就直接画上一轮的轮盘，鼠标也全被它吃掉。
+  s.stage = 0;
+  s.menu_index = -1;
+  s.pending_path.clear();
 
   // 虚拟屏幕 = 所有显示器合起来的矩形。多屏时左上角可能是负数。
   s.vx = GetSystemMetrics(SM_XVIRTUALSCREEN);

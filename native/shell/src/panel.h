@@ -124,6 +124,14 @@ inline std::wstring FitText(const std::wstring& text, float max_dip, float font_
   return text.substr(0, max_chars - 1) + L"…";
 }
 
+inline const wchar_t* HandoffLabel(const std::string& state) {
+  if (state == "running") return L"AI 正在做";
+  if (state == "review") return L"AI 做完了";
+  if (state == "accepted") return L"已验收";
+  if (state == "returned") return L"已退回";
+  return L"已交给 AI";
+}
+
 inline const wchar_t* StatusLabel(const std::string& status) {
   if (status == "done") return L"已完成";
   if (status == "skipped") return L"已跳过";
@@ -294,6 +302,7 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
              fmt.brush, dim);
       }
     }
+
   }
 
   // ── 最右：键位与连接状态 ─────────────────────────────
@@ -303,6 +312,17 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
        model.state == WorkModel::State::Online ? dim : Fade(kWarn, alpha));
   Text(target, L"Esc 收起", fmt.meta, D2D1::RectF(right_x, 72.0f * scale, w - kPadX * scale, 94.0f * scale),
        fmt.brush, dim);
+
+  // 交给 AI 之后，最右列常驻一行交接状态（面板只有 132 DIP 高，别处放不下）
+  std::wstring handoff_line;
+  for (const NodeView& item : model.items) {
+    if (!item.handoff.empty()) { handoff_line = HandoffLabel(item.handoff); break; }
+  }
+  if (!handoff_line.empty()) {
+    Text(target, FitText(handoff_line, kRightBlock, 11.0f), fmt.meta,
+         D2D1::RectF(right_x, 104.0f * scale, w - kPadX * scale, 124.0f * scale),
+         fmt.brush, Fade(kAccent, alpha * 0.9f));
+  }
   Text(target, L"×", fmt.title, D2D1::RectF(w - 30.0f * scale, 8.0f * scale, w - 10.0f * scale, 32.0f * scale),
        fmt.brush, dim);
 
