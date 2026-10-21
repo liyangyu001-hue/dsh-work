@@ -2071,6 +2071,19 @@ std::string g_advice_pending;
 std::string g_advice_tried_id;
 ULONGLONG g_advice_tried_at = 0;
 
+/**
+ * 这颗节点是不是「要懂的东西」而不是「要做的事」。
+ *
+ * 只读模型快照，不碰网络：Worker 线程里调，所以要拿同一把锁。
+ * 找不到就当普通节点 —— 宁可按任务处理，也别把讲解塞进任务里。
+ */
+bool IsConceptNodeId(const std::string& id) {
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+  for (const dshwork::NodeView& item : g_model.items) {
+    if (item.id == id) return item.kind == "concept";
+  }
+  return false;
+}
 void RequestAdvice(const std::string& node_id) {
   {
     std::lock_guard<std::mutex> lock(g_advice_mutex);
@@ -2086,8 +2099,12 @@ void RequestAdvice(const std::string& node_id) {
       const std::string payload = "{\"nodeId\":\"" + node_id + "\"}";
       std::string body;
       std::string reason;
-      if (dshwork::HttpPostJson(endpoint, L"/dsh-work/api/advise", payload, body, reason)) {
-        LogToFile("建议已取回：" + node_id);
+      // 概念节点问的是"这是什么"，不是"下一步做什么"：走 /api/learn。
+      // 两者返回形状一样，所以这里只换路由，取回后的处理完全共用。
+      const bool is_concept = IsConceptNodeId(node_id);
+      const wchar_t* route = is_concept ? L"/dsh-work/api/learn" : L"/dsh-work/api/advise";
+      if (dshwork::HttpPostJson(endpoint, route, payload, body, reason)) {
+        LogToFile(std::string(is_concept ? "讲解已取回：" : "建议已取回：") + node_id);
       } else {
         LogToFile("建议失败：" + reason);
       }

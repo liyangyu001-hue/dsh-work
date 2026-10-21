@@ -22,10 +22,11 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviseNode } from './advise.ts';
+import { learnNode } from './learning.ts';
 import { planFromText } from './planning.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
@@ -391,6 +392,50 @@ export function apply(ctx: any, config?: PluginConfig): void {
         }
       },
     };
+  /**
+   * 学习模式：讲一个概念。
+   *
+   * 与 advise 的区别是"不落库"——讲解是一次性的，属���关掉就该消失的东西，
+   * 写进节点会让任务树变成笔记本。真想留下的话，人自己复制。
+   */
+  const learn: LearnApi = {
+    async request(nodeId) {
+      const llm = readService(ctx, 'llm');
+      if (llm === null) return { ok: false, status: 503, reason: '宿主没有提供 llm 服务' };
+      const doc = store.snapshot;
+      const target = nodeId ?? doc.pointer;
+      if (target === null || target === undefined) {
+        return { ok: false, status: 409, reason: '没有指定要讲哪一颗' };
+      }
+      const node = doc.nodes[target];
+      if (node === undefined) return { ok: false, status: 404, reason: '没有这个节点' };
+      const selection = resolveLlmSelection(ctx, cfg);
+      try {
+        const lesson = await learnNode(
+          { llm, provider: selection.provider, model: selection.model },
+          { title: node.title, detail: node.detail ?? '', acceptance: node.acceptance ?? '' },
+          unload.signal,
+        );
+        // 讲解挂在节点的 advice 上：面板本来就渲染这个字段，等于免费拿到一栏显示位。
+        // 代价是它会落进 work.json —— 学习痕迹留在节点上其实也合理（下次回看还在）。
+        const intent: Intent = {
+          type: 'node.advise',
+          nodeId: target,
+          advice: {
+            text: lesson.text,
+            ...(lesson.alt === undefined ? {} : { alt: lesson.alt }),
+            at: Date.now(),
+            model: selection.model,
+          },
+        };
+        const saved = await store.commit(intent, 'ai');
+        if (!saved.ok) return { ok: false, status: 409, reason: saved.reason };
+        return { ok: true, text: lesson.text, ...(lesson.alt === undefined ? {} : { alt: lesson.alt }) };
+      } catch (error) {
+        return { ok: false, status: 500, reason: describe(error) };
+      }
+    },
+  };
     // 插件卸载时把在跑的识别真正叫停：否则宿主退出后还会有一个请求挂在模型上。
     disposers.push(() => unload.abort());
 
@@ -462,6 +507,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       authorize: (req) => authorizeRequest(ctx, req),
       recognize,
       advise,
+      learn,
       planText,
     });
 

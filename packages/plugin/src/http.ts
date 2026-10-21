@@ -53,6 +53,8 @@ export interface HttpOptions {
   recognize?: RecognizeApi;
   /** 节点建议：同上，没注入就 503。 */
   advise?: AdviseApi;
+  /** 学习模式：讲一个概念。没有就 503，不影响其它路由。 */
+  learn?: LearnApi;
   /** 一句话生成计划：同样可选，没注入就 503。 */
   planText?: PlanTextApi;
 }
@@ -97,6 +99,10 @@ export interface PlanTextApi {
 export interface AdviseApi {
   request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
 }
+export interface LearnApi {
+  request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
+}
+
 export function createHttpHandler(options: HttpOptions) {
   const { runtime } = options;
   const clients = new Set<ServerResponse>();
@@ -222,6 +228,30 @@ export function createHttpHandler(options: HttpOptions) {
       const payload = body.value as { nodeId?: unknown };
       const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
       const result = await options.advise.request(nodeId);
+      if (!result.ok) {
+        sendJson(res, result.status, { ok: false, error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true, text: result.text, ...(result.alt === undefined ? {} : { alt: result.alt }) });
+      return;
+    }
+    if (pathname === '/api/learn') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      if (options.learn === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供讲解能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { nodeId?: unknown };
+      const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
+      const result = await options.learn.request(nodeId);
       if (!result.ok) {
         sendJson(res, result.status, { ok: false, error: result.reason });
         return;
