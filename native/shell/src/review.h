@@ -532,7 +532,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   const std::wstring hint =
       model.busy ? model.busy_text
                  : (model.read_only
-                        ? L"↑↓ 选 · Enter 展开/收起 · 拖空白平移 · 滚轮缩放 · Esc 关闭"
+                        ? L"↑↓ 选 · Enter 展开/收起 · 双击 设为当前 · 拖空白平移 · 滚轮缩放 · Esc 关闭"
                         : L"↑↓ 选 · Enter 再拆一层 · 拖空白平移 · 滚轮缩放 · Ctrl+Enter 就这样 · Esc 不要了");
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
