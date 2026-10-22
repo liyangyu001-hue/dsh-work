@@ -71,8 +71,8 @@ constexpr float kHeader = 58.0f;
 constexpr float kFooter = 48.0f;
 constexpr float kPad = 26.0f;
 
-constexpr float kNodeW = 200.0f;  // 紧凑：一屏能放 6 颗，像 Blender 的节点
-constexpr float kNodeH = 64.0f;   // 一行标题 + 一行副标题，压掉大半空白
+constexpr float kNodeW = 176.0f;  // 紧凑：一屏能放 6 颗，像 Blender 的节点
+constexpr float kNodeH = 58.0f;   // 一行标题 + 一行副标题，压掉大半空白
 constexpr float kGapX = 48.0f;   // 列间距：够画连线就行，太宽一屏放不下几颗
 constexpr float kGapY = 20.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
@@ -410,11 +410,15 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
         target->DrawLine(points[s], points[s + 1], fmt.brush, 1.9f);
       }
     }
-    // 箭头：两道短线拼成 ">"，指着下一颗。描边比填充三角省一次建几何。
-    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.36f * a)));
-    const D2D1_POINT_2F tip = D2D1::Point2F(next.x - 1.5f, to.y);
-    target->DrawLine(tip, D2D1::Point2F(tip.x - 8.0f, tip.y - 4.8f), fmt.brush, 1.7f);
-    target->DrawLine(tip, D2D1::Point2F(tip.x - 8.0f, tip.y + 4.8f), fmt.brush, 1.7f);
+    // 箭头：一颗很小的 ">"，落在连线中段而不是贴着节点框。
+    // 贴边那种又大又亮，像贴在框上的贴纸；中段小箭头才像方向标。
+    {
+      const int mid = kSamples / 2;
+      const D2D1_POINT_2F c = points[mid];
+      fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.20f * a)));
+      target->DrawLine(D2D1::Point2F(c.x - 3.2f, c.y - 3.4f), D2D1::Point2F(c.x + 1.4f, c.y), fmt.brush, 1.3f);
+      target->DrawLine(D2D1::Point2F(c.x - 3.2f, c.y + 3.4f), D2D1::Point2F(c.x + 1.4f, c.y), fmt.brush, 1.3f);
+    }
     (void)factory;
   }
 
