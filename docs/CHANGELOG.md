@@ -122,3 +122,4 @@
 
 - 2026-10-19 P1-2c 完成：**面板的输入模型按 lolPing 的原理重做**。旧做法是 `show()+focus()`——面板一弹就把键盘从用户正在打字的软件里抢走，本质是个模态框。改成 `focusable:false` + `showInactive()`：面板永远不夺焦点，键盘靠"打开期间用 `globalShortcut` 独占 Enter/Backspace/Tab/Esc/←/→，关面板立刻释放"（实测 6/6 注册成功）。验证方式是可证伪的：先记下前台窗口（Edge），按 Enter，任务 seq 7→8、pointer 前进，前台窗口**仍是 Edge**。顺带补了每次显示重申 `setAlwaysOnTop(true,"screen-saver")`（Windows 会悄悄降级，lolPing #70），并删掉 `focusable:false` 下永远不会触发的 `blur` 收起逻辑。
 - 2026-10-19 隐私修正：`docs/assets/` 里的桌面截图（整屏 2 张 + 框选 2 张）已从工作区与 **全部 git 历史**中移除，并强推覆盖远端 main。文档配图改由 `scripts/make-shots.mjs` 用 Playwright + 合成数据 + 合成底图渲染真实 HTML——控件排版是真的，里面的内容全是假数据。另加 `scripts/check-assets.mjs`（白名单 + 尺寸上限）接进 `pnpm test`，防止复发。
+- 2026-10-22 · 入口按钮：DSH 玻璃条加「打开面板」，点一下就能开桌面面板；宿主新增 `POST /dsh-work/api/ui/open`，指令随 `/api/state` 的 `ui` 字段下发给原生轮询，伴随层没跑时自动拉起（`eed4aed`）
