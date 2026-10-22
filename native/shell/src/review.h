@@ -353,12 +353,13 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   static ID2D1Factory* factory = nullptr;
   if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
   const float flow_phase = static_cast<float>((anim.now % 100000) * 0.00022);
-  for (size_t i = 0; i < model.rows.size(); ++i) {
+  // 连线按「深度优先的先后」串起来：每颗接下一颗，而不是只连父子。
+  // 这样一屏就是一条从头走到尾的流水线，而不是几段互不相连的树枝。
+  for (size_t i = 0; i + 1 < model.rows.size(); ++i) {
     const Row& row = model.rows[i];
-    if (row.parent < 0 || row.parent >= static_cast<int>(model.rows.size())) continue;
-    const Row& parent = model.rows[static_cast<size_t>(row.parent)];
-    const D2D1_POINT_2F from = D2D1::Point2F(parent.x + parent.w, parent.y + parent.h * 0.5f);
-    const D2D1_POINT_2F to = D2D1::Point2F(row.x, row.y + row.h * 0.5f);
+    const Row& next = model.rows[i + 1];
+    const D2D1_POINT_2F from = D2D1::Point2F(row.x + row.w, row.y + row.h * 0.5f);
+    const D2D1_POINT_2F to = D2D1::Point2F(next.x - 2.0f, next.y + next.h * 0.5f);
     const float bend = (to.x - from.x) * 0.5f;
 
     // 采样并累计长度
@@ -403,6 +404,11 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
         target->DrawLine(points[s], points[s + 1], fmt.brush, 1.9f);
       }
     }
+    // 箭头：两道短线拼成 ">"，指着下一颗。描边比填充三角省一次建几何。
+    fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.36f * a)));
+    const D2D1_POINT_2F tip = D2D1::Point2F(next.x - 1.5f, to.y);
+    target->DrawLine(tip, D2D1::Point2F(tip.x - 8.0f, tip.y - 4.8f), fmt.brush, 1.7f);
+    target->DrawLine(tip, D2D1::Point2F(tip.x - 8.0f, tip.y + 4.8f), fmt.brush, 1.7f);
     (void)factory;
   }
 
