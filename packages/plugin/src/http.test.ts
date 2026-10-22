@@ -15,6 +15,8 @@ import type { ApplyResult, WorkDoc } from '@dshwork/core';
 
 import { createHttpHandler } from './http.ts';
 import type { RecognizeApi, RecognizeJobView, WorkRuntime } from './http.ts';
+import { createUiBridge } from './ui-open.ts';
+import type { UiBridge } from './ui-open.ts';
 
 const PNG = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
@@ -39,7 +41,11 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function start(options: { recognize?: RecognizeApi; authorize?: () => number | null }): Promise<Harness> {
+async function start(options: {
+  recognize?: RecognizeApi;
+  authorize?: () => number | null;
+  ui?: UiBridge;
+}): Promise<Harness> {
   const runtime: WorkRuntime = {
     version: '0.0.0-test',
     getSnapshot: emptyDoc,
@@ -51,6 +57,7 @@ async function start(options: { recognize?: RecognizeApi; authorize?: () => numb
     runtime,
     ...(options.authorize === undefined ? {} : { authorize: options.authorize }),
     ...(options.recognize === undefined ? {} : { recognize: options.recognize }),
+    ...(options.ui === undefined ? {} : { ui: options.ui }),
   });
 
   const server: Server = createServer(created.handler);
@@ -203,5 +210,85 @@ test('鉴权：令牌不对时先被拦下，路由逻辑不执行', async () =>
     assert.deepEqual(calls, []);
   } finally {
     await h.close();
+  }
+});
+
+test('打开面板：POST 留指令，/api/state 把它送给伴随层', async () => {
+  let now = 10_000;
+  const launches: string[] = [];
+  const ui = createUiBridge({
+    now: () => now,
+    launch: () => {
+      launches.push('launch');
+      return true;
+    },
+  });
+  const h = await start({ ui });
+  try {
+    const opened = await fetch(`${h.base}/api/ui/open`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'graph' }),
+    });
+    assert.equal(opened.status, 200);
+    const outcome = (await opened.json()) as {
+      ok: boolean;
+      companion: boolean;
+      launched: boolean;
+      command: { seq: number; target: string; at: number };
+    };
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.command.target, 'graph');
+    assert.equal(outcome.command.seq, 1);
+    assert.equal(outcome.launched, true);
+    assert.deepEqual(launches, ['launch']);
+
+    now = 11_000;
+    const state = (await (await fetch(`${h.base}/api/state`)).json()) as {
+      ui: { seq: number; target: string; at: number; companion: boolean } | null;
+    };
+    assert.equal(state.ui?.target, 'graph');
+    assert.equal(state.ui?.seq, 1);
+    assert.equal(state.ui?.at, 10_000);
+    assert.equal(state.ui?.companion, false);
+
+    // target 缺省就是 panel；乱写要挡在路由口上，别把垃圾指令发给伴随层。
+    const fallback = await fetch(`${h.base}/api/ui/open`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(fallback.status, 200);
+    const panel = (await fallback.json()) as { command: { target: string } };
+    assert.equal(panel.command.target, 'panel');
+
+    const bad = await fetch(`${h.base}/api/ui/open`, {
+      method: 'POST',
+      body: JSON.stringify({ target: 'desktop' }),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test('打开面板：没注入桥时 503，GET 405，state 的 ui 为 null', async () => {
+  const h = await start({});
+  try {
+    const res = await fetch(`${h.base}/api/ui/open`, { method: 'POST', body: JSON.stringify({}) });
+    assert.equal(res.status, 503);
+
+    const state = (await (await fetch(`${h.base}/api/state`)).json()) as { ui: unknown };
+    assert.equal(state.ui, null);
+  } finally {
+    await h.close();
+  }
+
+  const ui = createUiBridge({ now: () => 1 });
+  const withUi = await start({ ui });
+  try {
+    const wrongMethod = await fetch(`${withUi.base}/api/ui/open`);
+    assert.equal(wrongMethod.status, 405);
+  } finally {
+    await withUi.close();
   }
 });

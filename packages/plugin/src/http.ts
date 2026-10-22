@@ -27,6 +27,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 
+import type { UiBridge, UiOpenTarget } from './ui-open.ts';
+
 export const ROUTE_PREFIX = '/dsh-work';
 
 /** 请求体上限：意图报文很小，超过这个数一定是走错了。 */
@@ -57,6 +59,11 @@ export interface HttpOptions {
   learn?: LearnApi;
   /** 一句话生成计划：同样可选，没注入就 503。 */
   planText?: PlanTextApi;
+  /**
+   * 打开桌面面板的桥：浏览器按钮 → 宿主 → 伴随层轮询。
+   * 没注入时按钮回 503，其余路由不受影响。
+   */
+  ui?: UiBridge;
 }
 
 /** 识别作业的对外视图：状态 + 一句人话，不含模型原文与图片。 */
@@ -178,7 +185,43 @@ export function createHttpHandler(options: HttpOptions) {
         sendJson(res, 405, { error: 'method not allowed' });
         return;
       }
-      sendJson(res, 200, { seq: runtime.getSnapshot().seq, doc: runtime.getSnapshot() });
+      const snapshot = runtime.getSnapshot();
+      sendJson(res, 200, {
+        seq: snapshot.seq,
+        doc: snapshot,
+        // 伴随层每秒拉一次状态，顺手把「打开面板」指令带走；
+        // 没有桥时给 null，老的伴随层读到 null 会当没请求。
+        ui: options.ui ? { ...options.ui.snapshot(), companion: options.ui.companionAlive() } : null,
+      });
+      return;
+    }
+
+    if (pathname === '/api/ui/open') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      if (options.ui === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供打开面板的通道' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { target?: unknown };
+      const target: UiOpenTarget | null =
+        payload.target === undefined || payload.target === 'panel'
+          ? 'panel'
+          : payload.target === 'graph'
+            ? 'graph'
+            : null;
+      if (target === null) {
+        sendJson(res, 400, { ok: false, error: 'target 只能是 panel 或 graph' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, ...options.ui.open(target) });
       return;
     }
 

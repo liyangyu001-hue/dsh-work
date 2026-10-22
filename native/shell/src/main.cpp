@@ -165,6 +165,7 @@ std::wstring g_recognize_job;  // 作业号：审阅窗要靠它去拉草稿
 // 审阅窗的全局与前置声明：WindowProc 在定义之前就要用到它们
 constexpr UINT kMsgReview = WM_APP + 10;
 constexpr UINT kMsgDocGraph = WM_APP + 11;  // 面板 → 主窗口：打开已落库文档的节点图
+constexpr UINT kMsgOpenPanel = WM_APP + 12; // 宿主里的「打开面板」按钮 → 主窗口
 constexpr int kReviewKeyBase = 0x90;  // 0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc
 
 bool g_review_open = false;
@@ -357,10 +358,14 @@ void LogToFile(const std::string& message) {
 void PollLoop() {
   using namespace std::chrono_literals;
   std::string last_reason;
+  // 宿主重启后 ui.seq 会归零，所以按时间戳判新旧；只认 15 秒内的指令，
+  // 免得伴随层晚启动时把一个陈年请求又弹一遍。
+  double last_ui_at = 0.0;
   while (g_polling.load(std::memory_order_relaxed)) {
     // 每次都重读 endpoint.json：宿主重启会换端口和 token，缓存下来就永远连不上
     dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
     BarModel model;
+    std::string ui_target;  // 非空 = 宿主按钮刚留下一条指令
     if (!endpoint.ok) {
       model.state = dshwork::WorkModel::State::Offline;
       model.note = endpoint.error;
@@ -374,6 +379,29 @@ void PollLoop() {
           model.state = dshwork::WorkModel::State::Offline;
           model.note = "状态文档解析失败";
           model.title = L"DSH 数据异常";
+        } else {
+          // 宿主按钮把「打开面板 / 节点图」指令挂在 state 上，这里取走。
+          dshwork::JValue root;
+          if (dshwork::ParseJson(body, root)) {
+            const dshwork::JValue* ui = root.Get("ui");
+            const dshwork::JValue* at = (ui != nullptr) ? ui->Get("at") : nullptr;
+            const dshwork::JValue* target = (ui != nullptr) ? ui->Get("target") : nullptr;
+            if (at != nullptr && target != nullptr && target->IsString()) {
+              const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+              const double stamp = at->number;
+              if (stamp > last_ui_at && static_cast<double>(now_ms) - stamp <= 15000.0) {
+                if (target->text == "graph") {
+                  ui_target = "graph";
+                  last_ui_at = stamp;
+                } else if (target->text == "panel") {
+                  ui_target = "panel";
+                  last_ui_at = stamp;
+                }
+              }
+            }
+          }
         }
         last_reason.clear();
       } else {
@@ -392,6 +420,10 @@ void PollLoop() {
       g_model = model;
     }
     if (g_window != nullptr) PostMessageW(g_window, kMsgModel, 0, 0);
+    if (!ui_target.empty() && g_window != nullptr) {
+      LogToFile(std::string("宿主按钮：打开") + (ui_target == "graph" ? "节点图" : "面板"));
+      PostMessageW(g_window, ui_target == "graph" ? kMsgDocGraph : kMsgOpenPanel, 0, 0);
+    }
 
     for (int i = 0; i < 10 && g_polling.load(std::memory_order_relaxed); ++i) {
       std::this_thread::sleep_for(100ms);
@@ -895,6 +927,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (wparam != 0 && !g_panel_open) ShowPanel();
       return 0;
     }
+    case kMsgOpenPanel:
+      // 宿主里的「打开面板」：只负责摊开，不跟药丸单击一样来回折叠。
+      if (!g_panel_open) ShowPanel();
+      return 0;
     case kMsgDocGraph:
       // 面板里点了当前任务那段文字：把人送进整张地图。
       ShowReviewDoc();

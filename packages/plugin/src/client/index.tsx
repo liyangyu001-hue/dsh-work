@@ -22,6 +22,7 @@ const POLL_MS = 3000;
 /** 相对路径：桌面端页面 origin 是 dsh-app://app，web 端是 http://host:port，
  *  两者都用相对路径解析到插件自注册的 /dsh-work 前缀，不硬编码端口。 */
 const STATE_URL = "/dsh-work/api/state";
+const OPEN_URL = "/dsh-work/api/ui/open";
 
 type NodeStatus = "todo" | "active" | "done" | "skipped";
 
@@ -104,15 +105,31 @@ const glass: React.CSSProperties = {
  *  非标准属性，只能绕一次类型（运行时由 Chromium 认这个前缀）。 */
 const noDrag = { WebkitAppRegion: "no-drag" } as unknown as React.CSSProperties;
 
+/** 面板图标：一个带两行字的窗口，比纯文字更像「点开有东西」。 */
+function PanelIcon(): React.ReactElement {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.7" y="2.6" width="12.6" height="10.8" rx="2.2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M5.4 6.3h5.2M5.4 9.3h3.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * 顶部小条。
  *
  * 位置说明：shell.overlay 的父层是 position:absolute; inset:0; pointer-events:none，
  * 直系子元素自动 pointer-events:auto。窗口顶部有 -webkit-app-region:drag 的拖拽带，
  * 所以这里要显式把整条标成 no-drag，否则按钮点了会变成拖窗口。
+ *
+ * 「打开面板」按钮：桌面面板是另一个进程的 Win32 窗口，浏览器碰不到它，
+ * 所以按钮只把意愿交给宿主（POST /api/ui/open），伴随层轮询状态时取走。
+ * 用户原话是「不然不知道怎么打开」—— 入口必须写清名字，不能只放个图标。
  */
 function Bar(): React.ReactElement {
   const { snapshot, online } = useWorkState();
+  const [note, setNote] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
   const doc = snapshot?.doc;
 
   // 统计口径：skipped 不计入分母 —— 它是"明确不做"，不该拖累进度
@@ -121,57 +138,163 @@ function Bar(): React.ReactElement {
   const done = counted.filter((n) => n.status === "done").length;
   const current = doc?.pointer ? doc.nodes[doc.pointer] : undefined;
 
+  useEffect(() => {
+    if (note === null) return;
+    const timer = window.setTimeout(() => setNote(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [note]);
+
+  const openPanel = async (): Promise<void> => {
+    if (opening) return;
+    setOpening(true);
+    try {
+      const res = await fetch(OPEN_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "panel" }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        companion?: boolean;
+        launched?: boolean;
+        hint?: string;
+        error?: string;
+      };
+      if (!res.ok || data.ok === false) setNote(data.hint ?? data.error ?? `打开失败（HTTP ${res.status}）`);
+      else if (data.companion) setNote("桌面面板已打开");
+      else if (data.launched) setNote("正在启动桌面面板…");
+      else setNote(data.hint ?? "桌面面板没在运行");
+    } catch {
+      setNote("连不上宿主，面板没打开");
+    } finally {
+      setOpening(false);
+    }
+  };
+
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: 8,
-        left: "50%",
-        transform: "translateX(-50%)",
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        height: 44,
-        padding: "0 18px",
-        maxWidth: "min(520px, 60vw)",
-        font: "500 13px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif",
-        color: "var(--dsw-text-primary, #1a1a1a)",
-        ...noDrag,
-        ...glass,
-      }}
-      role="status"
-      aria-live="polite"
-    >
-      <span
+    <>
+      <style>{`
+        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1); }
+        .dshwork-open:hover:not(:disabled) { filter: brightness(1.07); }
+        .dshwork-open:active:not(:disabled) { transform: scale(.97); }
+        .dshwork-open:focus-visible { outline: 2px solid var(--dsw-accent, #0a84ff); outline-offset: 2px; }
+      `}</style>
+      <div
         style={{
-          width: 7,
-          height: 7,
-          borderRadius: 999,
-          flex: "0 0 auto",
-          background: online ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-text-tertiary, #9a9a9e)",
-          boxShadow: online ? "0 0 8px var(--dsw-accent, #0a84ff)" : "none",
+          position: "fixed",
+          top: 8,
+          left: "50%",
+          transform: "translateX(-50%)",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          height: 44,
+          padding: "0 10px 0 18px",
+          maxWidth: "min(560px, 64vw)",
+          font: "500 13px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif",
+          color: "var(--dsw-text-primary, #1a1a1a)",
+          ...noDrag,
+          ...glass,
         }}
-      />
-      <span
-        style={{
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
+        role="toolbar"
+        aria-label="DSH Work 任务条"
       >
-        {!doc ? "DSH Work · 未连接" : (current?.title ?? "全部已完成")}
-      </span>
-      <span
-        style={{
-          flex: "0 0 auto",
-          fontVariantNumeric: "tabular-nums",
-          opacity: 0.55,
-          fontSize: 12,
-        }}
-      >
-        {counted.length > 0 ? `${done}/${counted.length}` : "—"}
-      </span>
-    </div>
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 999,
+            flex: "0 0 auto",
+            background: online ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-text-tertiary, #9a9a9e)",
+            boxShadow: online ? "0 0 8px var(--dsw-accent, #0a84ff)" : "none",
+          }}
+        />
+        <span
+          role="status"
+          aria-live="polite"
+          style={{
+            flex: "1 1 auto",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {!doc ? "DSH Work · 未连接" : (current?.title ?? "全部已完成")}
+        </span>
+        <span
+          style={{
+            flex: "0 0 auto",
+            fontVariantNumeric: "tabular-nums",
+            opacity: 0.55,
+            fontSize: 12,
+          }}
+        >
+          {counted.length > 0 ? `${done}/${counted.length}` : "—"}
+        </span>
+        <span
+          aria-hidden="true"
+          style={{
+            flex: "0 0 auto",
+            width: 1,
+            height: 18,
+            background: "var(--dsw-separator, rgba(0, 0, 0, 0.08))",
+          }}
+        />
+        <button
+          type="button"
+          className="dshwork-open"
+          data-dsh-work-open="1"
+          onClick={() => void openPanel()}
+          disabled={opening}
+          title="打开桌面任务面板；面板里可以点进已落库文档的节点图"
+          aria-label="打开桌面任务面板与节点图"
+          style={{
+            flex: "0 0 auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            height: 28,
+            padding: "0 12px 0 9px",
+            borderRadius: 999,
+            border: "0.5px solid var(--dsw-accent, #0a84ff)",
+            background: "var(--dsw-accent, #0a84ff)",
+            color: "#fff",
+            font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+            cursor: opening ? "default" : "pointer",
+            opacity: opening ? 0.65 : 1,
+            ...noDrag,
+          }}
+        >
+          <PanelIcon />
+          打开面板
+        </button>
+      </div>
+      {note !== null ? (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 58,
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "7px 14px",
+            maxWidth: "min(520px, 70vw)",
+            textAlign: "center",
+            font: "500 12px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif",
+            color: "var(--dsw-text-secondary, #4a4a4e)",
+            ...noDrag,
+            ...glass,
+            borderRadius: 999,
+            boxShadow: "var(--dsw-elevation-popover, 0 6px 20px rgba(0, 0, 0, 0.10))",
+          }}
+        >
+          {note}
+        </div>
+      ) : null}
+    </>
   );
 }
 

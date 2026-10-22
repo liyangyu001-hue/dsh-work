@@ -28,6 +28,7 @@ import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recogni
 import { adviseNode } from './advise.ts';
 import { learnNode } from './learning.ts';
 import { planFromText } from './planning.ts';
+import { createUiBridge, resolveCompanionExecutable, spawnCompanion } from './ui-open.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
@@ -495,6 +496,15 @@ export function apply(ctx: any, config?: PluginConfig): void {
       }
     }
 
+    // 浏览器上的「打开面板」够不着 Win32 窗口：宿主只把指令留在状态里，
+    // 伴随层下次轮询取走；它没在跑时顺手拉起来，按钮才不是个死键。
+    const shellExe = resolveCompanionExecutable([
+      process.env['DSHWORK_SHELL_EXE'],
+      path.resolve(HERE, '..', '..', '..', 'native', 'shell', 'build', 'dshwork-shell.exe'),
+      path.resolve(root, 'native', 'shell', 'build', 'dshwork-shell.exe'),
+    ]);
+    const ui = createUiBridge(shellExe === null ? {} : { launch: () => spawnCompanion(shellExe) });
+
     const http = createHttpHandler({
       runtime: {
         version,
@@ -504,11 +514,18 @@ export function apply(ctx: any, config?: PluginConfig): void {
           // store 的通知带 journal 条目；HTTP 面只关心「变了」，把形状收敛在这一行。
           store.subscribe((event) => listener(event.doc)),
       },
-      authorize: (req) => authorizeRequest(ctx, req),
+      authorize: (req) => {
+        const rejection = authorizeRequest(ctx, req);
+        // 只把伴随层的 /api/state 轮询当心跳：否则「打开面板」这条请求自己
+        // 带了令牌，会把自己标成在线，明明没进程可开却回 companion:true。
+        if (rejection === null && hasCompanionToken(ctx, req) && isStatePoll(req)) ui.noteCompanion();
+        return rejection;
+      },
       recognize,
       advise,
       learn,
       planText,
+      ui,
     });
 
     // 令牌先就位：伴随层的请求可能在路由注册后几十毫秒内就打进来。
@@ -541,6 +558,8 @@ export function apply(ctx: any, config?: PluginConfig): void {
     };
     process.once('beforeExit', flush);
     disposers.push(() => process.removeListener('beforeExit', flush));
+
+    if (shellExe !== null) console.log(`[dsh-work] 伴随层入口：${shellExe}`);
 
     const note = `[dsh-work] 就绪：root=${root} seq=${store.seq} port=${port ?? '?'}`;
     console.log(note);
@@ -581,6 +600,14 @@ function readHostRejection(ctx: any, req: unknown): number | null {
     // 没有会话服务：不设这道门，交给令牌那道门。
     return null;
   }
+}
+
+/** 伴随层的心跳就是它每秒一次的状态轮询；「打开面板」请求不能冒充在线。 */
+function isStatePoll(req: unknown): boolean {
+  const url = (req as { url?: unknown }).url;
+  if (typeof url !== 'string') return false;
+  const pathname = url.split('?')[0] ?? '';
+  return pathname === `${ROUTE_PREFIX}/api/state` || pathname === `${ROUTE_PREFIX}/api/state/`;
 }
 
 /** 令牌存在时，才需要比对；读取是同步的（比对用的是宿主初始化时缓存的那份）。 */
