@@ -169,17 +169,23 @@ inline void Layout(Model& model) {
     }
   }
 
-  // 落到行上：横向流程 + 分层。
+  // 落到行上：一条折返的流水线（蛇形折行）。
   //
-  // 为什么不是"按深度排成一列"（上一版）：根节点会全部竖着堆在左边，
-  // 读起来像清单而不是流程。现在 x 按 DFS 顺序一格一格往右排、y 按层级下沉，
-  // 展开谁就在它右边长出它的下一步，方向感来自坐标本身，不靠箭头。
+  // 为什么不按层级一列一列排：那条线会一直往右长，20 颗节点就得横着拖很远。
+  // 现在按窗口宽度算出「一行放得下几颗」，放不下就折到下一行，且下一行是从右往左，
+  // 这样折角只差一行、不用从最右拉回最左，读起来像文章换行。
+  const float usable = kWindowW - kPad * 2.0f + kGapX;
+  int per_row = static_cast<int>(usable / (kNodeW + kGapX));
+  if (per_row < 1) per_row = 1;
   for (int i = 0; i < count; ++i) {
     Row& row = model.rows[static_cast<size_t>(i)];
     row.w = kNodeW;
     row.h = kNodeH;
-    row.x = static_cast<float>(i) * (kNodeW + kGapX);
-    row.y = static_cast<float>(row.depth) * (kNodeH + kGapY);
+    const int line = i / per_row;
+    int col = i % per_row;
+    if ((line % 2) == 1) col = per_row - 1 - col;  // 奇数行从右往左，折角才短
+    row.x = static_cast<float>(col) * (kNodeW + kGapX);
+    row.y = static_cast<float>(line) * (kNodeH + kGapY);
   }
 
   // 记下内容真实高度：窗口按它长个（一层节点 = 一条扁条，展开子层再长高）。
