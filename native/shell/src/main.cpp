@@ -1321,6 +1321,22 @@ void RepaintPanel() {
 
 constexpr wchar_t kReviewClass[] = L"DSHWorkNativeReview";
 
+// 审阅窗的兜底宽度：工作区够宽就用 kWindowW（1600），不够就退到「工作区宽 − 两侧留白」。
+// 640 是再窄就没法读的底线（内容还能横向拖）。这里全部手写比较：windows.h 的
+// std::min / std::max 宏会把它们吃掉。
+constexpr float kReviewMargin = 16.0f;
+constexpr float kReviewMinWidth = 640.0f;
+
+float ReviewAvailWidthDip() {
+  MONITORINFO info = {};
+  info.cbSize = sizeof(info);
+  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
+  const float scale = g_dpiScale > 0.1f ? g_dpiScale : 1.0f;
+  float avail = static_cast<float>(info.rcWork.right - info.rcWork.left) / scale - kReviewMargin * 2.0f;
+  if (avail < kReviewMinWidth) avail = kReviewMinWidth;
+  return avail;
+}
+
 void RepaintReview();
 void TickReviewAnim();
 
@@ -1330,6 +1346,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
   g_review_root = root;
   dshwork::review::Model model;
   model.title = dshwork::Widen(root.GetString("title"));
+  // 宽度先定下来：Layout/FitView 都要按它能给多少宽来排版，等开窗时再改就晚了。
+  model.avail_w = ReviewAvailWidthDip();
   // 注意：这里不要清 g_review_expanded —— 它是「哪几颗摊开着」的跨次记忆，
   // 每次重建都清掉的话，子行刚放出来就会在下一帧塌回去。
   model.selected = g_review_model.selected;
@@ -1407,6 +1425,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
 
 void LayoutReview() {
   if (g_review == nullptr) return;
+  // 每开一次都按当前屏幕重算：换了显示器 / 改了缩放也能落回可用范围。
+  g_review_model.avail_w = ReviewAvailWidthDip();
   const float width_dip = dshwork::review::WindowWidth(g_review_model);
   const float height_dip = dshwork::review::WindowHeight(g_review_model);
   MONITORINFO info = {};

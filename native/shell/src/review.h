@@ -56,6 +56,9 @@ struct Model {
   float zoom = 1.0f;
   bool fitted = false;  // 第一次排版后自动缩放到合适大小，之后尊重用户的手动视图
   float content_h = 0.0f;  // 内容实际高度（DIP），窗口按它长个
+  // 屏幕工作区能给的宽度（DIP）；0 = 不设限，用 kWindowW。屏幕不够宽时窗口退到这里，
+  // 免得整条冲出屏幕。由 main.cpp 在排版前按 rcWork 填。
+  float avail_w = 0.0f;
 
   // 每颗节点「第一次被看到」的时刻，用来让新长出来的框错开淡入。
   std::unordered_map<std::string, ULONGLONG> appear;
@@ -80,12 +83,17 @@ constexpr float kNodeRadius = 14.0f;
 constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定\nconstexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
 constexpr float kMaxZoom = 1.60f;
 
-constexpr float kWindowW = 1320.0f;  // 不用 100% 屏宽：留出桌面背景，才看得出这是浮层
+// 一长条是一行排开：一颗占 kNodeW + kGapX = 224 DIP。1600 正好放得下 7 颗
+// （7*224-48+2*kPad = 1568），又不用 100% 屏宽——两侧留着桌面，才看得出这是浮层。
+// 屏幕工作区比这窄时退回 avail_w（见 WindowWidth），不硬塞出屏。
+constexpr float kWindowW = 1600.0f;
 constexpr float kWindowH = 720.0f;
 constexpr float kCommitW = 108.0f;
 constexpr float kCommitH = 32.0f;
 
-inline float WindowWidth(const Model&) { return kWindowW; }
+inline float WindowWidth(const Model& m) {
+  return (m.avail_w > 0.0f && m.avail_w < kWindowW) ? m.avail_w : kWindowW;
+}
 // 窗口高度跟着内容长：一层节点就是一条扁条，展开子层再长高。
 // 夹在 [kMinWindowH, kWindowH] 之间：太小放不下页脚，太大就失去浮层的轻快感。
 constexpr float kMinWindowH = 260.0f;
@@ -94,7 +102,7 @@ inline float WindowHeight(const Model& m) {
   const float want = kHeader + kFooter + m.content_h + kPad * 2.0f;
   return want < kMinWindowH ? kMinWindowH : (want > kWindowH ? kWindowH : want);
 }
-inline float BodyWidth(const Model&) { return kWindowW; }
+inline float BodyWidth(const Model& m) { return WindowWidth(m); }
 inline float BodyHeight(const Model& m) { return WindowHeight(m) - kHeader - kFooter; }
 
 inline float EaseOut(float t) {

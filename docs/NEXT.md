@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-22 · 节点图默认宽 1320 → **1600 DIP**（一长条一次看全 7 颗，全尺寸不缩），并加**屏幕工作区兜底**：工作区比 1600 DIP 窄时窗口退到「工作区宽 − 32 DIP」（下限 640），不再冲出屏幕。真机 1.5x（物理 3840×2160）验证：窗口 2400×390 物理 = 1600×260 DIP 居中，7 颗全尺寸；临时把常量抬到 2600 复验兜底落回 2528 DIP、两侧各 16 DIP
 - 2026-10-22 · 节点图跨行连线改成直角折线（出父节点先横一小段 → 竖直落到子那一行 → 横着进子节点，拐角 4 DIP 小圆角），流光改按折线累计弧长定位、拐角不掉速；方向标改落在最后那段横线的中段，同行相邻仍是直线（`eba985a`）。真机 1.5x DPI 验证：四条跨行边全是直角，竖线逐行量过 x 不变，流光在竖段上连续
 - 2026-10-22 · DSH 玻璃条加「打开面板」按钮（点一下就能开桌面面板，没在跑时宿主顺手拉起伴随层）；宿主新增 `POST /dsh-work/api/ui/open`，指令随 `/api/state` 的 `ui` 字段下发给原生轮询（`eed4aed`）
 - 2026-10-22 · 审阅窗改成传统连线节点图（横向流程 + 连线 + 运行中节点流光边框）；面板右列重排；面板可点进只读文档节点图
@@ -77,11 +78,11 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`3d23c31`（2026-10-22 22:56，tree 与本地 `eba985a` 一致；本地在其之上还有 1 个只改接力板/CHANGELOG 的提交，下轮推送会一起带走）
+> 当前远端 sha：`3d23c31`（2026-10-22 22:56，tree 与本地 `eba985a` 一致；本地 `4ad7f54` 与本轮 N-2 提交会一起推上去，推完回填新 sha）
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。交接入口已通（`eed4aed`）：玻璃条上的「打开面板」按钮。
+- 阶段：**P2 · AI 在环**。交接入口已通（`eed4aed`）：玻璃条上的「打开面板」按钮。**当前任务 = N-3**（概念节点上的「讲讲它」入口）。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
 ### N-1 节点图：连线从斜切贝塞尔改成直角折线 —— ✅ 已交付（`eba985a`）
@@ -97,24 +98,28 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - [x] `Stop-Process -Name dshwork-shell` → `node scripts/build-native.mjs dshwork-shell` → 真机截图（1.5x DPI）
 - [x] `pnpm test` 92 绿、`pnpm typecheck` 干净
 
-**留下的**：窄间距（≤ 8 DIP 或放不下两段圆角）时退回直连；改宽度（N-2）后仍要复看一次，因为短横是按 `dx*0.6` 夹的。
+**留下的**：窄间距（≤ 8 DIP 或放不下两段圆角）时退回直连；N-2 加宽后已核对：`dx` 在内容坐标里是 `kGapX = 48`，缩放不参与，所以加宽不会把这条边推进「退回直连」。
 
-### N-2 节点图默认宽度 1320 DIP → 调大（下一轮就做这件）
+### N-2 节点图默认宽度 1320 DIP → 1600，屏幕窄时回退 —— ✅ 已交付
 
 **为什么**：一长条是按行号横向排开的，1320 DIP 里只放得下 5 颗多一点；用户要「一长条一次能看见更多节点」。
 
-**目标**：把 `native/shell/src/review.h` 的 `kWindowW` 调大（一颗节点占 224 DIP，要一次看见 6 颗约 1570，7 颗约 1794），并在屏幕工作区不够宽时回退到可用宽度。
+**做法**
+- `kWindowW` 1320 → 1600：一颗占 224 DIP，1600 正好装下 7 颗（7×224−48+2×26 = 1568）。
+- `Model` 新增 `avail_w`（屏幕工作区能给的宽度，DIP；0 = 不设限）。`WindowWidth(m)` / `BodyWidth(m)` 都改走它：`avail_w` 有值且比 `kWindowW` 窄时用 `avail_w`。排版（`Layout`）、`FitView`、`ClampPan`、`CommitHit` 全从这两个函数取宽，所以自动一致。
+- `main.cpp` 新增 `ReviewAvailWidthDip()`：`GetMonitorInfoW(MonitorFromWindow(g_window, …)).rcWork` 宽 ÷ `g_dpiScale` − 两侧各 16 DIP，下限 640。`BuildReviewModel` 在 `Layout/FitView` **之前**填一次（开窗时已经定了宽），`LayoutReview` 每次弹窗再重算一次（换显示器 / 改缩放也能落回可用区）。
+- 含 `windows.h` 的 TU 里一律手写比较，没引入 `std::min/max/clamp`。
 
-**验收**
-- [ ] 默认宽度下同行能一眼看见 ≥ 6 颗节点
-- [ ] 屏幕不够宽时不出界、不压任务栏；150% 缩放下复看
-- [ ] 只动常量与必要的宽度回退，不动配色/字号/间距/连线几何
-- [ ] 先 `Stop-Process -Name dshwork-shell`，再 `node scripts/build-native.mjs dshwork-shell`，真机截图
-- [ ] `pnpm test`、`pnpm typecheck` 绿
+**验收**（全部真机过）
+- [x] 默认宽度下同行一眼 7 颗（全尺寸，字号/间距/连线几何一字未动）
+- [x] 屏幕不够宽时不出界：临时把 `kWindowW` 抬到 2600 重编，窗口落回 2528 DIP（= 2560 − 32），两侧各 16 DIP，居中不压任务栏
+- [x] 150% DPI 复看（本机就是 1.5x：窗口 2400×390 物理 = 1600×260 DIP）
+- [x] 先 `Stop-Process -Name dshwork-shell`，再 `node scripts/build-native.mjs dshwork-shell`，真机截图
+- [x] `pnpm test` 92 绿、`pnpm typecheck` 干净
 
-**开工线索**：宽度在 `review.h` 顶部常量区，`WindowWidth(model)` 决定窗口宽，`LayoutReview`（`native/shell/src/main.cpp:1408`）按 `96*g_dpiScale` 居中置顶——屏幕兜底要加在这里（`GetMonitorInfoW` 的 `rcWork` 已经在手）。**含 `windows.h` 的 TU 里 `std::min/max/clamp` 会撞宏，一律手写比较。**
+**留下的**：`avail_w` 只按 `g_window` 所在显示器的 `rcWork` 算；把审阅窗拖到另一块屏后不会立刻改宽（下次弹窗才认）。多显示器那轮再收。加宽不影响「窄间距退回直连」分支：`dx` 是内容坐标里的 `kGapX = 48`，缩放不参与。
 
-### N-3 概念节点上的「讲讲它」入口（排队）
+### N-3 概念节点上的「讲讲它」入口（下一轮就做这件）
 
 **目标**：概念节点给一个能点的入口，点了走宿主 `POST /dsh-work/api/learn`（`packages/plugin/src/learning.ts` 已通），把解释显示出来。
 
@@ -131,10 +136,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- **N-2 节点图默认宽度加大**（`kWindowW` 1320 → 1600 起，带屏幕工作区兜底）—— 下一轮
-- **N-3 概念节点「讲讲它」入口**（宿主 `/api/learn` 已通，只缺触发点）
+- **N-3 概念节点「讲讲它」入口**（宿主 `/api/learn` 已通，只缺触发点）—— 下一轮
 - 入口按钮那件已交付（`eed4aed`）；若要「直接开节点图」的第二个入口，`POST /api/ui/open` 的 `target:"graph"` 已经通了，只缺 UI
-- N-1 直角折线已交付（`eba985a`）；改宽度后复看一次「窄间距退回直连」的分支（短横按 `dx*0.6` 夹，宽度一变间距也变）
+- N-1 直角折线已交付（`eba985a`）；N-2 加宽已交付（本轮），复核结论见 N-2 的「留下的」
+- 多显示器时 `avail_w` 不跟着窗口所在屏变（只在弹窗时算一次），排进 N-4 之后
 
 ---
 
@@ -177,7 +182,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - 回调放在"收摊函数"里调用 = 静默失效：`finish()` 会清空 listeners，必须先取出再调用（P1-2 踩过，截完图一声不响）。
 - IPC 初始化数据一律"页面主动来要"（`xxx:ready` → `xxx:init`），别在主进程 push：页面脚本在 `loadFile` 解析完之前就会跑，push 会丢。
 - `transparent: true` 的窗口里，`pathToFileURL()` 才是合法的 `file://` 三斜杠形式；手拼 `file://C:/...` 会被当成主机名。
-- 桌面截图必须 DPI-aware（`SetProcessDpiAwarenessContext(-4)`），否则坐标全错。
+- 桌面截图与**窗口几何**都必须 DPI-aware（`SetProcessDpiAwarenessContext(-4)`）：非 DPI-aware 的 PowerShell/.NET 里 `Screen.AllScreens` 和 `GetWindowRect` 会报 2560×1440 这种**虚拟化后的假数**（本机真实物理 3840×2160、工作区 3840×2088、DPI 1.5），拿它算 DIP 会差 1.5 倍，还会误判「窗口跑出屏幕」。
 - `nativeImage` 没有 `width`/`height` 属性，几何换算必须传 `getSize()`；传对象本体不会报错，只会得到一堆 NaN 和 0 字节 PNG。
 - `store.test.ts` 偶发 `ENOTEMPTY ... rmdir` —— 临时目录清理与原子写（临时文件 600ms 内 rename）踩在同一拍上，重跑即过；真出现先重跑一次再判断是不是代码坏了。
 - 视觉模型不是默认就收图：`agentDefaultModel` 若选的是纯文本模型，宿主会把图片投影成文字说明，识别质量会很差。要换 `deepseek-v4-flash-vision-exp` 或在插件 Config 里写 `llm.model`。
@@ -192,7 +197,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **验证原生界面不必重启真宿主**：把 `DSH_HOME` 指到临时目录（`<tmp>\dsh-work\endpoint.json` 写 `{"version":1,"url":"http://127.0.0.1:64077","token":"<够长>"}`）再起 `dshwork-shell.exe`，它会读这个 endpoint；本地起个 shim 服务 `/dsh-work/api/state` 就能拿假文档渲染**真窗口**。`ui.target` 必须配一个 15 秒内的 `ui.at`（epoch 毫秒）才会被当成「人刚点的按钮」，否则只更新小条不弹窗。
 - **`FindWindow("DSHWorkNativeReview")` 可能返回 0**（跨进程 + DPI 虚拟化时踩到），改用 `EnumWindows` 按 pid 枚举再比类名；要展开节点不用抢焦点，`PostMessage(hwnd, WM_KEYDOWN, VK_DOWN/VK_RETURN, 0)` 直接投递即可。注意 `ShowReviewDoc` 会清空 `g_review_expanded`——文档节点图刚打开时**只有根节点**，得再按一次 Enter 展开才有跨行连线。
 - **别用最近邻放大拼图判断线直不直**：3~4 倍 `NearestNeighbor` 重采样会让本来就直的竖线看起来错位 1 px（本轮差点误判成「折线有缝」）。量像素用 `GetPixel` 逐行扫，一次就能定性。
-- `native/shell/src/review.h` 的 `kMinFitZoom` 是**假生效**：第 80 行注释里有一个字面 `\n`，把 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释；第 234 行的 `if (zoom < kMinFitZoom) …` 同样整行是注释。所以「自动适配也不缩小」其实没实现，内容宽时会缩到 1.0 以下（改 N-2 宽度正好能缓解；真要修会改变窄屏行为，见「等用户决定」）。同样的字面 `\n` 写法别再引入。
+- `native/shell/src/review.h` 的 `kMinFitZoom` 是**假生效**：第 80 行注释里有一个字面 `\n`，把 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释；第 234 行的 `if (zoom < kMinFitZoom) …` 同样整行是注释。所以「自动适配也不缩小」其实没实现，内容宽时会缩到 1.0 以下（N-2 加宽后本机已不再缩；真要修会改变窄屏行为，见「等用户决定」）。同样的字面 `\n` 写法别再引入。
+- **要验证「屏幕不够宽就收窄」必须临时把 `kWindowW` 抬到工作区宽（DIP）以上**：本机工作区 2560 DIP，1600 永远走不到回退分支，看着像根本没做。用 2600 那次实测落回 2528 DIP；**验完一定改回来重编**——真机跑的是最后一次编出的二进制，别把调试值留在仓库里。
 
 ---
 
