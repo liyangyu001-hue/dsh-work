@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-22 · 节点图跨行连线改成直角折线（出父节点先横一小段 → 竖直落到子那一行 → 横着进子节点，拐角 4 DIP 小圆角），流光改按折线累计弧长定位、拐角不掉速；方向标改落在最后那段横线的中段，同行相邻仍是直线（`eba985a`）。真机 1.5x DPI 验证：四条跨行边全是直角，竖线逐行量过 x 不变，流光在竖段上连续
 - 2026-10-22 · DSH 玻璃条加「打开面板」按钮（点一下就能开桌面面板，没在跑时宿主顺手拉起伴随层）；宿主新增 `POST /dsh-work/api/ui/open`，指令随 `/api/state` 的 `ui` 字段下发给原生轮询（`eed4aed`）
 - 2026-10-22 · 审阅窗改成传统连线节点图（横向流程 + 连线 + 运行中节点流光边框）；面板右列重排；面板可点进只读文档节点图
 - 2026-10-22 · 学习模式第一版（自出题 / 自识别 / 自验证，packages/plugin/src/learning.ts）
@@ -76,40 +77,42 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`352c238`（2026-10-22 22:21，tree 与本地 `593ce39` 一致）
+> 当前远端 sha：`3d23c31`（2026-10-22 22:56，tree 与本地 `eba985a` 一致；本地在其之上还有 1 个只改接力板/CHANGELOG 的提交，下轮推送会一起带走）
 
 ## 当前任务（只做一个，做完就停）
 
 - 阶段：**P2 · AI 在环**。交接入口已通（`eed4aed`）：玻璃条上的「打开面板」按钮。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
-### N-1 节点图：连线从斜切贝塞尔改成直角折线（下一轮就做这件）
+### N-1 节点图：连线从斜切贝塞尔改成直角折线 —— ✅ 已交付（`eba985a`）
 
-**为什么**：跨行连线现在是一条斜着切的贝塞尔，两行之间谁连谁看不清；用户要「先出一小段 → 竖直落下 → 横向进下一颗」，流光沿折线跑。
+**为什么**：跨行连线是一条斜着切的贝塞尔，两行之间谁连谁看不清；用户要「先出一小段 → 竖直落下 → 横向进下一颗」，流光沿折线跑。
 
-**目标**：`native/shell/src/review.h` 的连线采样改成三段折线（短横 → 竖 → 横），流光沿整条折线匀速跑，拐角不掉速、不闪。
+**做法**：`native/shell/src/review.h` 新增「连线的几何」块——`EdgePath`（点 + 累计弧长 + 方向标落点）、`EdgePush/EdgeLine/EdgeCorner`、`BuildEdge`（同行 0.5 DIP 内走直线；跨行「短横 14 DIP → 竖 → 横」，二阶圆角 4 DIP）；`Draw` 的连线块改成 `BuildEdge` + 逐段画线，流光按 `edge.lengths/edge.total` 定位，方向标取 `edge.arrow`。
 
-**验收**
-- [ ] 同行相邻仍是直线；跨行是「短横 → 竖 → 横」，拐角直角（≤4 DIP 圆角可以）
-- [ ] 流光沿三段折线连续跑，拐角不回头、不跳帧
-- [ ] 线宽/颜色/流光亮度与现在一致，不顺手改设计体系
-- [ ] 先 `Stop-Process -Name dshwork-shell`，再 `node scripts/build-native.mjs dshwork-shell`，真机截图看跨行连线
-- [ ] `pnpm test`、`pnpm typecheck` 绿（原生改动不该弄坏这两条）
+**验收**（全部真机过）
+- [x] 同行相邻仍是直线；跨行是「短横 → 竖 → 横」，拐角直角（4 DIP 圆角）
+- [x] 流光沿三段折线连续跑，拐角不回头、不跳帧（按弧长归一化，拐角只是路径上一点）
+- [x] 线宽/颜色/流光亮度与之前逐字未改（1.6 / 1.9、白 0.22、accent 0.10~0.65）
+- [x] `Stop-Process -Name dshwork-shell` → `node scripts/build-native.mjs dshwork-shell` → 真机截图（1.5x DPI）
+- [x] `pnpm test` 92 绿、`pnpm typecheck` 干净
 
-**禁止**
-- 不引入新的图形库/依赖，继续用现有 D2D 几何与笔刷
-- 不动节点排版、间距、窗口尺寸（那是 N-2）
+**留下的**：窄间距（≤ 8 DIP 或放不下两段圆角）时退回直连；改宽度（N-2）后仍要复看一次，因为短横是按 `dx*0.6` 夹的。
 
-**开工线索**：连线采样在 `native/shell/src/review.h` 的「连线采样」块（`DrawDocumentGraph` 附近）；节点矩形来自同文件的 `DocGraphLayout`。**含 `windows.h` 的 TU 里 `std::min/max/clamp` 会撞宏，一律手写比较。**
+### N-2 节点图默认宽度 1320 DIP → 调大（下一轮就做这件）
 
-### N-2 节点图默认宽度 1320 DIP → 调大（排队）
+**为什么**：一长条是按行号横向排开的，1320 DIP 里只放得下 5 颗多一点；用户要「一长条一次能看见更多节点」。
 
-**目标**：一长条一次能看见更多节点；改 `kWindowW`，真机复看，别把右侧详情挤出屏幕。
+**目标**：把 `native/shell/src/review.h` 的 `kWindowW` 调大（一颗节点占 224 DIP，要一次看见 6 颗约 1570，7 颗约 1794），并在屏幕工作区不够宽时回退到可用宽度。
 
 **验收**
 - [ ] 默认宽度下同行能一眼看见 ≥ 6 颗节点
-- [ ] 屏幕不够宽时不出界、不压任务栏；截图验证
-- [ ] 只动常量与必要的布局回退，不动配色/字号
+- [ ] 屏幕不够宽时不出界、不压任务栏；150% 缩放下复看
+- [ ] 只动常量与必要的宽度回退，不动配色/字号/间距/连线几何
+- [ ] 先 `Stop-Process -Name dshwork-shell`，再 `node scripts/build-native.mjs dshwork-shell`，真机截图
+- [ ] `pnpm test`、`pnpm typecheck` 绿
+
+**开工线索**：宽度在 `review.h` 顶部常量区，`WindowWidth(model)` 决定窗口宽，`LayoutReview`（`native/shell/src/main.cpp:1408`）按 `96*g_dpiScale` 居中置顶——屏幕兜底要加在这里（`GetMonitorInfoW` 的 `rcWork` 已经在手）。**含 `windows.h` 的 TU 里 `std::min/max/clamp` 会撞宏，一律手写比较。**
 
 ### N-3 概念节点上的「讲讲它」入口（排队）
 
@@ -128,16 +131,17 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- **N-1 节点图直角折线连线** —— 下一轮
-- **N-2 节点图默认宽度加大**（`kWindowW`，1320 → 更大）
+- **N-2 节点图默认宽度加大**（`kWindowW` 1320 → 1600 起，带屏幕工作区兜底）—— 下一轮
 - **N-3 概念节点「讲讲它」入口**（宿主 `/api/learn` 已通，只缺触发点）
 - 入口按钮那件已交付（`eed4aed`）；若要「直接开节点图」的第二个入口，`POST /api/ui/open` 的 `target:"graph"` 已经通了，只缺 UI
+- N-1 直角折线已交付（`eba985a`）；改宽度后复看一次「窄间距退回直连」的分支（短横按 `dx*0.6` 夹，宽度一变间距也变）
 
 ---
 
 ## 等用户决定
 
 - 玻璃条上现在只有一个「打开面板」按钮，节点图要再点面板里的当前任务。要不要再加一个「节点图」小按钮（`target:"graph"` 已就绪）？先不加，等用户说。
+- `kMinFitZoom` 那句「自动适配也不缩小」目前是死的（见「已知的坑」）。恢复它 = 窄窗口里字不再被缩小、内容超出就靠人拖/滚；不恢复 = 现在这样自动缩到装下。要不要恢复？先不动，N-2 加宽只是让它不那么常触发。
 
 ---
 ## 硬约束（每一轮都必须遵守）
@@ -185,6 +189,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **dev 宿主的登录 token 每重启一次就变**：URL 从 `D:\work\AI\work\dshwork-shots\dev-out.log` 里 `dsh web: http://127.0.0.1:64001/?token=…` 那一行取；自动化截图必须带它，否则进的是登录页。
 - 真机截图会被「预览版说明」欢迎弹窗挡住：Playwright 里先点「继续」再截，别以为页面没渲染。
 - 宿主重启前必须按端口杀监听进程（`Get-NetTCPConnection -LocalPort 64001 -State Listen`），并确认工作目录是 `D:\work\AI\work`，否则任务为空；起完检查 `endpoint.json` 的 pid 是否变了。
+- **验证原生界面不必重启真宿主**：把 `DSH_HOME` 指到临时目录（`<tmp>\dsh-work\endpoint.json` 写 `{"version":1,"url":"http://127.0.0.1:64077","token":"<够长>"}`）再起 `dshwork-shell.exe`，它会读这个 endpoint；本地起个 shim 服务 `/dsh-work/api/state` 就能拿假文档渲染**真窗口**。`ui.target` 必须配一个 15 秒内的 `ui.at`（epoch 毫秒）才会被当成「人刚点的按钮」，否则只更新小条不弹窗。
+- **`FindWindow("DSHWorkNativeReview")` 可能返回 0**（跨进程 + DPI 虚拟化时踩到），改用 `EnumWindows` 按 pid 枚举再比类名；要展开节点不用抢焦点，`PostMessage(hwnd, WM_KEYDOWN, VK_DOWN/VK_RETURN, 0)` 直接投递即可。注意 `ShowReviewDoc` 会清空 `g_review_expanded`——文档节点图刚打开时**只有根节点**，得再按一次 Enter 展开才有跨行连线。
+- **别用最近邻放大拼图判断线直不直**：3~4 倍 `NearestNeighbor` 重采样会让本来就直的竖线看起来错位 1 px（本轮差点误判成「折线有缝」）。量像素用 `GetPixel` 逐行扫，一次就能定性。
+- `native/shell/src/review.h` 的 `kMinFitZoom` 是**假生效**：第 80 行注释里有一个字面 `\n`，把 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释；第 234 行的 `if (zoom < kMinFitZoom) …` 同样整行是注释。所以「自动适配也不缩小」其实没实现，内容宽时会缩到 1.0 以下（改 N-2 宽度正好能缓解；真要修会改变窄屏行为，见「等用户决定」）。同样的字面 `\n` 写法别再引入。
 
 ---
 
