@@ -309,6 +309,119 @@ inline void SplitTwoLines(const std::wstring& text, float max_w, float font_dip,
   line2 = ui::FitText(text.substr(cut), max_w, font_dip);
 }
 
+/* ─────────────────────────── 连线的几何 ─────────────────────────── */
+
+// 一条边：短横 → 竖 → 横。
+//
+// 斜切贝塞尔在「父在上、子在下」时只是一条缓坡，跨行时到底谁连谁得顺着看；
+// 直角折线把「出门 → 落下 → 进门」三段讲清楚，一眼就能对上号。同行相邻
+// 还是直线，不为了统一把它也掰弯。
+//
+// 拐角用二次曲线切个小圆角：半径小到看不出是圆角，但缩放后不会有折线的硬刺。
+// 采样按弧长均分——流光的位置是「走了百分之几」，采样点不匀就会在长段上一跳
+// 一跳、过拐角时还闪；这里直线段每 ~8 DIP 一个点，拐角固定 5 个点。
+constexpr float kCornerR = 4.0f;    // 拐角半径（DIP）
+constexpr float kStubX = 14.0f;     // 出父节点后先横着走的一小段
+constexpr int kMaxEdgePoints = 72;  // 一条边的采样上限：>300 DIP 的竖直段也够平滑
+constexpr float kEdgeStep = 8.0f;   // 直线段的采样步长（DIP）
+
+struct EdgePath {
+  D2D1_POINT_2F points[kMaxEdgePoints + 1];
+  float lengths[kMaxEdgePoints + 1] = {};  // 累计弧长，流光按它定位
+  int count = 0;
+  float total = 0.0f;
+  D2D1_POINT_2F arrow = {};  // 方向标落点：由 BuildEdge 定，竖线上画「>」会指错方向
+};
+
+inline void EdgePush(EdgePath& path, float x, float y) {
+  if (path.count > kMaxEdgePoints) return;
+  const int s = path.count;
+  path.points[s] = D2D1::Point2F(x, y);
+  if (s > 0) {
+    const float dx = x - path.points[s - 1].x;
+    const float dy = y - path.points[s - 1].y;
+    path.total += std::sqrt(dx * dx + dy * dy);
+  }
+  path.lengths[s] = path.total;
+  path.count = s + 1;
+}
+
+/** 直线段：长段多采几个点，流光在同一段上的速度才不靠运气。 */
+inline void EdgeLine(EdgePath& path, float x0, float y0, float x1, float y1) {
+  const float dx = x1 - x0;
+  const float dy = y1 - y0;
+  const float len = std::sqrt(dx * dx + dy * dy);
+  int steps = static_cast<int>(len / kEdgeStep) + 1;
+  if (steps > 40) steps = 40;
+  for (int s = 1; s <= steps; ++s) {
+    const float t = static_cast<float>(s) / static_cast<float>(steps);
+    EdgePush(path, x0 + dx * t, y0 + dy * t);
+  }
+}
+
+/** 小圆角：二次贝塞尔，控制点就是那个尖角，曲线自然贴着两边走。 */
+inline void EdgeCorner(EdgePath& path, float x0, float y0, float cx, float cy, float x1, float y1) {
+  constexpr int kSteps = 5;
+  for (int s = 1; s <= kSteps; ++s) {
+    const float t = static_cast<float>(s) / kSteps;
+    const float u = 1.0f - t;
+    EdgePush(path, u * u * x0 + 2.0f * u * t * cx + t * t * x1,
+             u * u * y0 + 2.0f * u * t * cy + t * t * y1);
+  }
+}
+
+/**
+ * 铺一条边的采样点：起点由这里写，调用方只管拿 points/lengths。
+ *
+ * 同一行（纵向差 < 0.5）就是直线；跨行才走「短横 → 竖 → 横」。
+ * 手写比较：这个 TU 里有 windows.h，std::min/max/clamp 会被宏吃掉。
+ */
+inline void BuildEdge(EdgePath& path, float fx, float fy, float tx, float ty) {
+  path = EdgePath();  // 聚合初始化，points/lengths 一起清零
+  EdgePush(path, fx, fy);
+  path.arrow = D2D1::Point2F((fx + tx) * 0.5f, (fy + ty) * 0.5f);
+
+  const float dy = ty - fy;
+  if (dy > -0.5f && dy < 0.5f) {
+    EdgeLine(path, fx, fy, tx, ty);  // 同行：还是直线
+    return;
+  }
+
+  const float dx = tx - fx;
+  float stub = kStubX;
+  if (stub > dx * 0.6f) stub = dx * 0.6f;
+  // 间距窄到摆不下「短横 → 竖 → 横」时退回直连：画出回勾比斜线更难读。
+  if (stub < 1.0f || dx <= kCornerR * 2.0f) {
+    EdgeLine(path, fx, fy, tx, ty);
+    return;
+  }
+
+  const float corner_x = fx + stub;
+  const float down = dy > 0.0f ? 1.0f : -1.0f;
+  const float vlen = dy > 0.0f ? dy : -dy;
+
+  // 半径别把竖直段和短横吃光：窄间距时自动缩，缩没了就画硬拐角。
+  float r = kCornerR;
+  if (r > vlen * 0.4f) r = vlen * 0.4f;
+  if (r > stub * 0.5f) r = stub * 0.5f;
+  if (r < 0.5f) r = 0.0f;
+
+  if (r <= 0.0f) {
+    EdgeLine(path, fx, fy, corner_x, fy);
+    EdgeLine(path, corner_x, fy, corner_x, ty);
+    EdgeLine(path, corner_x, ty, tx, ty);
+  } else {
+    EdgeLine(path, fx, fy, corner_x - r, fy);
+    EdgeCorner(path, corner_x - r, fy, corner_x, fy, corner_x, fy + down * r);
+    EdgeLine(path, corner_x, fy + down * r, corner_x, ty - down * r);
+    EdgeCorner(path, corner_x, ty - down * r, corner_x, ty, corner_x + r, ty);
+    EdgeLine(path, corner_x + r, ty, tx, ty);
+  }
+
+  // 方向标落在最后那段横线的中间：靠近子节点但不贴框，指向「进门」的方向。
+  path.arrow = D2D1::Point2F((corner_x + r + tx) * 0.5f, ty);
+}
+
 /**
  * 画整张节点图。
  *
@@ -342,11 +455,11 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
                        D2D1::Matrix3x2F::Translation(model.pan_x, kHeader + model.pan_y) *
                        D2D1::Matrix3x2F::Scale(scale, scale));
 
-  // 连线：父的右边中点 → 子的左边中点，三次贝塞尔，角度按水平切线收。
+  // 连线：父的右边中点 → 子的左边中点。几何由 BuildEdge 铺：同行是直线，
+  // 跨行走「短横 → 竖 → 横」，拐角带 4 DIP 小圆角。
   //
-  // 线上跑一颗「光点」：把曲线采样成折线、按长度归一化，再让一段亮弧随时间
-  // 平移。方向是父→子，所以光是朝思路前进的方向流的，扫一眼就知道下一步在哪。
-  // 采样 24 段足够顺滑，且比求贝塞尔弧长公式便宜得多。
+  // 线上跑一颗「光点」：把折线按弧长归一化，再让一段亮弧随时间平移。方向是
+  // 父→子，所以光是朝思路前进的方向流的，扫一眼就知道下一步在哪。
   static ID2D1Factory* factory = nullptr;
   if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
   const float flow_phase = static_cast<float>((anim.now % 100000) * 0.00022);
@@ -357,55 +470,35 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     const Row& next = model.rows[i + 1];
     const D2D1_POINT_2F from = D2D1::Point2F(row.x + row.w, row.y + row.h * 0.5f);
     const D2D1_POINT_2F to = D2D1::Point2F(next.x - 2.0f, next.y + next.h * 0.5f);
-    const float bend = (to.x - from.x) * 0.5f;
 
-    // 采样并累计长度
-    constexpr int kSamples = 24;
-    D2D1_POINT_2F points[kSamples + 1];
-    float lengths[kSamples + 1] = {};
-    float total = 0.0f;
-    for (int s = 0; s <= kSamples; ++s) {
-      const float t = static_cast<float>(s) / kSamples;
-      const float u = 1.0f - t;
-      // 三次贝塞尔，控制点按水平切线摆
-      const D2D1_POINT_2F c1 = D2D1::Point2F(from.x + bend, from.y);
-      const D2D1_POINT_2F c2 = D2D1::Point2F(to.x - bend, to.y);
-      points[s].x = u * u * u * from.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * to.x;
-      points[s].y = u * u * u * from.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * to.y;
-      if (s > 0) {
-        const float dx = points[s].x - points[s - 1].x;
-        const float dy = points[s].y - points[s - 1].y;
-        total += std::sqrt(dx * dx + dy * dy);
-      }
-      lengths[s] = total;
-    }
-    if (total <= 0.01f) continue;
+    EdgePath edge;
+    BuildEdge(edge, from.x, from.y, to.x, to.y);
+    if (edge.count < 2 || edge.total <= 0.01f) continue;
 
     // 底线
     fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.22f * a)));
-    for (int s = 0; s < kSamples; ++s) target->DrawLine(points[s], points[s + 1], fmt.brush, 1.6f);
+    for (int s = 0; s + 1 < edge.count; ++s) {
+      target->DrawLine(edge.points[s], edge.points[s + 1], fmt.brush, 1.6f);
+    }
 
-    // 流光：一段 18% 长度的亮弧，每条边错开相位，整体朝前流
+    // 流光：一段 18% 弧长的亮弧，每条边错开相位，整体朝前流。
+    // 位置按累计弧长算，拐角只是折线上的普通一点，所以不会重来一段、也不掉速。
     const float phase = flow_phase + static_cast<float>(i) * 0.11f;
     const float head = phase - std::floor(phase);
-    for (int s = 0; s < kSamples; ++s) {
-      const float p = (lengths[s] / total) - head;
-      float u = p - std::floor(p);              // 0..1 的循环位置
-      const float tail_len = 0.18f;
-      float d = head - (lengths[s] / total);    // 当前段相对光头的距离（负=在光头之后）
+    constexpr float kTailLen = 0.18f;
+    for (int s = 0; s + 1 < edge.count; ++s) {
+      float d = head - (edge.lengths[s] / edge.total);  // 当前段相对光头的距离（负=在光头之后）
       d -= std::floor(d);
-      (void)u;
-      if (d > 1.0f - tail_len) {
-        const float k = (d - (1.0f - tail_len)) / tail_len;  // 0..1，越接近光头越亮
+      if (d > 1.0f - kTailLen) {
+        const float k = (d - (1.0f - kTailLen)) / kTailLen;  // 0..1，越接近光头越亮
         fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.10f + 0.55f * k) * a)));
-        target->DrawLine(points[s], points[s + 1], fmt.brush, 1.9f);
+        target->DrawLine(edge.points[s], edge.points[s + 1], fmt.brush, 1.9f);
       }
     }
-    // 箭头：一颗很小的 ">"，落在连线中段而不是贴着节点框。
-    // 贴边那种又大又亮，像贴在框上的贴纸；中段小箭头才像方向标。
+    // 方向标：一颗很小的 ">"，落在 BuildEdge 选好的位置（同行是中段，
+    // 折线是最后那段横线），不贴框、也不在竖线上指错方向。
     {
-      const int mid = kSamples / 2;
-      const D2D1_POINT_2F c = points[mid];
+      const D2D1_POINT_2F c = edge.arrow;
       fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.20f * a)));
       target->DrawLine(D2D1::Point2F(c.x - 3.2f, c.y - 3.4f), D2D1::Point2F(c.x + 1.4f, c.y), fmt.brush, 1.3f);
       target->DrawLine(D2D1::Point2F(c.x - 3.2f, c.y + 3.4f), D2D1::Point2F(c.x + 1.4f, c.y), fmt.brush, 1.3f);
