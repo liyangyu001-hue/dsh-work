@@ -491,25 +491,33 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     std::wstring line1;
     std::wstring line2;
-    SplitTwoLines(WidenNode(row.title), row.w - 44.0f, 16.0f, line1, line2);
-    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 7.0f, row.x + row.w - 14.0f, row.y + 31.0f),
+    const float text_w = row.w - 44.0f - (row.child_count > 0 ? 40.0f : 0.0f);
+    SplitTwoLines(WidenNode(row.title), text_w, 16.0f, line1, line2);
+    ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 7.0f, row.x + row.w - (row.child_count > 0 ? 58.0f : 14.0f), row.y + 31.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
       // 第二行也是标题的一部分，用同一个字号；不要降成正文，否则标题读起来像正文带注释。
       ui::Text(target, line2, fmt.node,
-               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - 14.0f, row.y + 59.0f), fmt.brush,
+               D2D1::RectF(row.x + 28.0f, row.y + 31.0f, row.x + row.w - (row.child_count > 0 ? 58.0f : 14.0f), row.y + 59.0f), fmt.brush,
                ui::Fade(ui::kText, a));
     }
 
     // 右下角徽标：拆过就显示子节点数，没收起用强调色
     if (row.child_count > 0) {
       const std::wstring badge = (row.expanded ? L"−" : L"+") + std::to_wstring(row.child_count);
-      const D2D1_RECT_F chip = D2D1::RectF(row.x + row.w - 44.0f, row.y + row.h - 26.0f, row.x + row.w - 10.0f,
-                                          row.y + row.h - 8.0f);
+      const D2D1_RECT_F chip = D2D1::RectF(row.x + row.w - 44.0f, row.y + 8.0f, row.x + row.w - 10.0f,
+                                          row.y + 26.0f);
       ui::FillRound(target, fmt.brush, chip, 6.0f,
                     row.expanded ? ui::Fade(0x260A84FF, a) : ui::Fade(0x14FFFFFF, a));
       ui::Text(target, badge, fmt.meta, D2D1::RectF(chip.left + 6.0f, chip.top + 1.0f, chip.right, chip.bottom),
                fmt.brush, row.expanded ? ui::Fade(ui::kAccent, a) : ui::Fade(ui::kTextDim, a));
+    }
+    // 概念节点：右下角一个极小的「学」字。
+    // 不换配色（紫色试过，落在冷灰底上更脏），只加一个字，靠形状区分「要动手」和「要懂」。
+    if (row.kind == "concept") {
+      const D2D1_RECT_F tag = D2D1::RectF(row.x + row.w - 28.0f, row.y + row.h - 22.0f, row.x + row.w - 8.0f,
+                                         row.y + row.h - 5.0f);
+      ui::Text(target, L"学", fmt.meta, tag, fmt.brush, ui::Fade(ui::kAccent, 0.85f * a));
     }
     target->PopAxisAlignedClip();
   }

@@ -209,12 +209,17 @@ constexpr UINT kReviewFrameMs = 16;
 // 悬停多久自动展开。太短会误触，太长又像没反应。
 constexpr ULONGLONG kHoverExpandMs = 260;
 int g_review_hover_row = -1;
+// 双击判定：同一颗节点两次点击的间隔。
+int g_review_last_click_row = -1;
+ULONGLONG g_review_last_click_at = 0;
 ULONGLONG g_review_hover_at = 0;
 
 void RepaintReview();
 void ReviewKey(int which);
 void LayoutReview();
 void ReviewExpandSelected();
+// 定义在文件后半段（意图通道），审阅窗的双击要先用一小段。
+void PostIntent(const std::string& type, const std::string& node_id);
 void ReviewCollapseSelected();
 void ReviewCommit();
 void CloseReview();
@@ -1589,32 +1594,39 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     const float scale_ok = dpi_scale > 0.1f ? dpi_scale : 1.0f;
     const float x = static_cast<float>(GET_X_LPARAM(lparam)) / scale_ok;
     const float y = static_cast<float>(GET_Y_LPARAM(lparam)) / scale_ok;
-    // 临时诊断：确认点击有没有进来、命中哪一颗（定位完就删）。
-    LogToFile("review click x=" + std::to_string(static_cast<int>(x)) + " y=" + std::to_string(static_cast<int>(y)) +
-              " fit=" + std::to_string(g_review_model.fitted ? 1 : 0) +
-              " zoom=" + std::to_string(g_review_model.zoom) +
-              " pan=" + std::to_string(static_cast<int>(g_review_model.pan_x)) + "," +
-              std::to_string(static_cast<int>(g_review_model.pan_y)) +
-              " hit=" + std::to_string(dshwork::review::NodeAt(g_review_model, x, y)));
     if (dshwork::review::CommitHit(g_review_model, x, y)) {
       if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
       return 0;
     }
     const int index = dshwork::review::NodeAt(g_review_model, x, y);
     if (index >= 0) {
+      // 双击（同一颗 400ms 内点两次）= 把这一颗设成「当前任务」。
+      // 判定要放在改选中项之前：第一次点只是选中（again=false），
+      // 若只在 again 分支里记时间，双击就得等到第三次点击才成立。
+      const ULONGLONG now_ms = GetTickCount64();
+      const bool is_double = g_review_last_click_row == index && now_ms - g_review_last_click_at < 400;
+      g_review_last_click_row = index;
+      g_review_last_click_at = now_ms;
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
+      if (is_double) {
+        const std::string id = g_review_model.rows[static_cast<size_t>(index)].id;
+        std::thread([id]() { PostIntent("node.focus", id); }).detach();
+        LogToFile("审阅：设为当前任务 " + id);
+        g_review_last_click_row = -1;
+        return 0;
+      }
       SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
       // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
       if (again) {
         const auto& row = g_review_model.rows[static_cast<size_t>(index)];
         if (row.has_children && g_review_expanded.count(row.id) > 0) {
           g_review_expanded.erase(row.id);
-          RepaintReview();
         } else if (g_window != nullptr) {
           PostMessageW(g_window, kMsgReview, 2, 0);
         }
       }
+      RepaintReview();
       RepaintReview();
     }
     return 0;
@@ -2224,8 +2236,8 @@ void UpdateHover() {
   const bool on_bar = cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom;
 
   bool on_panel = false;
+  RECT panel_rect = {};
   if (g_panel_open) {
-    RECT panel_rect = {};
     GetWindowRect(g_panel, &panel_rect);
     on_panel = cursor.x >= panel_rect.left && cursor.x <= panel_rect.right && cursor.y >= panel_rect.top &&
                cursor.y <= panel_rect.bottom;
@@ -2234,7 +2246,7 @@ void UpdateHover() {
   const bool hovered = on_bar || on_panel;
   static int tick = 0;
   if (++tick % 20 == 0) {
-    LogToFile("hover 探测 tick=" + std::to_string(tick) + " cursor=" + std::to_string(cursor.x) + "," +
+    LogToFile("panel_open=" + std::to_string(g_panel_open ? 1 : 0) + " hit_panel=" + std::to_string(on_panel ? 1 : 0) + " panel_rect=" + std::to_string(panel_rect.left) + "," + std::to_string(panel_rect.top) + "-" + std::to_string(panel_rect.right) + "," + std::to_string(panel_rect.bottom) + " hover 探测 tick=" + std::to_string(tick) + " cursor=" + std::to_string(cursor.x) + "," +
               std::to_string(cursor.y) + " bar=[" + std::to_string(left) + "," + std::to_string(top) + "-" +
               std::to_string(right) + "," + std::to_string(bottom) + "] on_bar=" + std::to_string(on_bar));
   }
