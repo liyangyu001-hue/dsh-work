@@ -16,6 +16,8 @@
 
 import { useEffect, useState } from "react";
 
+import { graphEntry, openFeedback, type OpenReply, type OpenTarget } from "./open-entry.ts";
+
 /** 轮询间隔。真实推送走 SSE 是后续优化项；先保证"打开就能看到"这条最短路径。 */
 const POLL_MS = 3000;
 
@@ -115,6 +117,18 @@ function PanelIcon(): React.ReactElement {
   );
 }
 
+/** 节点图图标：两颗上游汇到一颗下游，一眼能认出「这是一张图」。 */
+function GraphIcon(): React.ReactElement {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="3.7" cy="4.2" r="1.9" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="3.7" cy="11.8" r="1.9" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="12.3" cy="8" r="1.9" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M5.4 5 10.6 7.1M5.4 11 10.6 8.9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * 顶部小条。
  *
@@ -137,6 +151,8 @@ function Bar(): React.ReactElement {
   const counted = nodes.filter((n) => n.status !== "skipped");
   const done = counted.filter((n) => n.status === "done").length;
   const current = doc?.pointer ? doc.nodes[doc.pointer] : undefined;
+  // doc 还没到手时 nodeCount 用 null：置灰但不说成「没有任务」
+  const graph = graphEntry(doc ? nodes.length : null);
 
   useEffect(() => {
     if (note === null) return;
@@ -144,7 +160,12 @@ function Bar(): React.ReactElement {
     return () => window.clearTimeout(timer);
   }, [note]);
 
-  const openPanel = async (): Promise<void> => {
+  /**
+   * 两个入口走同一条路：只把意愿交给宿主（POST /api/ui/open），
+   * 桌面窗口是另一个进程的 Win32 窗口，浏览器碰不到它。
+   * 反馈文案收在 open-entry.ts 里，四档都有单测。
+   */
+  const openCompanion = async (target: OpenTarget): Promise<void> => {
     if (opening) return;
     setOpening(true);
     try {
@@ -152,21 +173,12 @@ function Bar(): React.ReactElement {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "panel" }),
+        body: JSON.stringify({ target }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        companion?: boolean;
-        launched?: boolean;
-        hint?: string;
-        error?: string;
-      };
-      if (!res.ok || data.ok === false) setNote(data.hint ?? data.error ?? `打开失败（HTTP ${res.status}）`);
-      else if (data.companion) setNote("桌面面板已打开");
-      else if (data.launched) setNote("正在启动桌面面板…");
-      else setNote(data.hint ?? "桌面面板没在运行");
+      const data = (await res.json().catch(() => ({}))) as OpenReply;
+      setNote(openFeedback(target, { ...data, status: res.status }));
     } catch {
-      setNote("连不上宿主，面板没打开");
+      setNote(openFeedback(target, { offline: true }));
     } finally {
       setOpening(false);
     }
@@ -175,10 +187,11 @@ function Bar(): React.ReactElement {
   return (
     <>
       <style>{`
-        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1); }
+        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1), background-color 120ms cubic-bezier(.16,1,.3,1); }
         .dshwork-open:hover:not(:disabled) { filter: brightness(1.07); }
         .dshwork-open:active:not(:disabled) { transform: scale(.97); }
         .dshwork-open:focus-visible { outline: 2px solid var(--dsw-accent, #0a84ff); outline-offset: 2px; }
+        .dshwork-ghost:hover:not(:disabled) { background-color: color-mix(in srgb, var(--dsw-accent, #0a84ff) 12%, transparent); }
       `}</style>
       <div
         style={{
@@ -242,34 +255,77 @@ function Bar(): React.ReactElement {
             background: "var(--dsw-separator, rgba(0, 0, 0, 0.08))",
           }}
         />
-        <button
-          type="button"
-          className="dshwork-open"
-          data-dsh-work-open="1"
-          onClick={() => void openPanel()}
-          disabled={opening}
-          title="打开桌面任务面板；面板里可以点进已落库文档的节点图"
-          aria-label="打开桌面任务面板与节点图"
+        <span
           style={{
             flex: "0 0 auto",
             display: "inline-flex",
             alignItems: "center",
-            gap: 6,
-            height: 28,
-            padding: "0 12px 0 9px",
-            borderRadius: 999,
-            border: "0.5px solid var(--dsw-accent, #0a84ff)",
-            background: "var(--dsw-accent, #0a84ff)",
-            color: "#fff",
-            font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
-            cursor: opening ? "default" : "pointer",
-            opacity: opening ? 0.65 : 1,
-            ...noDrag,
+            gap: 8,
           }}
         >
-          <PanelIcon />
-          打开面板
-        </button>
+          <button
+            type="button"
+            className="dshwork-open"
+            data-dsh-work-open="1"
+            onClick={() => void openCompanion("panel")}
+            disabled={opening}
+            title="打开桌面任务面板；面板里可以点进已落库文档的节点图"
+            aria-label="打开桌面任务面板"
+            style={{
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              height: 28,
+              padding: "0 12px 0 9px",
+              borderRadius: 999,
+              border: "0.5px solid var(--dsw-accent, #0a84ff)",
+              background: "var(--dsw-accent, #0a84ff)",
+              color: "#fff",
+              font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+              cursor: opening ? "default" : "pointer",
+              opacity: opening ? 0.65 : 1,
+              ...noDrag,
+            }}
+          >
+            <PanelIcon />
+            打开面板
+          </button>
+          <button
+            type="button"
+            className="dshwork-open dshwork-ghost"
+            data-dsh-work-graph="1"
+            onClick={() => void openCompanion("graph")}
+            disabled={opening || !graph.enabled}
+            title={graph.hint}
+            aria-label={graph.enabled ? "打开节点图（整张任务地图，只读）" : graph.hint}
+            style={{
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              height: 28,
+              padding: "0 11px 0 9px",
+              borderRadius: 999,
+              border: `0.5px solid ${
+                graph.enabled
+                  ? "var(--dsw-accent, #0a84ff)"
+                  : "var(--dsw-separator, rgba(0, 0, 0, 0.08))"
+              }`,
+              background: "transparent",
+              color: graph.enabled
+                ? "var(--dsw-accent, #0a84ff)"
+                : "var(--dsw-text-tertiary, #9a9a9e)",
+              font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+              cursor: graph.enabled && !opening ? "pointer" : "default",
+              opacity: graph.enabled ? (opening ? 0.65 : 1) : 0.55,
+              ...noDrag,
+            }}
+          >
+            <GraphIcon />
+            打开节点图
+          </button>
+        </span>
       </div>
       {note !== null ? (
         <div
