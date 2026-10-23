@@ -50,7 +50,7 @@ export function describeEntry(line: JournalLine, titleOf: (id: string) => string
 
   const item = (verb: string, text: string, ok = true): FeedItem => ({
     seq: line.seq,
-    at: line.at,
+    at: clock(line.at),
     verb,
     text,
     ok,
@@ -68,6 +68,10 @@ export function describeEntry(line: JournalLine, titleOf: (id: string) => string
       return item('完成', title || '一件事');
     case 'node.focus':
       return item('切到', title || '一件事');
+    case 'node.back':
+      return item('回退', '退回上一个');
+    case 'node.advise':
+      return item('建议', title || '一件事');
     case 'handoff.offer':
       return item('交给 AI', title || '一件事');
     case 'handoff.start':
