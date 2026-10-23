@@ -81,7 +81,7 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`a687996c26be35049dfffade7f5c351ad2600a2e`（2026-10-23 22:29，含本轮 N-4 提交；本地在其之上只有回填本行 / 接力板的那一个提交，下轮推送会一起带走）
+> 当前远端 sha：`51c8f0513ce267184bc07b861a40e4847a80a0b6`（2026-10-23 22:35，tree 与本地 `b74ce09` 一致；本地在其之上只有 1 个回填本行的提交，下轮推送会一起带走）
 
 ## 当前任务（只做一个，做完就停）
 
