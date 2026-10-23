@@ -36,6 +36,8 @@ struct WorkModel {
   int current = -1;  // items 下标；-1 表示全部完成或没有任务
   int done = 0;
   int total = 0;
+  // 事件流：最近几条「刚发生了什么」，面板底部一行显示
+  std::vector<std::wstring> feed;
 };
 
 /**

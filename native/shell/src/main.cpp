@@ -324,7 +324,7 @@ struct PanelMorph {
 };
 PanelMorph g_morph;
 float g_panel_dip_w = 0.0f;   // 长条的逻辑宽度（随任务数变）
-float g_panel_dip_h = dshwork::ui::kStripHeight;
+float g_panel_dip_h = dshwork::ui::kStripHeight + 24.0f;  // 多留一行给事件流
 
 void Repaint();
 void ShowPanel();
@@ -406,6 +406,29 @@ void PollLoop() {
       std::string reason;
       if (dshwork::HttpGetJson(endpoint, L"/dsh-work/api/state", body, reason)) {
         model = dshwork::ModelFromDoc(body);
+        // 事件流和状态同一次轮询：都是读宿主，分两次请求会让两屏数据不同步
+        {
+          std::string feed_body;
+          std::string feed_reason;
+          if (dshwork::HttpGetJson(endpoint, L"/dsh-work/api/feed?limit=3", feed_body, feed_reason)) {
+            dshwork::JValue feed_root;
+            if (dshwork::ParseJson(feed_body, feed_root)) {
+              const dshwork::JValue* items = feed_root.Get("items");
+              model.feed.clear();
+              if (items != nullptr && items->IsArray()) {
+                for (const dshwork::JValue& one : items->array) {
+                  const dshwork::JValue* at = one.Get("at");
+                  const dshwork::JValue* verb = one.Get("verb");
+                  const dshwork::JValue* text = one.Get("text");
+                  if (at == nullptr || verb == nullptr || text == nullptr) continue;
+                  std::wstring row = dshwork::Widen(at->text) + L"  " + dshwork::Widen(verb->text) + L" · " +
+                                     dshwork::Widen(text->text);
+                  model.feed.push_back(row);
+                }
+              }
+            }
+          }
+        }
         if (model.state != dshwork::WorkModel::State::Online) {
           model.state = dshwork::WorkModel::State::Offline;
           model.note = "状态文档解析失败";
@@ -1414,6 +1437,10 @@ void RepaintPanel() {
   dshwork::ui::DrawPanel(g_target, model, g_focus, g_panelScale, formats,
                          static_cast<float>(px_w) / g_panelScale, static_cast<float>(px_h) / g_panelScale,
                          PanelContentAlpha(), PanelZoom(), ai_running, GetTickCount64());
+  if (model.feed.empty() == false) {
+    dshwork::ui::DrawFeed(g_target, model, formats, g_panelScale, static_cast<float>(px_w) / g_panelScale,
+                         static_cast<float>(px_h) / g_panelScale, PanelContentAlpha());
+  }
   const HRESULT draw_result = g_target->EndDraw();
   if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
 

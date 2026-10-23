@@ -320,6 +320,17 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   const float h = dip_h * scale;
   // 收起来时高度接近药丸，圆角跟着收到一半高，才是一条胶囊
   const float half = h / 2.0f;
+  // 事件流：贴在底边上方一行。没有事件就不占位，避免空面板出现一条莫名留白。
+  if (model.feed.empty() == false) {
+    const float feed_y = h - 30.0f * scale;
+    target->PushAxisAlignedClip(D2D1::RectF(20.0f * scale, feed_y, w - 20.0f * scale, h - 8.0f * scale),
+                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    Text(target, model.feed.front(), fmt.meta,
+         D2D1::RectF(20.0f * scale, feed_y, w - 20.0f * scale, h - 8.0f * scale), fmt.brush,
+         Fade(0x9AA0A6, alpha * 0.72f));
+    target->PopAxisAlignedClip();
+  }
+
   const float radius = half < 26.0f * scale ? half : 26.0f * scale;
 
   for (int i = 5; i >= 1; --i) {
@@ -512,6 +523,24 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
     DrawAiFrame(target, fmt, dip_w, dip_h, ring_radius, now_ms, alpha);
     target->SetTransform(D2D1::Matrix3x2F::Identity());
   }
+}
+
+
+/**
+ * 事件流那一行：单独一个函数，由调用方在 DrawPanel 之后画。
+ *
+ * 为什么不做进 DrawPanel：面板是先铺底再画内容，插在函数开头会被底盖住；
+ * 单独画一层最省事，也不影响 DrawPanel 内部的层级。
+ */
+inline void DrawFeed(ID2D1RenderTarget* target, const WorkModel& model, const PanelFormats& fmt,
+                     float scale, float dip_w, float dip_h, float alpha) {
+  if (model.feed.empty()) return;
+  const float w = dip_w * scale;
+  const float h = dip_h * scale;
+  const D2D1_RECT_F box = D2D1::RectF(20.0f * scale, h - 30.0f * scale, w - 20.0f * scale, h - 8.0f * scale);
+  target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+  Text(target, model.feed.front(), fmt.meta, box, fmt.brush, Fade(0x9AA0A6, alpha * 0.72f));
+  target->PopAxisAlignedClip();
 }
 
 }  // namespace ui
