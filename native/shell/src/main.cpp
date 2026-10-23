@@ -1346,10 +1346,17 @@ constexpr wchar_t kReviewClass[] = L"DSHWorkNativeReview";
 constexpr float kReviewMargin = 16.0f;
 constexpr float kReviewMinWidth = 640.0f;
 
+// 审阅窗此刻在哪块屏上：开着就认它自己（换屏之后要跟着变），还没开就退回小条
+// 那块 —— 那是它马上就要被摆上去的屏。
+HMONITOR ReviewMonitor() {
+  if (g_review != nullptr && g_review_open) return MonitorFromWindow(g_review, MONITOR_DEFAULTTONEAREST);
+  return MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
+}
+
 float ReviewAvailWidthDip() {
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
+  GetMonitorInfoW(ReviewMonitor(), &info);
   const float scale = g_dpiScale > 0.1f ? g_dpiScale : 1.0f;
   float avail = static_cast<float>(info.rcWork.right - info.rcWork.left) / scale - kReviewMargin * 2.0f;
   if (avail < kReviewMinWidth) avail = kReviewMinWidth;
@@ -1456,12 +1463,53 @@ void LayoutReview() {
   const float height_dip = dshwork::review::WindowHeight(g_review_model);
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
+  GetMonitorInfoW(ReviewMonitor(), &info);
   const int px_w = static_cast<int>(width_dip * g_dpiScale);
   const int px_h = static_cast<int>(height_dip * g_dpiScale);
-  const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
-  const int y = info.rcWork.top + static_cast<int>(96 * g_dpiScale);
+  RECT now = {};
+  const bool keep_place = g_review_open && GetWindowRect(g_review, &now) && now.right > now.left;
+  int x = 0;
+  int y = 0;
+  if (keep_place) {
+    // 已经开着 = 内容变了（展开一层、弹讲解卡）：只改尺寸，位置原地。
+    // 每次都重新居中会让窗口在展开时整块跳一下，看起来像闪断。
+    x = now.left;
+    y = now.top;
+  } else {
+    x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
+    y = info.rcWork.top + static_cast<int>(96 * g_dpiScale);
+  }
+  // 夹回这块屏的工作区：长高之后尾巴别沉到屏幕外面去。
+  if (x + px_w > info.rcWork.right) x = info.rcWork.right - px_w;
+  if (x < info.rcWork.left) x = info.rcWork.left;
+  if (y + px_h > info.rcWork.bottom) y = info.rcWork.bottom - px_h;
+  if (y < info.rcWork.top) y = info.rcWork.top;
   SetWindowPos(g_review, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
+}
+
+/**
+ * 窗口被挪到另一块屏（或插拔显示器、改分辨率）之后，重新量一次可用宽度。
+ *
+ * 可用宽只在开窗那一刻算过一次，之后换屏还拿着老屏的数：宽屏上开完再换到窄屏，
+ * 右边那一截永远在屏幕外；反过来窄屏换宽屏，又白白空着一条。
+ * 这里只在"这块屏能给多宽"真的变了时才动窗口 —— 没变就一个像素都不碰，
+ * 免得和动画、中键拖动打架。
+ */
+void RefitReviewToMonitor() {
+  if (g_review == nullptr || !g_review_open) return;
+  static bool refitting = false;  // LayoutReview 里的 SetWindowPos 会再发一次 WM_WINDOWPOSCHANGED
+  if (refitting) return;
+  const float avail = ReviewAvailWidthDip();
+  if (avail == g_review_model.avail_w) return;
+  refitting = true;
+  LayoutReview();
+  refitting = false;
+  // 换屏之后旧的平移/缩放是按老屏算的：重新适配一次，别让内容贴着右边被截掉。
+  dshwork::review::Layout(g_review_model);
+  dshwork::review::FitView(g_review_model);
+  dshwork::review::ClampPan(g_review_model);
+  RepaintReview();
+  LogToFile("审阅：换屏后按新工作区重排，可用宽=" + std::to_string(static_cast<int>(avail)));
 }
 
 void RepaintReview() {
@@ -1582,6 +1630,11 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         break;
     }
     return 0;
+  }
+  if (message == WM_WINDOWPOSCHANGED || message == WM_DISPLAYCHANGE) {
+    // 换屏 / 分辨率变了：可用宽跟着窗口所在的那块屏重算（没变就什么都不做）。
+    RefitReviewToMonitor();
+    return DefWindowProcW(window, message, wparam, lparam);
   }
   if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && g_review_open) {
     // 指针落在能点的地方才变手型：「讲讲它」和右下角那颗「知道了」。

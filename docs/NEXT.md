@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-23 · 审阅窗跟着窗口所在的那块屏算宽度（N-5）：原来 `ReviewAvailWidthDip` / `LayoutReview` 都拿**小条**那块屏（`MonitorFromWindow(g_window, …)`）并且只在开窗那一刻算一次，换屏之后还拿着老屏的数——宽屏上开完挪到窄屏，右边那一截永远在屏幕外。改成三处：① 新增 `ReviewMonitor()`，开着就用审阅窗自己的显示器、没开才退回小条那块；② `LayoutReview` 开着时**只改尺寸、位置原地**（原来每次内容变化都重新居中，换屏后一展开节点就整块跳回小条那块屏），并把窗口夹回工作区；③ 新增 `RefitReviewToMonitor()`，在 `ReviewProc` 收到 `WM_WINDOWPOSCHANGED` / `WM_DISPLAYCHANGE` 时重算，**可用宽真变了才动窗口**，变了就 `Layout` + `FitView`（旧平移是按老屏算的）+ 重画并落一行日志。真窗口验过：窗口被挪到 x=1140 后 → 假工作区 1100 DIP 生效 → 窗口自动缩到 1650×390 物理、内容重新居中、日志「审阅：换屏后按新工作区重排，可用宽=1100」；可用宽没变时挪窗不重排，之后按 Enter 展开时窗口原地长高不跳回居中
 - 2026-10-23 · 审阅窗「刚打开按 Enter 没反应」修掉（`a687996`）：`BuildReviewModel` 只夹选中项上界，而重建前没有行被选过、`selected` 是 −1，`ReviewExpandSelected` 直接静默 return，底栏却写着「Enter 展开/收起」；改成三支（空图 −1 / 越界或负数回 0），打开即可展开。顺手去掉 `kMsgReview case 1` 拿到新草稿后「按同索引再插一次 expanded 并重拉」的重建（行序已变，会摊开无关节点；pending 早就开过刚拆的那颗），改成只重新自适应视野；早退路径补日志。真窗口验过：打开后单发 Enter → 日志「审阅：本地展开 nd_a」、徽标「+2」→「−2」；没有子节点的行 Enter → 宿主 expand → 草稿模式按 pending 展开、视野重新适配。**改前先证伪了接力板上的 N-4 假设**：`has_children` 全仓只有 `BuildReviewModel` 一处赋值，doc / draft 两条路径的徽标在真窗口里都正常，「展开后徽标消失」当前代码复现不出（见 N-4 段）
 - 2026-10-23 · 玻璃条加「打开节点图」第二入口（`e1f8191`）：用户原话「在dsh界面装个打开的按钮 不然不知道怎么打开」，而 `target:"graph"` 通道早就通了、只缺 UI。在「打开面板」右侧加一枚描边 ghost 按钮（图标＝两颗上游圆＋一颗下游圆），点一下直接开只读节点图；没有任务树/状态未到时置灰并把原因写进 title（原生 `ShowReviewDoc` 对空 doc 是静默 `return`，点了会像没反应）。两个入口共用 `openCompanion(target)`，四档反馈文案抽进 `packages/plugin/src/client/open-entry.ts`（6 个单测）。真机 1.5x：click 后 1.2s 小条浮出「节点图已打开」、伴随层被顺手拉起、审阅窗 2400×390 物理自动弹前台
 - 2026-10-23 · 节点图上概念节点有了「讲讲它」入口：右下角原来的「学」换成可点 pill，点了先出「正在讲…」，模型讲完把正文 + 练习提示落成图区底部的卡片（Esc / 点空白收起，再点一颗换内容，窗口随卡片长高不盖节点）。宿主 `/api/learn` 回包补了 `view`（标题/正文/提示/是否支持），失败按「宿主没这个接口 / 没这个节点 / 模型没答上来 / 连不上宿主」分四档写清，没有接口时按钮置灰且不再发请求。顺手修了一处真 bug：审阅窗按键被 `WM_KEYDOWN` 与定时器轮询各投一遍，一次 Esc 会先收卡再收窗（240Hz 下两遍间隔 < 60ms），改成同键 220ms 去重（`8fb316f`）。真机 1.5x：点第 7 颗 6s 出卡（物理 2400×390 → 2400×522）、点卡外收起回 390、Esc 后窗口仍在（修复前 `vis=False`）
@@ -85,7 +86,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。交接入口已通：玻璃条上的「打开面板」（`eed4aed`）与「打开节点图」（`e1f8191`）。N-4 已处理完（复现不出去、修掉了这条线上真机上真正按不动的那处，见下面 N-4 段）。**当前任务 = N-5：多显示器时 `avail_w` 跟着窗口所在屏变**。
+- 阶段：**P2 · AI 在环**。交接入口已通：玻璃条上的「打开面板」（`eed4aed`）与「打开节点图」（`e1f8191`）。N-4 / N-5 都已处理完（N-4 复现不出去、修掉了这条线上真机真正按不动的那处；N-5 让可用宽跟窗口所在屏走，见下面 N-4 / N-5 段）。**当前任务 = N-6：托盘与退出入口**（现在只能 `Stop-Process -Name dshwork-shell`，用户没法「关掉这个程序」）。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
 ### N-1 节点图：连线从斜切贝塞尔改成直角折线 —— ✅ 已交付（`eba985a`）
@@ -179,14 +180,33 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 **留下的**：徽标请在真机（1600 DIP、7 颗一长条）上再瞄一眼，若还能复现就新开一轮带截图。探针设施留在仓库外 `D:\work\AI\work\dshwork-probe\`（`shim.mjs` 假宿主 + `shot.ps1` 按 pid 截真窗口、可投键），下轮验原生界面直接复用。
 
+### N-5 多显示器时可用宽跟着窗口所在屏变 —— ✅ 已交付
+
+**为什么**：N-2 留下的问题。`avail_w` 只在开窗那一刻按**小条**那块屏算一次；审阅窗换到另一块屏后还拿着老屏的数——宽屏上开完再换窄屏，右边那一截永远在屏幕外；窄屏换宽屏又白白空一条。`LayoutReview` 还每次都按小条那块屏重新居中，换屏后一展开节点就整块跳回去。
+
+**做法**（全部在 `native/shell/src/main.cpp`，只碰这一处原生）
+- `ReviewMonitor()`：开着就 `MonitorFromWindow(g_review, MONITOR_DEFAULTTONEAREST)`，还没开才退回小条那块（那是它马上要被摆上去的屏）。`ReviewAvailWidthDip()` / `LayoutReview()` 都改用这个。
+- `LayoutReview()`：开着时**只改尺寸、位置原地**（原来无条件重新居中）；任何方向都夹回当前屏工作区，长高之后尾巴不会沉到屏幕外。
+- `RefitReviewToMonitor()`：`ReviewProc` 收到 `WM_WINDOWPOSCHANGED` / `WM_DISPLAYCHANGE` 就重算一次；**可用宽没变就一个像素都不碰**（免得和动画、中键拖动打架），变了才 `LayoutReview` + `Layout` + `FitView`（旧平移/缩放是按老屏算的）+ `ClampPan` + 重画，并落日志「审阅：换屏后按新工作区重排，可用宽=N」。用静态 `refitting` 挡住自身 `SetWindowPos` 引起的重入。
+
+**验收**（真窗口，1.5x DPI；本机**只有一块屏**，所以用一个临时补丁模拟窄屏）
+- [x] 默认打开：2400×390 物理 = 1600×260 DIP、位置 (720,144) 物理，内容与 N-4 一致（无回归）
+- [x] 挪窗后可用宽变了：假工作区 1100 DIP → 窗口自动缩到 1650×390 物理、内容重新居中不被截断、日志出现「可用宽=1100」
+- [x] 可用宽没变时挪窗不重排；挪完按 Enter 展开：窗口原地从 390 长到 441 物理，x/y 不动（改前会跳回居中位）
+- [x] 临时补丁已删、重新 `node scripts/build-native.mjs dshwork-shell` 出的就是仓库里那份
+- [x] `pnpm test` 115 绿、`pnpm typecheck` 干净
+
+**留下的**：① 审阅窗**拖不动**（`WS_POPUP` 无标题栏、`ReviewProc` 没有 `WM_NCHITTEST`），「换屏」目前只能靠系统/`SetWindowPos` 发生——要不要支持按住标题栏拖动见「等用户决定」；② 跨 DPI 的屏之间 `g_dpiScale` 仍是全局一个值（进程虽是 PER_MONITOR_AWARE_V2，但绘制/尺寸都读全局 scale），换到 125%/200% 的屏上字号与尺寸会不匹配——要单独一轮把 scale 改成按窗口取。
+
 ---
 
 ## 队列（做完一个换一个，不要并行）
 
-- 多显示器时 `avail_w` 不跟着窗口所在屏变（只在弹窗时算一次）—— **当前任务 = N-5**
-- 托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）
+- 托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）—— **当前任务 = N-6**
+- 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
+- 跨 DPI 屏：`g_dpiScale` 还是全局一个值，换到 125%/200% 的屏上字号与尺寸都不匹配（N-5 留下的）
 - 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条）上再看一眼；能复现就新开一轮、带截图与日志
-- 已交付：N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
+- 已交付：N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
@@ -194,6 +214,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 - `kMinFitZoom` 那句「自动适配也不缩小」目前是死的（见「已知的坑」）。恢复它 = 窄窗口里字不再被缩小、内容超出就靠人拖/滚；不恢复 = 现在这样自动缩到装下。要不要恢复？先不动，N-2 加宽只是让它不那么常触发。
 - **「讲讲它」的讲解会覆盖节点原有的 `advice`**（宿主 `learn` 直接 `node.advise` 落库，这是它有意的设计：面板本来就渲染这个字段）。要不要给讲解单独一个字段、与「建议」并存？先不动，等你拍。
+- **审阅窗现在拖不动**（`WS_POPUP` 无标题栏、没有 `WM_NCHITTEST`）：多显示器上想把它放到另一块屏，目前只能靠系统（或等 N-5 的换屏重排在别处触发）。要不要支持「按住标题栏拖动」？先不动，等你拍；加的话是新增手势（顺便得决定拖到边上要不要吸附）。
 
 ---
 ## 硬约束（每一轮都必须遵守）
@@ -256,6 +277,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **Playwright 探针取提示胶囊要取全部 `[aria-live="polite"]`**：玻璃条标题也是 `role=status aria-live=polite`，`querySelector` 只拿得到第一个（标题），提示胶囊是第二个、2.8s 后自己消失；`querySelectorAll` 再挑最后一句才靠得住。
 - **编译出来的 exe 突然"读不了也起不来"时，别在 ACL / 占用上死磕**（2026-10-23 踩了一小时）：`node scripts/build-native.mjs dshwork-shell` 报成功后，`[IO.File]::ReadAllBytes` / `certutil -hashfile` / `Start-Process` 一律 `拒绝访问`（`ERROR_ACCESS_DENIED`），而 `icacls` 干净（无 DENY）、文件**删得掉**、同目录里复制进来的 `whoami.exe` 能读能跑、Defender 报 `AntivirusEnabled=False`。对照实验：同一份源码换 `/W0 /Od` 编到 `D:\work\AI\work\dshwork-probe\shell-t3.exe` → 读、启动都正常；`/O2` 编到任何路径、任何名字都被挡（把 hello.exe 改名成 `native\shell\build\dshwork-shell.exe` 也会被挡）。结论：**本机那个安全策略按产物哈希/内容拦，不是我们的代码、不是 ACL、不是占用**。办法：另编一份 `/Od` 的探针件来真机验证界面（同源码只差优化等级），仓库里照旧留 `build-native.mjs` 的产物；别为了这个改构建参数提交。
 - **`job_kill` / `Stop-Job` 杀掉 pwsh 后台作业不会带走它起的 `node` 子进程**：探针 shim 重启时必报 `EADDRINUSE 127.0.0.1:64077`，原生日志只写「轮询失败：请求失败」（很容易误判成协议不对）。先 `Get-NetTCPConnection -LocalPort 64077 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }` 再起。
+- **本机只有一块屏（2560×1392 DIP），验「换屏跟宽」必须临时伪造**：在 `ReviewAvailWidthDip()` 里按窗口位置返回一个更窄的值（例如窗口 `left / scale > 700` 时 `avail = 1100`），编到仓库外的一份探针件（改 `build.bat` 的 `/OUT` 即可），真机上 `SetWindowPos` 挪窗 → 看窗口自动缩窄 + 日志。**验完把补丁删干净再重编仓库那份**——`git diff` 里出现 `TEMP` 就是没删。
+- **同一个 `build-native.mjs` 产物这次又能读、能起了**：上一条说的「按哈希拦」是**逐产物、且会变**的（这一轮的 567808 B 就正常）。所以别为它改构建参数；被拦时换一份 `/Od` 探针件验证界面，然后照常 `git` 提交源文件。
+- **审阅窗的尺寸变化只走 `LayoutReview()`**（里面有 `SetWindowPos`）：新增「让窗口长高/变宽」的代码时别再手写一份 `SetWindowPos`，否则「开着时保持位置」「夹回工作区」两条规则会被绕过。`RefitReviewToMonitor()` 就是靠 `avail` 比较 + `refitting` 静态标志防重入的。
 
 ---
 
