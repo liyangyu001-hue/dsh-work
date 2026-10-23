@@ -353,6 +353,7 @@ void DispatchKey(int action);
 void TogglePanel();
 void UpdateHover();
 void ShowTrayMenu();
+void RemoveTrayIcon();
 void Repaint();
 void StartRegionCapture();
 void ArmHoverTab();
@@ -1107,15 +1108,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       Repaint();
       return 0;
     case WM_DESTROY: {
-      NOTIFYICONDATAW data = {};
-      data.cbSize = sizeof(data);
-      data.hWnd = g_window;
-      data.uID = kTrayIconId;
-      Shell_NotifyIconW(NIM_DELETE, &data);
+      RemoveTrayIcon();
       UnregisterHotKey(g_window, kHotkeyId);
       PostQuitMessage(0);
       return 0;
     }
+    case WM_CLOSE:
+      DestroyWindow(window);
+      return 0;
     default:
       return DefWindowProcW(window, message, wparam, lparam);
   }
@@ -2785,8 +2785,17 @@ void CreateTrayIcon() {
   data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   data.uCallbackMessage = kMsgTray;
   data.hIcon = LoadIconW(g_instance, IDI_APPLICATION);
-  wcscpy_s(data.szTip, L"DSH Work");
+  wcscpy_s(data.szTip, L"DSH Work · 左键开面板，右键菜单");
   if (!Shell_NotifyIconW(NIM_ADD, &data)) LogToFile("托盘图标添加失败");
+}
+
+void RemoveTrayIcon() {
+  NOTIFYICONDATAW data = {};
+  data.cbSize = sizeof(data);
+  data.hWnd = g_window;
+  data.uID = kTrayIconId;
+  // 退出前必须显式摘掉：进程结束时系统不一定会替我们清，图标会留成残影
+  Shell_NotifyIconW(NIM_DELETE, &data);
 }
 
 void ShowTrayMenu() {
@@ -2794,16 +2803,19 @@ void ShowTrayMenu() {
   GetCursorPos(&cursor);
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, 1, g_panel_open ? L"收起面板" : L"打开面板");
+  AppendMenuW(menu, MF_STRING, 2, L"打开节点图");
+  AppendMenuW(menu, MF_STRING, 3, L"显示小条");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, 2, L"退出");
+  AppendMenuW(menu, MF_STRING, 4, L"退出 DSH Work");
   SetForegroundWindow(g_window);
   const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, g_window, nullptr);
   DestroyMenu(menu);
   if (command == 1) TogglePanel();
-  if (command == 2) {
-    PostQuitMessage(0);
-    PostMessageW(g_window, WM_CLOSE, 0, 0);
-  }
+  if (command == 2) { ForceForeground(g_window); ShowReviewDoc(); }
+  if (command == 3) { ShowWindow(g_window, SW_SHOWNOACTIVATE); SetTimer(g_window, kHoverTimerId, 120, nullptr); }
+  // 退出走 WM_CLOSE → WM_DESTROY：那条路会摘托盘图标、注销热键、退消息循环。
+  // 直接 PostQuitMessage 会让消息循环先停，WM_DESTROY 根本来不及跑，图标就留在托盘里。
+  if (command == 4) PostMessageW(g_window, WM_CLOSE, 0, 0);
 }
 
 void DispatchKey(int action) {
