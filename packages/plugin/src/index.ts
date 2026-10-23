@@ -396,8 +396,11 @@ export function apply(ctx: any, config?: PluginConfig): void {
   /**
    * 学习模式：讲一个概念。
    *
-   * 与 advise 的区别是"不落库"——讲解是一次性的，属���关掉就该消失的东西，
-   * 写进节点会让任务树变成笔记本。真想留下的话，人自己复制。
+   * 讲什么由宿主这侧（模型）决定，原生只负责显示：返回值里除了 text/alt，
+   * http.ts 还会补一个 view 字段，专门喂节点图上那块讲解卡。
+   *
+   * 讲完把结果挂在节点的 advice 上：面板本来就渲染这个字段，等于免费拿到一栏
+   * 显示位；代价是它会落进 work.json —— 学习痕迹留在节点上其实也合理（下次回看还在）。
    */
   const learn: LearnApi = {
     async request(nodeId) {

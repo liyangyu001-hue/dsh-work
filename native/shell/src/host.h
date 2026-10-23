@@ -183,7 +183,9 @@ inline bool HttpGetJson(const Endpoint& endpoint, const std::wstring& path, std:
  * HttpPostRaw，让调用方各自给类型与数据——重复的 WinHTTP 细节只留一份。
  */
 inline bool HttpPostRaw(const Endpoint& endpoint, const std::wstring& path, const void* data, size_t size,
-                        const std::wstring& content_type, std::string& body, std::string& reason) {
+                        const std::wstring& content_type, std::string& body, std::string& reason,
+                        int receive_ms = 30000, int* out_status = nullptr) {
+  if (out_status != nullptr) *out_status = 0;
   URL_COMPONENTS parts = {};
   parts.dwStructSize = sizeof(parts);
   parts.dwHostNameLength = static_cast<DWORD>(-1);
@@ -204,8 +206,9 @@ inline bool HttpPostRaw(const Endpoint& endpoint, const std::wstring& path, cons
     reason = "WinHttpOpen 失败";
     return false;
   }
-  // 识别要等模型，给的比轮询宽：连接 3s、发送 10s、接收 30s。
-  WinHttpSetTimeouts(session, 3000, 3000, 10000, 30000);
+  // 识别要等模型，给的比轮询宽：连接 3s、发送 10s、接收按调用方给的来。
+  // 讲解（/api/learn）也走这条：模型讲一段要几十秒，30s 会掐在最后几秒。
+  WinHttpSetTimeouts(session, 3000, 3000, 10000, receive_ms);
 
   bool ok = false;
   HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
@@ -235,6 +238,7 @@ inline bool HttpPostRaw(const Endpoint& endpoint, const std::wstring& path, cons
           body += chunk;
         }
         ok = status >= 200 && status < 300;
+        if (out_status != nullptr) *out_status = static_cast<int>(status);
         if (!ok) reason = "HTTP " + std::to_string(status) + " " + body;
       } else {
         reason = "请求失败";
@@ -252,10 +256,15 @@ inline bool HttpPostRaw(const Endpoint& endpoint, const std::wstring& path, cons
 /**
  * 提交一条意图（POST /api/intent）。这是原生层唯一会"改状态"的动作，
  * 而且它不碰本地状态——状态永远以宿主下一次返回的文档为准。
+ *
+ * receive_ms / out_status 是给「等模型」的那几条路（讲解）加的：HTTP 错误码
+ * 也是信息（503 表示宿主没接模型），不能只留一句拼好的 reason 去猜。
  */
 inline bool HttpPostJson(const Endpoint& endpoint, const std::wstring& path, const std::string& payload,
-                         std::string& body, std::string& reason) {
-  return HttpPostRaw(endpoint, path, payload.data(), payload.size(), L"application/json", body, reason);
+                         std::string& body, std::string& reason, int receive_ms = 30000,
+                         int* out_status = nullptr) {
+  return HttpPostRaw(endpoint, path, payload.data(), payload.size(), L"application/json", body, reason, receive_ms,
+                     out_status);
 }
 
 /** 提交一张 PNG（POST /api/recognize）。宿主收下就返回 202 + jobId。 */

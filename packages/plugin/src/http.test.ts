@@ -14,7 +14,7 @@ import test from 'node:test';
 import type { ApplyResult, WorkDoc } from '@dshwork/core';
 
 import { createHttpHandler } from './http.ts';
-import type { RecognizeApi, RecognizeJobView, WorkRuntime } from './http.ts';
+import type { LearnApi, RecognizeApi, RecognizeJobView, WorkRuntime } from './http.ts';
 import { createUiBridge } from './ui-open.ts';
 import type { UiBridge } from './ui-open.ts';
 
@@ -45,6 +45,7 @@ async function start(options: {
   recognize?: RecognizeApi;
   authorize?: () => number | null;
   ui?: UiBridge;
+  learn?: LearnApi;
 }): Promise<Harness> {
   const runtime: WorkRuntime = {
     version: '0.0.0-test',
@@ -58,6 +59,7 @@ async function start(options: {
     ...(options.authorize === undefined ? {} : { authorize: options.authorize }),
     ...(options.recognize === undefined ? {} : { recognize: options.recognize }),
     ...(options.ui === undefined ? {} : { ui: options.ui }),
+    ...(options.learn === undefined ? {} : { learn: options.learn }),
   });
 
   const server: Server = createServer(created.handler);
@@ -290,5 +292,81 @@ test('打开面板：没注入桥时 503，GET 405，state 的 ui 为 null', asy
     assert.equal(wrongMethod.status, 405);
   } finally {
     await withUi.close();
+  }
+});
+test('讲解：200 时同时给 text/alt 和卡片要的 view', async () => {
+  const learn: LearnApi = {
+    async request(nodeId) {
+      assert.equal(nodeId, 'n1');
+      return { ok: true, text: '**幂等**：重发一次也不变。', alt: '把 `POST` 发两遍' };
+    },
+  };
+  const h = await start({ learn });
+  try {
+    const res = await fetch(`${h.base}/api/learn`, { method: 'POST', body: JSON.stringify({ nodeId: 'n1' }) });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      text: string;
+      alt?: string;
+      view: { phase: string; title: string; text: string; hint: string; unsupported: boolean };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.alt, '把 `POST` 发两遍');
+    assert.equal(body.view.phase, 'done');
+    assert.equal(body.view.text, '幂等：重发一次也不变。');
+    assert.equal(body.view.hint, '试一下：把 POST 发两遍');
+    assert.equal(body.view.unsupported, false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('讲解：失败按状态码回可读文案，不把卡片留给空白', async () => {
+  const cases: { status: number; reason: string; title: string }[] = [
+    { status: 404, reason: '没有这个节点', title: '这颗节点不在了' },
+    { status: 503, reason: '宿主没有提供 llm 服务', title: '宿主没接模型' },
+    { status: 500, reason: '模型超时', title: '讲的时候出错了' },
+  ];
+  for (const item of cases) {
+    const h = await start({
+      learn: {
+        async request() {
+          return { ok: false as const, status: item.status, reason: item.reason };
+        },
+      },
+    });
+    try {
+      const res = await fetch(`${h.base}/api/learn`, { method: 'POST', body: JSON.stringify({ nodeId: 'n1' }) });
+      assert.equal(res.status, item.status);
+      const body = (await res.json()) as {
+        ok: boolean;
+        error: string;
+        view: { phase: string; title: string; text: string; hint: string; unsupported: boolean };
+      };
+      assert.equal(body.ok, false);
+      // error 保持原样给机器看，view 是给人看的：两层不能混。
+      assert.equal(body.error, item.reason);
+      assert.equal(body.view.phase, 'error');
+      assert.equal(body.view.title, item.title);
+      assert.equal(body.view.text, item.reason);
+      assert.notEqual(body.view.hint.trim(), '');
+      assert.equal(body.view.unsupported, false);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test('讲解：GET 405，且明确告诉原生「这个宿主没有这条路」', async () => {
+  const h = await start({});
+  try {
+    const wrong = await fetch(`${h.base}/api/learn`);
+    assert.equal(wrong.status, 405);
+    const body = (await wrong.json()) as { ok: boolean; view: { unsupported: boolean } };
+    assert.equal(body.ok, false);
+    assert.equal(body.view.unsupported, true);
+  } finally {
+    await h.close();
   }
 });

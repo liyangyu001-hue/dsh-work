@@ -60,6 +60,15 @@ struct Model {
   // 免得整条冲出屏幕。由 main.cpp 在排版前按 rcWork 填。
   float avail_w = 0.0f;
 
+  // 「讲讲它」：概念节点右下角那颗按钮 + 它下面浮出来的讲解卡。
+  // 卡片内容由宿主给（/api/learn 的 view 字段），这里只存要画的三行字。
+  std::string lesson_node;      // 正在讲的是哪一颗（id）；空 = 没开过
+  int lesson_phase = 0;         // 0 没开 · 1 正在讲 · 2 讲完了 · 3 没讲成
+  std::string lesson_title;     // 卡片标题（「讲讲它」/「这颗节点不在了」…）
+  std::string lesson_text;      // 正文一行
+  std::string lesson_hint;      // 提示：怎么关掉 / 下一步做什么
+  bool lesson_unsupported = false;  // 宿主没有这个接口：按钮置灰，别让人白点
+
   // 每颗节点「第一次被看到」的时刻，用来让新长出来的框错开淡入。
   std::unordered_map<std::string, ULONGLONG> appear;
 };
@@ -68,6 +77,7 @@ struct Anim {
   float open = 1.0f;
   float highlight_y = -1.0f;  // 旧版列表的高亮位置；图模式不再用它，留着接口不折腾调用方
   ULONGLONG now = 0;
+  int hover_row = -1;  // 鼠标停在哪一行上（-1 = 没停）：概念节点据此把「讲讲它」提亮
 };
 
 constexpr float kHeader = 58.0f;
@@ -97,10 +107,24 @@ inline float WindowWidth(const Model& m) {
 // 窗口高度跟着内容长：一层节点就是一条扁条，展开子层再长高。
 // 夹在 [kMinWindowH, kWindowH] 之间：太小放不下页脚，太大就失去浮层的轻快感。
 constexpr float kMinWindowH = 260.0f;
+
+// 「讲讲它」：按钮贴在概念节点右下角内侧，讲解卡浮在图区底部。
+// 两者都占地方：按钮要挤掉第二行标题的右端，卡片要让窗口临时长高。
+constexpr float kLessonChipW = 50.0f;
+constexpr float kLessonChipH = 17.0f;
+constexpr float kLessonChipInset = 8.0f;   // 距节点右/下边
+constexpr float kLessonCardH = 78.0f;
+constexpr float kLessonCardGap = 10.0f;    // 卡片与图区底边的间距
+
+inline bool LessonCardOn(const Model& m) { return m.lesson_phase == 2 || m.lesson_phase == 3; }
+/** 开卡时窗口要长出来的高度：不预留就会把最下面一排节点盖掉。 */
+inline float LessonReserve(const Model& m) { return LessonCardOn(m) ? kLessonCardH + kLessonCardGap : 0.0f; }
+
 inline float WindowHeight(const Model& m) {
   if (m.content_h <= 0.0f) return kWindowH;
-  const float want = kHeader + kFooter + m.content_h + kPad * 2.0f;
-  return want < kMinWindowH ? kMinWindowH : (want > kWindowH ? kWindowH : want);
+  const float min_h = kMinWindowH + LessonReserve(m);
+  const float want = kHeader + kFooter + m.content_h + kPad * 2.0f + LessonReserve(m);
+  return want < min_h ? min_h : (want > kWindowH ? kWindowH : want);
 }
 inline float BodyWidth(const Model& m) { return WindowWidth(m); }
 inline float BodyHeight(const Model& m) { return WindowHeight(m) - kHeader - kFooter; }
@@ -290,6 +314,50 @@ inline bool CommitHit(const Model& model, float x, float y) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
+/**
+ * 「讲讲它」按钮的命中区。
+ *
+ * 用世界坐标算、单独一遍倒序循环：按钮在节点矩形的右下角，和节点本身重叠，
+ * 所以点按钮必须先于「选中这颗节点」判定——不然永远点不中。
+ * 命中区比画出来的框四周各放大 3 DIP：一个 17 DIP 高的小按钮，
+ * 差一个像素就点空，比视觉精确更重要。
+ */
+inline D2D1_RECT_F LessonChipRect(const Row& row) {
+  const float right = row.x + row.w - kLessonChipInset;
+  const float bottom = row.y + row.h - 5.0f;
+  return D2D1::RectF(right - kLessonChipW, bottom - kLessonChipH, right, bottom);
+}
+
+inline int LessonChipAt(const Model& model, float x, float y) {
+  if (!model.fitted) return -1;
+  const float wx = (x - model.pan_x) / model.zoom;
+  const float wy = (y - kHeader - model.pan_y) / model.zoom;
+  for (int i = static_cast<int>(model.rows.size()) - 1; i >= 0; --i) {
+    const Row& row = model.rows[static_cast<size_t>(i)];
+    if (row.kind != "concept") continue;
+    const D2D1_RECT_F chip = LessonChipRect(row);
+    constexpr float kSlop = 3.0f;
+    if (wx >= chip.left - kSlop && wx <= chip.right + kSlop && wy >= chip.top - kSlop &&
+        wy <= chip.bottom + kSlop) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** 讲解卡：图区最下面那一条，左右各让 kPad，压在节点之上。 */
+inline D2D1_RECT_F LessonCardRect(float width_dip, float height_dip) {
+  const float bottom = height_dip - kFooter - kLessonCardGap;
+  return D2D1::RectF(kPad, bottom - kLessonCardH, width_dip - kPad, bottom);
+}
+
+/** 点在这张卡里吗？卡没开时永远 false。 */
+inline bool LessonCardHit(const Model& model, float x, float y) {
+  if (!LessonCardOn(model)) return false;
+  const D2D1_RECT_F card = LessonCardRect(WindowWidth(model), WindowHeight(model));
+  return x >= card.left && x <= card.right && y >= card.top && y <= card.bottom;
+}
+
 
 /** UTF-8 → UTF-16。节点标题从 JSON 进来，窗口这边只认宽字符。 */
 inline std::wstring WidenNode(const std::string& text) {
@@ -301,9 +369,15 @@ inline std::wstring WidenNode(const std::string& text) {
   return out;
 }
 
-/** 一行字放不下就拆成两行：第一行尽量长，第二行给省略号。 */
+/**
+ * 一行字放不下就拆成两行：第一行尽量长，第二行给省略号。
+ *
+ * second_w 是给概念节点留的：右下角那颗「讲讲它」会占掉第二行的右边，
+ * 不给它让位，字就会从按钮底下钻过去。
+ */
 inline void SplitTwoLines(const std::wstring& text, float max_w, float font_dip, std::wstring& line1,
-                          std::wstring& line2) {
+                          std::wstring& line2, float second_w = -1.0f) {
+  const float tail_w = second_w < 0.0f ? max_w : second_w;
   const std::wstring fitted = ui::FitText(text, max_w, font_dip);
   if (fitted.size() >= text.size()) {
     line1 = fitted;
@@ -314,7 +388,7 @@ inline void SplitTwoLines(const std::wstring& text, float max_w, float font_dip,
   if (cut > 0 && fitted[cut - 1] == L'…') --cut;
   if (cut == 0) cut = 1;
   line1 = text.substr(0, cut);
-  line2 = ui::FitText(text.substr(cut), max_w, font_dip);
+  line2 = ui::FitText(text.substr(cut), tail_w, font_dip);
 }
 
 /* ─────────────────────────── 连线的几何 ─────────────────────────── */
@@ -599,8 +673,11 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     std::wstring line1;
     std::wstring line2;
+    const bool concept = row.kind == "concept";
     const float text_w = row.w - 44.0f - (row.child_count > 0 ? 40.0f : 0.0f);
-    SplitTwoLines(WidenNode(row.title), text_w, 16.0f, line1, line2);
+    // 概念节点的第二行要给右下角的「讲讲它」让位，否则最后几个字会压在按钮底下。
+    const float tail_w = concept ? text_w - (kLessonChipW + 8.0f) : text_w;
+    SplitTwoLines(WidenNode(row.title), text_w, 16.0f, line1, line2, tail_w);
     ui::Text(target, line1, fmt.node, D2D1::RectF(row.x + 28.0f, row.y + 7.0f, row.x + row.w - (row.child_count > 0 ? 58.0f : 14.0f), row.y + 31.0f),
              fmt.brush, ui::Fade(ui::kText, a));
     if (!line2.empty()) {
@@ -620,12 +697,34 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
       ui::Text(target, badge, fmt.meta, D2D1::RectF(chip.left + 6.0f, chip.top + 1.0f, chip.right, chip.bottom),
                fmt.brush, row.expanded ? ui::Fade(ui::kAccent, a) : ui::Fade(ui::kTextDim, a));
     }
-    // 概念节点：右下角一个极小的「学」字。
-    // 不换配色（紫色试过，落在冷灰底上更脏），只加一个字，靠形状区分「要动手」和「要懂」。
-    if (row.kind == "concept") {
-      const D2D1_RECT_F tag = D2D1::RectF(row.x + row.w - 28.0f, row.y + row.h - 22.0f, row.x + row.w - 8.0f,
-                                         row.y + row.h - 5.0f);
-      ui::Text(target, L"学", fmt.meta, tag, fmt.brush, ui::Fade(ui::kAccent, 0.85f * a));
+    // 概念节点：右下角一颗「讲讲它」。
+    // 之前这里只有一个「学」字——看得出来是概念，但没有一个地方能点，
+    // 用户原话是「不然不知道怎么打开」。现在它是一颗真的按钮：
+    // 悬停提亮、正在讲时换字、宿主没有这个接口时置灰（不装成能用）。
+    if (concept) {
+      const bool busy = model.lesson_phase == 1 && model.lesson_node == row.id;
+      const bool hot = static_cast<int>(i) == anim.hover_row;
+      const bool ready = !model.lesson_unsupported;
+      const D2D1_RECT_F lesson_pill = LessonChipRect(row);
+      const float radius = kLessonChipH * 0.5f;
+      UINT32 pill_fill = 0x240A84FF;
+      float edge = 0.45f;
+      if (!ready) {
+        pill_fill = 0x12FFFFFF;
+        edge = 0.16f;
+      } else if (busy) {
+        pill_fill = 0x330A84FF;
+        edge = 0.85f;
+      } else if (hot) {
+        pill_fill = 0x3A0A84FF;
+        edge = 0.75f;
+      }
+      ui::FillRound(target, fmt.brush, lesson_pill, radius, ui::Fade(pill_fill, a));
+      ui::StrokeRound(target, fmt.brush, lesson_pill, radius,
+                      ui::Fade(ready ? ui::kAccent : 0xFFFFFFFF, edge * a), 0.7f);
+      const std::wstring label = !ready ? L"讲不了" : (busy ? L"讲解中" : L"讲讲它");
+      const UINT32 ink = !ready ? ui::kTextDim : ((busy || hot) ? 0xFFFFFFFF : ui::kAccent);
+      ui::TextCentered(target, label, fmt.meta, lesson_pill, fmt.brush, ui::Fade(ink, a));
     }
     target->PopAxisAlignedClip();
   }
@@ -633,15 +732,51 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   target->PopAxisAlignedClip();
   target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 
+  // ---- 讲解卡 ----
+  //
+  // 讲的内容是宿主的模型现写的，长度不可控，所以它是"浮"在图区底部的一条，
+  // 而不是长在节点里：关掉之后节点还是原来那个样子。
+  if (LessonCardOn(model)) {
+    const bool failed = model.lesson_phase == 3;
+    const D2D1_RECT_F card = LessonCardRect(width_dip, height_dip);
+    ui::FillRound(target, fmt.brush, card, 14.0f, ui::Fade(0xF21B1D24, a));
+    ui::StrokeRound(target, fmt.brush, card, 14.0f, ui::Fade(failed ? 0xFFFF9F0A : ui::kAccent, 0.45f * a), 1.0f);
+
+    const float inner_l = card.left + 16.0f;
+    const float inner_r = card.right - 16.0f;
+    fmt.brush->SetColor(ui::Color(ui::Fade(failed ? 0xFFFF9F0A : 0xFF30D158, a)));
+    target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(inner_l + 4.0f, card.top + 16.0f), 3.5f, 3.5f), fmt.brush);
+    ui::Text(target, ui::FitText(WidenNode(model.lesson_title), inner_r - inner_l - 110.0f, 10.5f), fmt.meta,
+             D2D1::RectF(inner_l + 14.0f, card.top + 7.0f, inner_r - 90.0f, card.top + 25.0f), fmt.brush,
+             ui::Fade(failed ? 0xFFFFB340 : ui::kAccent, a));
+    ui::Text(target, L"Esc 关掉 · 点空白处也行", fmt.meta,
+             D2D1::RectF(inner_r - 200.0f, card.top + 7.0f, inner_r, card.top + 25.0f), fmt.brush,
+             ui::Fade(ui::kTextDim, a));
+    ui::Text(target, ui::FitText(WidenNode(model.lesson_text), inner_r - inner_l, 13.0f), fmt.body,
+             D2D1::RectF(inner_l, card.top + 27.0f, inner_r, card.top + 50.0f), fmt.brush, ui::Fade(ui::kText, a));
+    ui::Text(target, ui::FitText(WidenNode(model.lesson_hint), inner_r - inner_l, 10.5f), fmt.meta,
+             D2D1::RectF(inner_l, card.top + 52.0f, inner_r, card.top + 71.0f), fmt.brush,
+             ui::Fade(ui::kTextDim, a));
+  }
+
   // ---- 页脚 ----
   ui::StrokeRound(target, fmt.brush,
                   D2D1::RectF(kPad, height_dip - kFooter + 6.0f, width_dip - kPad, height_dip - kFooter + 6.5f),
                   0.0f, ui::Fade(0xFFFFFFFF, 0.06f * a), 0.5f);
-  const std::wstring hint =
-      model.busy ? model.busy_text
-                 : (model.read_only
-                        ? L"↑↓ 选 · Enter 展开/收起 · 双击 设为当前 · 拖空白平移 · 滚轮缩放 · Esc 关闭"
-                        : L"↑↓ 选 · Enter 再拆一层 · 拖空白平移 · 滚轮缩放 · Ctrl+Enter 就这样 · Esc 不要了");
+  // 页脚一行话：平时教人怎么用（「讲讲它」必须在这里露一次脸，否则没人知道能点），
+  // 卡开着时换成怎么关掉，忙的时候显示进度。
+  std::wstring hint;
+  if (model.busy) {
+    hint = model.busy_text;
+  } else if (LessonCardOn(model)) {
+    hint = L"讲解开着 · Esc 关掉 · ↑↓ 换一颗 · 拖空白平移 · 滚轮缩放";
+  } else if (model.lesson_phase == 1) {
+    hint = L"正在讲…（一颗概念节点讲一段，讲完会浮在这下面）· Esc 关掉";
+  } else if (model.read_only) {
+    hint = L"↑↓ 选 · Enter 展开/收起 · 点概念节点「讲讲它」听讲解 · 拖空白平移 · Esc 关闭";
+  } else {
+    hint = L"↑↓ 选 · Enter 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
+  }
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
            fmt.brush, ui::Fade(ui::kTextDim, a));

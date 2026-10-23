@@ -27,6 +27,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 
+import { lessonFailure, lessonSuccess } from './lesson.ts';
 import type { UiBridge, UiOpenTarget } from './ui-open.ts';
 
 export const ROUTE_PREFIX = '/dsh-work';
@@ -279,27 +280,51 @@ export function createHttpHandler(options: HttpOptions) {
       return;
     }
     if (pathname === '/api/learn') {
+      // 讲解这条路原生的节点图会直接调，所以它比别的路由多带一个 view：
+      // 卡片上的标题/正文/提示都是宿主这边写好的（见 lesson.ts），
+      // 原生只画字。旧宿主没有这个字段，原生据此把「讲讲它」置灰。
       if (req.method !== 'POST') {
-        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        sendJson(res, 405, {
+          ok: false,
+          error: 'method not allowed',
+          view: lessonFailure(405, 'method not allowed'),
+        });
         return;
       }
       if (options.learn === undefined) {
-        sendJson(res, 503, { ok: false, error: '宿主没有提供讲解能力' });
+        sendJson(res, 503, {
+          ok: false,
+          error: '宿主没有提供讲解能力',
+          view: lessonFailure(503, '宿主没有提供讲解能力'),
+        });
         return;
       }
       const body = await readJsonBody(req);
       if (!body.ok) {
-        sendJson(res, body.status, { ok: false, error: body.reason });
+        sendJson(res, body.status, {
+          ok: false,
+          error: body.reason,
+          view: lessonFailure(body.status, body.reason),
+        });
         return;
       }
       const payload = body.value as { nodeId?: unknown };
       const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
       const result = await options.learn.request(nodeId);
       if (!result.ok) {
-        sendJson(res, result.status, { ok: false, error: result.reason });
+        sendJson(res, result.status, {
+          ok: false,
+          error: result.reason,
+          view: lessonFailure(result.status, result.reason),
+        });
         return;
       }
-      sendJson(res, 200, { ok: true, text: result.text, ...(result.alt === undefined ? {} : { alt: result.alt }) });
+      sendJson(res, 200, {
+        ok: true,
+        text: result.text,
+        ...(result.alt === undefined ? {} : { alt: result.alt }),
+        view: lessonSuccess(result.text, result.alt),
+      });
       return;
     }
     if (pathname === '/api/plan-text') {

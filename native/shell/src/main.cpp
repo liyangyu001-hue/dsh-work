@@ -224,6 +224,24 @@ void PostIntent(const std::string& type, const std::string& node_id);
 void ReviewCollapseSelected();
 void ReviewCommit();
 void CloseReview();
+// 定义在 ReviewProc 之后：「讲讲它」点下去要起后台线程，这里只先声明。
+void StartLesson(const std::string& node_id);
+// 后台拿回结果后由 kMsgReview 6 在 UI 线程贴到模型上（定义在 StartLesson 之后）。
+void ApplyLessonOutcome();
+// 「讲讲它」的结果：网络在后台线程跑，回来后 PostMessage(kMsgReview, 6) 交给 UI 线程。
+// 和「再拆一层」同款——后台线程碰窗口是这个文件里踩过的坑。
+std::mutex g_lesson_mutex;
+struct LessonOutcome {
+  std::string node_id;
+  bool ok = false;        // 宿主给了 2xx
+  int status = 0;         // HTTP 状态；0 = 连不上 / 超时
+  std::string title;      // 卡片标题（宿主 view.title）
+  std::string text;       // 正文
+  std::string hint;       // 提示（怎么关掉 / 下一步）
+  bool unsupported = false;  // 宿主没有这个接口
+  std::string fallback;   // 没有 view 时的兜底原因（旧的宿主、或不是 JSON）
+} g_lesson_outcome;
+bool g_review_hover_chip = false;
 bool g_recognize_ok = false;
 void StartRecognize(const std::wstring& path);
 void OfferHandoffToAi();
@@ -970,6 +988,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
           if (!g_panel_open) ShowPanel();
           return 0;
         }
+        case 6:  // 「讲讲它」回来了
+          ApplyLessonOutcome();
+          return 0;
         default:
           return 0;
       }
@@ -1558,6 +1579,21 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     return 0;
   }
+  if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && g_review_open) {
+    // 指针落在能点的地方才变手型：「讲讲它」和右下角那颗「知道了」。
+    // 这张图整体是只读的，别的区域不该给出"能点"的错觉。
+    POINT pt = {};
+    GetCursorPos(&pt);
+    ScreenToClient(window, &pt);
+    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+    const float k = dpi > 0.1f ? dpi : 1.0f;
+    const float x = static_cast<float>(pt.x) / k;
+    const float y = static_cast<float>(pt.y) / k;
+    const bool hand =
+        dshwork::review::LessonChipAt(g_review_model, x, y) >= 0 || dshwork::review::CommitHit(g_review_model, x, y);
+    SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
+    return TRUE;
+  }
   if (message == WM_MOUSEWHEEL) {
     // 滚轮缩放：以面板中心为锚，一次 12%，夹在 0.45~1.6 之间。
     const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
@@ -1606,30 +1642,28 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       TrackMouseEvent(&tme);
       g_review_tracking_leave = true;
     }
-    if (!g_review_panning) {
-      // 记住指针停在哪一颗上；"停够久了没有"由动画定时器判断，
-      // 而不是在这里直接展开 —— 一次扫过整排会连开好几颗。
-      const float hdpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-      const float hk = hdpi > 0.1f ? hdpi : 1.0f;
-      const int hover = dshwork::review::NodeAt(
-          g_review_model, static_cast<float>(GET_X_LPARAM(lparam)) / hk,
-          static_cast<float>(GET_Y_LPARAM(lparam)) / hk);
-      if (hover != g_review_hover_row) {
-        g_review_hover_row = hover;
-        g_review_hover_at = GetTickCount64();
-      }
-    }    if (g_review_panning) {
-      const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-      const float k = dpi > 0.1f ? dpi : 1.0f;
-      const float mx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
-      const float my = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
+    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
+    const float k = dpi > 0.1f ? dpi : 1.0f;
+    const float mx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
+    const float my = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
+    if (g_review_panning) {
       g_review_model.pan_x += mx - g_review_pan_lx;
       g_review_model.pan_y += my - g_review_pan_ly;
       g_review_pan_lx = mx;
       g_review_pan_ly = my;
       dshwork::review::ClampPan(g_review_model);
       RepaintReview();
+      return 0;
     }
+    // 记住指针停在哪一颗上；"停够久了没有"由动画定时器判断，
+    // 而不是在这里直接展开 —— 一次扫过整排会连开好几颗。
+    const int hover = dshwork::review::NodeAt(g_review_model, mx, my);
+    if (hover != g_review_hover_row) {
+      g_review_hover_row = hover;
+      g_review_hover_at = GetTickCount64();
+    }
+    // 手型的判定单独记一份：WM_SETCURSOR 会频繁进来，这里只是缓存。
+    g_review_hover_chip = dshwork::review::LessonChipAt(g_review_model, mx, my) >= 0;
     return 0;
   }
   if (message == WM_MOUSELEAVE) {
@@ -1652,6 +1686,20 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     const float y = static_cast<float>(GET_Y_LPARAM(lparam)) / scale_ok;
     if (dshwork::review::CommitHit(g_review_model, x, y)) {
       if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
+      return 0;
+    }
+    // 讲解卡开着时，点卡片以外的地方 = 收起它。卡片本身只有字，没有可点的东西，
+    // 所以"点外面收掉"是唯一的手势，和挂在上面的那颗按钮对称。
+    if (dshwork::review::LessonCardOn(g_review_model) && !dshwork::review::LessonCardHit(g_review_model, x, y)) {
+      g_review_model.lesson_phase = 0;
+      LayoutReview();
+      RepaintReview();
+    }
+    // 「讲讲它」在节点矩形的右下角，和节点重叠，必须先判它：
+    // 否则永远命中到下面那颗节点，按钮等于画的。
+    const int chip = dshwork::review::LessonChipAt(g_review_model, x, y);
+    if (chip >= 0) {
+      StartLesson(g_review_model.rows[static_cast<size_t>(chip)].id);
       return 0;
     }
     const int index = dshwork::review::NodeAt(g_review_model, x, y);
@@ -1690,9 +1738,118 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
   return DefWindowProcW(window, message, wparam, lparam);
 }
 
+/* ───────────────────── 「讲讲它」：让宿主的模型当场讲一段 ───────────────────── */
+
+/**
+ * 点下「讲讲它」之后发生的事。
+ *
+ * 只做三件：先把卡片切成"正在讲"、起后台线程 POST、回来后由 UI 线程收尾。
+ * 模型写一段要二三十秒，这段等待必须让界面先动起来——所以这里是先画再发，
+ * 而不是等 HTTP 回来才刷新（那样看起来就是"点了没反应"，这个项目已经踩过）。
+ */
+void StartLesson(const std::string& node_id) {
+  if (node_id.empty()) return;
+  if (g_review_model.lesson_unsupported) {
+    // 已经知道这个宿主没有讲解接口：别再烧一次请求，直接把原因摆出来。
+    g_review_model.lesson_node = node_id;
+    g_review_model.lesson_phase = 3;
+    g_review_model.lesson_title = "讲讲它";
+    g_review_model.lesson_text = "这个宿主还不认识讲解接口。";
+    g_review_model.lesson_hint = "拉最新代码重启宿主；按钮变回蓝色再点。";
+    LayoutReview();
+    RepaintReview();
+    return;
+  }
+  // 同一颗正在讲就不要再发一遍：模型调用贵，而且两张结果会打架。
+  if (g_review_model.lesson_phase == 1 && g_review_model.lesson_node == node_id) return;
+  g_review_model.lesson_node = node_id;
+  g_review_model.lesson_phase = 1;
+  g_review_model.lesson_title = "讲讲它";
+  g_review_model.lesson_text.clear();
+  g_review_model.lesson_hint.clear();
+  RepaintReview();
+  LogToFile("讲解：请求 " + node_id);
+
+  std::thread([node_id]() {
+    LessonOutcome outcome;
+    outcome.node_id = node_id;
+    const dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
+    if (!endpoint.ok) {
+      outcome.title = "没连上宿主";
+      outcome.text = "宿主没在跑，或者刚刚重启过。";
+      outcome.hint = "把 dsh 重新拉起（--profile dshwork-dev），再点一次";
+      outcome.fallback = endpoint.error;
+    } else {
+      std::string body;
+      std::string reason;
+      const std::string payload = "{\"nodeId\":\"" + node_id + "\"}";
+      // 接收超时放到 60s：宿主自己的模型上限是 45s，30s 会正好卡在最后几秒。
+      const bool ok = dshwork::HttpPostJson(endpoint, L"/dsh-work/api/learn", payload, body, reason, 60000,
+                                           &outcome.status);
+      outcome.ok = ok;
+      outcome.fallback = reason;
+      dshwork::JValue root;
+      const dshwork::JValue* view = nullptr;
+      if (dshwork::ParseJson(body, root)) view = root.Get("view");
+      if (view != nullptr && view->IsObject()) {
+        outcome.title = view->GetString("title");
+        outcome.text = view->GetString("text");
+        outcome.hint = view->GetString("hint");
+        const dshwork::JValue* unsupported = view->Get("unsupported");
+        outcome.unsupported = unsupported != nullptr && unsupported->type == dshwork::JValue::Type::Bool &&
+                              unsupported->boolean;
+      } else {
+        // 没有 view：要么跑着的宿主比节点图旧（旧路由回的是 {error:'not found'}），
+        // 要么回来的根本不是 DSH Work。两种情况都别硬猜，明说接口不认识。
+        outcome.unsupported = true;
+        outcome.title = "这个宿主还不认识讲解";
+        outcome.text = "跑着的宿主比节点图旧，接口还没长出来。";
+        outcome.hint = "拉最新代码重启宿主；按钮恢复前别重复点。";
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_lesson_mutex);
+      g_lesson_outcome = outcome;
+    }
+    LogToFile(std::string("讲解：") + (outcome.ok ? "成功 " : "失败 ") + outcome.fallback);
+    if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 6, 0);
+  }).detach();
+}
+
+/** 收起讲解卡（也就取消了正在讲的那次）：只动界面上的这张卡。 */
+void DismissLesson() {
+  if (g_review_model.lesson_phase == 0) return;
+  g_review_model.lesson_phase = 0;
+  g_review_model.lesson_node.clear();
+  LayoutReview();
+  RepaintReview();
+}
+
+/** UI 线程收尾：把后台拿回来的那张卡贴到模型上，再按新高度重排。 */
+void ApplyLessonOutcome() {
+  LessonOutcome outcome;
+  {
+    std::lock_guard<std::mutex> lock(g_lesson_mutex);
+    outcome = g_lesson_outcome;
+  }
+  // 用户已经 Esc 掉了、或者又点了别的节点：这张迟到的结果就不弹了。
+  if (g_review_model.lesson_phase != 1 || g_review_model.lesson_node != outcome.node_id) return;
+  g_review_model.lesson_phase = outcome.ok ? 2 : 3;
+  g_review_model.lesson_title = outcome.title;
+  g_review_model.lesson_text = outcome.text;
+  g_review_model.lesson_hint = outcome.hint;
+  if (outcome.unsupported) g_review_model.lesson_unsupported = true;
+  LayoutReview();
+  RepaintReview();
+}
+
 void CloseReview() {
   g_review_open = false;
   g_review_busy = false;
+  // 窗口收掉，卡片跟着消失；下次打开从干净的模型开始（不然会看到上一轮的讲解）。
+  g_review_model.lesson_phase = 0;
+  g_review_model.lesson_node.clear();
+  g_review_hover_chip = false;
   if (g_review != nullptr) ShowWindow(g_review, SW_HIDE);
   g_review_job.clear();
   // 关窗之后把前台还给唤出之前那个窗口：抢一次焦点可以，赖着不走不行。
@@ -1922,6 +2079,16 @@ void EnsureReviewWindow() {
 /** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
 void ReviewKey(int which) {
   if (!g_review_open) return;
+  // 一次按下可能被投递两遍：窗口有焦点时 WM_KEYDOWN 来一次，动画定时器里的
+  // GetAsyncKeyState 又观测到同一个按下沿再来一次。截图验证时一次 Esc 就把
+  // 整张图关了——第一遍收讲解卡，第二遍看到卡已收起就收窗口。
+  // 同一个键 220ms 内只认一次；人手不会以 4.5Hz 连按同一个键。
+  static int last_code = -1;
+  static ULONGLONG last_at = 0;
+  const ULONGLONG now_ms = GetTickCount64();
+  if (which == last_code && now_ms - last_at < 220) return;
+  last_code = which;
+  last_at = now_ms;
   const int count = static_cast<int>(g_review_model.rows.size());
   switch (which) {
     case 0:
@@ -1939,6 +2106,12 @@ void ReviewKey(int which) {
       ReviewCommit();
       return;
     default:
+      // Esc（4）先收讲解卡，卡关着才收窗口；Ctrl+Enter（5）也落在这里 ——
+      // 旧键位映射本来就把 5 归到 Esc 一档（见 NEXT.md「已知的坑」），本轮不顺手改。
+      if (g_review_model.lesson_phase != 0) {
+        DismissLesson();
+        return;
+      }
       CloseReview();
       return;
   }
