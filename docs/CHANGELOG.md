@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-23 · 事件流 /api/feed：把日志翻成人能读的一行
+
+接力板「看不见过程」。这层只做翻译、不做存储——原始事实仍然只有 `journal.ndjson` 一份。
+
+- **翻译**：`feed.ts` 的 `describeEntry()` 把意图翻成「动词 + 文本」（拆解 N 件事 / 完成 / 切到 / 交给 AI / 接手 / 交付 / 验收 / 退回…），`text` 多数取节点当前标题（日志只存 id，标题会变，翻译时现取）；未知意图照常显示类型名，不被静默吞掉。`plan.add/remove/rename` 与 `node.skip/evidence` 目前没有代码路径会发，走 default 分支。
+- **只读尾巴**：`store.tailJournal(limit)` 从文件尾往前收，日志涨大也不拖慢开面板；半行（写到一半断电）跳过即可。
+- **路由**：`GET /dsh-work/api/feed?limit=30`（上限 100）；宿主没注入能力回 503，读失败回 `{ ok:false, items:[] }` 不抛。
+- **收口**：`at` 原本原样带出 epoch 毫秒（`clock()` 写了却没被用上，本地 HH:mm 其实没生效），改成 `clock(line.at)`，`JournalLine.at` 类型同步放宽成 `number | string`；补 `node.back` / `node.advise` 两个动词。
+- 测试补 3 处（毫秒数与 ISO 串都换算、认不出的时间宁可空着、两个新动词）；`pnpm test` 121 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-23 · 节点图与面板按各自那块屏的缩放绘制
 
 接力板 N-8。`g_dpiScale` 原来全进程一个值，节点图 / 面板被挪到 125% / 200% 的屏上时，窗口尺寸、字号、命中区都按小条那块屏的比例算。

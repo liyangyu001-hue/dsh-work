@@ -45,3 +45,24 @@ test('未知意图照常显示，不被静默吞掉', () => {
   assert.equal(unknown.text, 'node.rename');
   assert.equal(describeEntry(line(9, {}), titleOf).text, '（无类型）');
 });
+
+test('时间统一成本地 HH:mm：毫秒数与老日志的 ISO 串都认', () => {
+  // 现行 journal 存的是 epoch 毫秒（老日志才是 ISO 串，见 feed.ts 的 clock()）
+  const ms = describeEntry(
+    { seq: 10, at: 1792762590296, by: 'ai', intent: { type: 'node.focus', nodeId: 'n1' } },
+    titleOf,
+  );
+  assert.match(ms.at, /^\d{2}:\d{2}$/);
+
+  // 老日志是 ISO 串
+  assert.match(describeEntry(line(11, { type: 'node.focus', nodeId: 'n1' }), titleOf).at, /^\d{2}:\d{2}$/);
+
+  // 认不出的时间宁可空着，也别把 "NaN:NaN" 显示给人
+  const broken = describeEntry({ seq: 12, at: 'not-a-date', by: 'human', intent: { type: 'node.advance' } }, titleOf);
+  assert.equal(broken.at, '');
+});
+
+test('node.back / node.advise 有动词，别落到「·」', () => {
+  assert.equal(describeEntry(line(13, { type: 'node.back' }), titleOf).verb, '回退');
+  assert.equal(describeEntry(line(14, { type: 'node.advise', nodeId: 'n1' }), titleOf).verb, '建议');
+});

@@ -9,8 +9,8 @@
 /** journal.ndjson 里一行（见 store.ts 的提交路径）。 */
 export interface JournalLine {
   seq: number;
-  /** ISO 时间串，写日志那一刻。 */
-  at: string;
+  /** 写日志那一刻：现行版本存 epoch 毫秒数，老日志里是 ISO 串，两种都要认。 */
+  at: number | string;
   by: 'human' | 'ai' | 'system';
   intent: Record<string, unknown> & { type?: string };
 }
