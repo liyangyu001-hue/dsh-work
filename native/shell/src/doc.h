@@ -22,6 +22,7 @@ struct NodeView {
   std::wstring advice;      // 模型给的一句话建议（可能没有）
   std::wstring advice_alt;  // 更优解（可选）
   std::string handoff;      // 交接状态：offered / running / review / accepted / returned，空=没交给谁
+  std::string agent_session;  // 正在跑这颗节点的 AI 会话 id；和 handoff=running 一起由宿主写入
   std::string status;       // todo / active / done / skipped
   std::string kind;         // task / concept
 };
@@ -36,6 +37,27 @@ struct WorkModel {
   int done = 0;
   int total = 0;
 };
+
+/**
+ * 有没有 AI 会话正在跑。
+ *
+ * 只认宿主写下的 handoff.state == running：这是「AI 真的在干活」的唯一权威信号，
+ * 不去猜 status=active 或标题里有没有「AI」。窗口边缘的蓝框由它点亮。
+ */
+inline bool HasRunningAgent(const WorkModel& model) {
+  for (const NodeView& item : model.items) {
+    if (item.handoff == "running") return true;
+  }
+  return false;
+}
+
+/** 正在跑的那个会话 id（可能为空：旧文档只写了 running）。日志里用它核对是哪一次。 */
+inline std::string RunningAgentSession(const WorkModel& model) {
+  for (const NodeView& item : model.items) {
+    if (item.handoff == "running") return item.agent_session;
+  }
+  return std::string();
+}
 
 /** 深度优先先序，和 packages/core/src/state.ts 的 linearOrder 同一套规则。 */
 inline void WalkNodes(const JValue& nodes, const JValue& roots, const std::string& id, std::vector<NodeView>& out,
@@ -59,6 +81,7 @@ inline void WalkNodes(const JValue& nodes, const JValue& roots, const std::strin
   // handoff 同理：没有就是没交给任何人
   if (const JValue* handoff = node->Get("handoff")) {
     view.handoff = handoff->GetString("state");
+    view.agent_session = handoff->GetString("agentSessionId");
   }
   out.push_back(std::move(view));
 

@@ -70,6 +70,10 @@ constexpr float kSideChipGap = 8.0f;
 constexpr int kSideChipCount = 2;         // 每侧最多挂两张：再多就糊成一片
 constexpr UINT kHoverTimerId = 0x77;
 constexpr UINT kAnimTimerId = 0x78;
+// AI 运行中的窗口边缘流光：60fps 够顺，别拿 240Hz 的 morph 计时器整块重画面板
+// 0x7C 已被按钮脉冲占用；WM_TIMER 按 id 分派，撞了会被别人的分支先吃掉
+constexpr UINT kAiRingTimerId = 0x7D;
+constexpr UINT kAiRingFrameMs = 16;
 // Tab 是「长按手势」：按下先等一会儿，按住够久才召唤覆盖层，松手才落子。
 // 用 GetAsyncKeyState 轮询来判断松手 —— RegisterHotKey 只给按下的通知，没有抬起。
 constexpr UINT_PTR kTabWatchTimerId = 0x7a;
@@ -355,6 +359,7 @@ void UpdateHover();
 void ShowTrayMenu();
 void RemoveTrayIcon();
 void Repaint();
+void RepaintReview();
 void StartRegionCapture();
 void ArmHoverTab();
 void DisarmHoverTab();
@@ -862,6 +867,30 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (g_panel_open) {
         RefreshPanelModel();
         RepaintPanel();
+        // 面板平时静止不占 CPU；有 AI 会话在跑时，边缘的呼吸/流光需要一帧一帧地推进。
+        // 单独用低帧率计时器：morph 结束后这条计时器只重画面板，不碰小条，也不跟 240Hz 的 morph 抢。
+        if (dshwork::HasRunningAgent(g_panel_model)) {
+          SetTimer(g_window, kAiRingTimerId, kAiRingFrameMs, nullptr);
+        } else {
+          KillTimer(g_window, kAiRingTimerId);
+        }
+      } else {
+        KillTimer(g_window, kAiRingTimerId);
+      }
+      if (g_review != nullptr && g_review_open) {
+        bool ai_running = false;
+        std::string session;
+        {
+          std::lock_guard<std::mutex> lock(g_model_mutex);
+          ai_running = dshwork::HasRunningAgent(g_model);
+          if (ai_running) session = dshwork::RunningAgentSession(g_model);
+        }
+        if (ai_running != g_review_model.ai_running) {
+          g_review_model.ai_running = ai_running;
+          RepaintReview();
+          LogToFile(std::string("节点图边缘") + (ai_running ? "亮起：AI 运行中" : "熄灭：没有运行中的会话") +
+                    (session.empty() ? "" : " session=" + session));
+        }
       }
       return 0;
     case WM_LBUTTONDBLCLK:
@@ -1049,6 +1078,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (g_morph.active) UpdatePanelMorph();
         if (!g_squash_active && !g_chip_fade_active && !g_morph.active) {
           KillTimer(g_window, kAnimTimerId);
+        }
+        return 0;
+      }
+      if (wparam == kAiRingTimerId) {
+        if (g_panel_open && dshwork::HasRunningAgent(g_panel_model)) {
+          RepaintPanel();
+        } else {
+          KillTimer(g_window, kAiRingTimerId);
         }
         return 0;
       }
@@ -1318,9 +1355,10 @@ void RepaintPanel() {
     model = g_panel_model;
   }
   dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_formatNode, g_brush};
+  const bool ai_running = dshwork::HasRunningAgent(model);
   dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats,
                          static_cast<float>(px_w) / g_dpiScale, static_cast<float>(px_h) / g_dpiScale,
-                         PanelContentAlpha(), PanelZoom());
+                         PanelContentAlpha(), PanelZoom(), ai_running, GetTickCount64());
   const HRESULT draw_result = g_target->EndDraw();
   if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
 
@@ -1415,6 +1453,10 @@ void BuildReviewModel(const dshwork::JValue& root) {
     row.status = node.GetString("status", "todo");
     // 概念节点靠它区分：读不到就当普通任务，绝不凭空标成「要学」。
     row.kind = node.GetString("kind", "task");
+    // 运行中的交接：图里只要有一颗在跑，整扇窗就亮蓝边（见 review.h Draw）。
+    if (const JValue* handoff = node.Get("handoff"); handoff != nullptr && handoff->IsObject()) {
+      if (handoff->GetString("state") == "running") model.ai_running = true;
+    }
     if (const JValue* children = node.Get("children"); children != nullptr && children->IsArray()) {
       row.child_count = static_cast<int>(children->array.size());
       row.has_children = row.child_count > 0;
@@ -2460,6 +2502,9 @@ void ShowPanel() {
   g_morph.ms = static_cast<float>(kPanelOpenMs);
   g_panel_open = true;
   SetTimer(g_window, kAnimTimerId, FrameIntervalMs(), nullptr);
+  if (dshwork::HasRunningAgent(g_panel_model)) {
+    SetTimer(g_window, kAiRingTimerId, kAiRingFrameMs, nullptr);
+  }
   RepaintPanel();
   LogToFile("面板打开 from=" + std::to_string(from.right - from.left) + "x" +
             std::to_string(from.bottom - from.top) + " to=" + std::to_string(target.right - target.left) + "x" +
@@ -2468,6 +2513,7 @@ void ShowPanel() {
 
 void HidePanel(bool animated) {
   if (g_panel == nullptr || !g_panel_open) return;
+  KillTimer(g_window, kAiRingTimerId);
   if (animated) {
     if (g_morph.active && !g_morph.opening) return;  // 正在收，别打断
     RECT from = {};

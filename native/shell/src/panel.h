@@ -15,6 +15,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include "doc.h"
 
@@ -212,6 +213,99 @@ inline float DotAlpha(int distance, const std::string& status) {
 }
 
 /**
+ * 圆角矩形周长上的一点：t 从 0 到 1，从左上角接缝出发顺时针。
+ *
+ * 和节点上「一圈在转」用的是同一套参数化（直线段 + 四段 1/4 圆），
+ * 只是这里的矩形是整扇窗。t 越界会自动绕回，流光可以一直跑下去。
+ */
+inline D2D1_POINT_2F FramePoint(const D2D1_RECT_F& box, float radius, float t) {
+  const float x0 = box.left;
+  const float y0 = box.top;
+  const float x1 = box.right;
+  const float y1 = box.bottom;
+  const float limit = ((x1 - x0) < (y1 - y0) ? (x1 - x0) : (y1 - y0)) * 0.5f;
+  float r = radius;
+  if (r > limit) r = limit;
+  if (r < 0.0f) r = 0.0f;
+  const float sx = (x1 - x0) - 2.0f * r;
+  const float sy = (y1 - y0) - 2.0f * r;
+  const float arc = 1.5707963f * r;
+  const float total = 2.0f * sx + 2.0f * sy + 4.0f * arc;
+  if (total <= 0.01f) return D2D1::Point2F(x0, y0);
+  float d = t * total;
+  d -= std::floor(d / total) * total;
+  if (d < sx) return D2D1::Point2F(x0 + r + d, y0);
+  d -= sx;
+  if (d < arc) {
+    const float k = d / arc * 1.5707963f;
+    return D2D1::Point2F(x1 - r + r * std::sin(k), y0 + r - r * std::cos(k));
+  }
+  d -= arc;
+  if (d < sy) return D2D1::Point2F(x1, y0 + r + d);
+  d -= sy;
+  if (d < arc) {
+    const float k = d / arc * 1.5707963f;
+    return D2D1::Point2F(x1 - r + r * std::cos(k), y1 - r + r * std::sin(k));
+  }
+  d -= arc;
+  if (d < sx) return D2D1::Point2F(x1 - r - d, y1);
+  d -= sx;
+  if (d < arc) {
+    const float k = d / arc * 1.5707963f;
+    return D2D1::Point2F(x0 + r - r * std::sin(k), y1 - r + r * std::cos(k));
+  }
+  d -= arc;
+  if (d < sy) return D2D1::Point2F(x0, y1 - r - d);
+  d -= sy;
+  const float k = d / arc * 1.5707963f;
+  return D2D1::Point2F(x0 + r - r * std::cos(k), y0 + r - r * std::sin(k));
+}
+
+/**
+ * 「AI 会话正在跑」的窗边：一圈随呼吸变亮的蓝边 + 一颗沿边顺时针跑的流光。
+ *
+ * 只画边，不碰内容：用户要的是「这窗口里有东西在自动运行」的余光信号，
+ * 不是再读一段说明。坐标是 DIP，调用方保证当前变换是 Scale(scale)。
+ * alpha 跟着窗口的开合淡入淡出；没有运行中的会话时调用方根本不会调这里。
+ */
+inline void DrawAiFrame(ID2D1RenderTarget* target, const PanelFormats& fmt, float width_dip, float height_dip,
+                        float radius_dip, ULONGLONG now_ms, float alpha) {
+  if (target == nullptr || width_dip <= 4.0f || height_dip <= 4.0f || alpha <= 0.01f) return;
+  const float seconds = static_cast<float>(now_ms % 100000) * 0.001f;
+  const float breath = 0.5f + 0.5f * std::sin(seconds * 2.2f);  // 约 0.35Hz，比节点环慢
+  const D2D1_RECT_F edge = D2D1::RectF(1.0f, 1.0f, width_dip - 1.0f, height_dip - 1.0f);
+  float r = radius_dip - 1.0f;
+  if (r < 0.0f) r = 0.0f;
+
+  // 外晕三圈：宽而淡，像蓝光从窗边后面漏出来；主边跟着呼吸变亮。
+  // 分层窗口会把画到窗外的部分裁掉，所以看起来正好是"从里面透出去"。
+  const float glow_w[3] = {10.0f, 5.0f, 2.2f};
+  const float glow_a[3] = {0.05f, 0.11f, 0.34f + 0.30f * breath};
+  for (int i = 0; i < 3; ++i) {
+    fmt.brush->SetColor(Color(Fade(kAccent, glow_a[i] * alpha)));
+    target->DrawRoundedRectangle(D2D1::RoundedRect(edge, r, r), fmt.brush, glow_w[i]);
+  }
+
+  // 流光：亮头在前，尾巴在后；6.4 秒一圈，和节点环同向（顺时针）。
+  // 点阵而不是折线：分层窗下 DrawLine 的平头会露出缺口，圆点叠起来才是连续锥形。
+  constexpr int kN = 480;
+  constexpr float kTail = 0.14f;
+  const float head = static_cast<float>(now_ms % 6400) / 6400.0f;
+  for (int s = 0; s <= kN; ++s) {
+    float d = head - static_cast<float>(s) / kN;
+    d -= std::floor(d);
+    if (d > kTail) continue;
+    const float k = 1.0f - d / kTail;
+    const float ease = k * k;
+    const D2D1_POINT_2F p = FramePoint(edge, r, static_cast<float>(s) / kN);
+    fmt.brush->SetColor(Color(Fade(kAccent, (0.02f + 0.20f * ease) * alpha)));
+    target->FillEllipse(D2D1::Ellipse(p, 4.2f + 2.6f * ease, 4.2f + 2.6f * ease), fmt.brush);
+    fmt.brush->SetColor(Color(Fade(0xFFFFFFFF, (0.06f + 0.82f * ease) * alpha)));
+    target->FillEllipse(D2D1::Ellipse(p, 1.0f + 1.5f * ease, 1.0f + 1.5f * ease), fmt.brush);
+  }
+}
+
+/**
  * 画整条面板。
  *
  * dip_w / dip_h 是当前的逻辑尺寸——展开动画的每一帧都在变，
@@ -220,7 +314,8 @@ inline float DotAlpha(int distance, const std::string& status) {
  * zoom 是内容从 0.96 长到 1 的缩放（BrimDeck 的展开里也有这一手）。
  */
 inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int focus, float scale,
-                      const PanelFormats& fmt, float dip_w, float dip_h, float alpha, float zoom) {
+                      const PanelFormats& fmt, float dip_w, float dip_h, float alpha, float zoom,
+                      bool ai_running, ULONGLONG now_ms) {
   const float w = dip_w * scale;
   const float h = dip_h * scale;
   // 收起来时高度接近药丸，圆角跟着收到一半高，才是一条胶囊
@@ -409,6 +504,14 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
        fmt.brush, dim);
 
   target->SetTransform(D2D1::Matrix3x2F::Identity());
+  // 运行中的会话给整条面板描一圈蓝边。画在最后 = 压在所有内容上；
+  // 单独换回 Scale 变换，是因为内容那层有 zoom，边框不该跟着缩。
+  if (ai_running) {
+    target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+    const float ring_radius = dip_h * 0.5f < 26.0f ? dip_h * 0.5f : 26.0f;
+    DrawAiFrame(target, fmt, dip_w, dip_h, ring_radius, now_ms, alpha);
+    target->SetTransform(D2D1::Matrix3x2F::Identity());
+  }
 }
 
 }  // namespace ui

@@ -48,6 +48,9 @@ struct Model {
   std::wstring busy_text;
   // 只读模式：看的是已经落库的文档，不是草稿。按钮变成「知道了」，Enter 只展开/收起。
   bool read_only = false;
+  // 图里有没有 AI 会话正在跑（节点 handoff.state == running）。
+  // 有的话整扇窗描一圈呼吸蓝边 + 流光，让"它在自动做"这件事一眼可见。
+  bool ai_running = false;
 
   // 视图：世界坐标 → 窗口，先乘 zoom 再平移。缩放围绕面板中心，不做鼠标锚定，
   // 因为这个窗口是用来"看清结构"的，不是看图软件。
@@ -786,6 +789,12 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
                 model.busy ? ui::Fade(0xFF3A3A40, a) : ui::Fade(ui::kAccent, a));
   ui::TextCentered(target, model.read_only ? L"知道了" : L"就这样", fmt.body, commit, fmt.brush,
                   ui::Fade(0xFFFFFFFF, a));
+
+  // AI 会话在跑：整扇窗的边缘亮一圈蓝边，流光沿边跑。只做余光提示，不挡任何内容；
+  // 放在最后画，边框压在标题栏与页脚之上，窗口一开一合时跟着 a 一起淡。
+  if (model.ai_running) {
+    ui::DrawAiFrame(target, fmt, width_dip, height_dip, 22.0f, anim.now, a);
+  }
 
   target->SetTransform(D2D1::Matrix3x2F::Identity());
 }
