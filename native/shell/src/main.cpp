@@ -198,6 +198,14 @@ void ShowReview(const std::wstring& job);
 void ShowReviewDoc();
 void EnsureReviewWindow();
 void ForceForeground(HWND hwnd);
+/**
+ * 节点图是不是正显示在屏幕上。
+ *
+ * 图开着期间，小条整条不认鼠标：不悬停、不接单击/双击、待开面板的计时器也不许
+ * 到点。不这样的话一圈操作会自己咬自己——指针在图上一停，小条以为要展开面板，
+ * 面板又把图盖住，图上一层套一层。
+ */
+bool ReviewShown() { return g_review != nullptr && IsWindowVisible(g_review); }
 bool g_review_read_only = false;
 bool ReloadReviewDraft();
 float EaseInOutCubic(float t);
@@ -363,6 +371,7 @@ void RefreshPanelModel();
 void DispatchKey(int action);
 void TogglePanel();
 void UpdateHover();
+void AdoptHoverOnBar();
 void ShowTrayMenu();
 void RemoveTrayIcon();
 void Repaint();
@@ -968,6 +977,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       return 0;
     case WM_LBUTTONDBLCLK:
+      // 图开着时小条不接鼠标（见 ReviewShown 注释）：这一下可能只是人在图上点节点。
+      if (ReviewShown()) return 0;
       // 双击药丸 = 把眼下这件标记完成（单击是开面板，见 WM_LBUTTONDOWN）
       {
         std::thread([]() {
@@ -983,6 +994,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       return 0;
     case WM_LBUTTONDOWN:
+      // 图开着时同理：点在药丸上也别把面板顶到图上面。
+      if (ReviewShown()) return 0;
       // 单击药丸 = 展开/收起面板（悬停已经能开，这一下是给"想用鼠标点"的人）
       if (g_panel_open) HidePanel(); else ShowPanel();
       return 0;
@@ -1051,6 +1064,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     case kMsgOpenPanel:
       // 宿主里的「打开面板」：只负责摊开，不跟药丸单击一样来回折叠。
+      // 图开着就先收图：两个窗叠着会互相挡（和 ShowReviewDoc 收面板是同一条规矩）。
+      if (ReviewShown()) CloseReview();
       if (!g_panel_open) ShowPanel();
       return 0;
     case kMsgDocGraph:
@@ -1171,7 +1186,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       }
       if (wparam == kOpenTimerId) {
         KillTimer(g_window, kOpenTimerId);
-        if (g_bar_hovered && !g_panel_open) {
+        // 计时器是悬停那一下排的，到点前图可能已经开了：再认一次，别把面板顶上去。
+        if (!ReviewShown() && g_bar_hovered && !g_panel_open) {
           ShowPanel();
           g_panel_by_hover = true;
         }
@@ -2050,6 +2066,9 @@ void CloseReview() {
   g_review_prev_focus = nullptr;
   if (g_window != nullptr) ArmHoverTab();
   if (!g_panel_open) ShowWindow(g_window, SW_SHOWNOACTIVATE);
+  // 光标很可能正停在药丸上（人就坐在屏幕顶部）：把这次悬停认下来，
+  // 不然 260ms 后面板自己顶出来，看起来就是「图刚关、面板又弹」。
+  AdoptHoverOnBar();
 }
 
 /* 动作都在后台线程做，回来后用消息让 UI 线程收尾。 */
@@ -2650,6 +2669,50 @@ void HidePanel(bool animated) {
 }
 
 /**
+ * 小条的点击穿透开关。
+ *
+ * 小条平时是 WS_EX_TRANSPARENT：鼠标整个穿过去，只靠轮询光标算悬停；悬停那几秒
+ * 摘掉穿透，单击（开面板）/双击（标记完成）才有真的鼠标消息可收。摘下之后必须
+ * 记得还回去——不还的话窗口一直在收点击，人以为点在下面，其实点在了小条上。
+ */
+void SetBarClickThrough(bool click_through) {
+  if (g_window == nullptr) return;
+  LONG_PTR ex = GetWindowLongPtrW(g_window, GWL_EXSTYLE);
+  const LONG_PTR want = click_through ? (ex | static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
+                                     : (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+  if (want != ex) SetWindowLongPtrW(g_window, GWL_EXSTYLE, want);
+}
+
+/** 光标现在是不是落在药丸的命中区里（按画出来的尺寸算，不用窗口尺寸）。 */
+bool CursorOnPill(const POINT& cursor) {
+  if (g_window == nullptr) return false;
+  RECT window_rect = {};
+  GetWindowRect(g_window, &window_rect);
+  const int left = window_rect.left + static_cast<int>(g_hit_left_dip * g_dpiScale);
+  const int right = window_rect.left + static_cast<int>(g_hit_right_dip * g_dpiScale);
+  const int top = window_rect.top + static_cast<int>(g_hit_top_dip * g_dpiScale);
+  const int bottom = window_rect.top + static_cast<int>(g_hit_bottom_dip * g_dpiScale);
+  return cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom;
+}
+
+/**
+ * 图关掉的那一下，光标往往正停在小条上（人就坐在屏幕顶部）。
+ *
+ * 把这次悬停先"认下来"、当成已经展开过：否则下一个 120ms 轮询立刻发现"刚进入"，
+ * 260ms 后面板自己顶出来——表现就是 Esc 关图、面板又弹出来，反复顶。
+ * 认下来之后想开面板：先把鼠标移开再回来，或者直接单击药丸。
+ */
+void AdoptHoverOnBar() {
+  if (g_window == nullptr || !IsWindowVisible(g_window)) return;
+  POINT cursor = {};
+  if (!GetCursorPos(&cursor)) return;
+  if (!CursorOnPill(cursor)) return;
+  g_bar_hovered = true;
+  SetBarClickThrough(false);
+  Repaint();
+}
+
+/**
  * 鼠标是否停在药丸（或面板）上。
  *
  * 小条是 WS_EX_TRANSPARENT 的穿透窗口：它不接收任何鼠标消息，所以"悬停"只能
@@ -2664,11 +2727,17 @@ void UpdateHover() {
   //
   // 不然会连环触发：鼠标落在图上 → 小条以为要展开面板 → 面板一开又去开图 →
   // 图叠图，节点越堆越多。图上操作期间，小条就当自己不在。
-  if (g_review != nullptr && IsWindowVisible(g_review)) {
+  if (ReviewShown()) {
+    // 悬停时排下的"260ms 后开面板"也要撤掉：图在计时器到点前开了，它照样会把
+    // 面板顶到图上面（守卫只管悬停、管不到已经排好的计时器）。
+    KillTimer(g_window, kOpenTimerId);
     if (g_bar_hovered) {
       g_bar_hovered = false;
       Repaint();
     }
+    // 悬停时摘掉的穿透位必须还回去：守卫提前 return，不还的话整窗还在收点击，
+    // 点在药丸上照样 ShowPanel——实测就是「图开着点一下，面板盖上来」。
+    SetBarClickThrough(true);
     if (g_panel_by_hover && g_panel_open) HidePanel();
     return;
   }
@@ -2681,8 +2750,7 @@ void UpdateHover() {
   const int right = window_rect.left + static_cast<int>(g_hit_right_dip * g_dpiScale);
   const int top = window_rect.top + static_cast<int>(g_hit_top_dip * g_dpiScale);
   const int bottom = window_rect.top + static_cast<int>(g_hit_bottom_dip * g_dpiScale);
-  const bool on_bar = cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom;
-
+  const bool on_bar = CursorOnPill(cursor);
   bool on_panel = false;
   RECT panel_rect = {};
   if (g_panel_open) {
@@ -2702,12 +2770,7 @@ void UpdateHover() {
   g_bar_hovered = hovered;
   // 悬停期间把 WS_EX_TRANSPARENT 摘掉：穿透窗口收不到点击，
   // 而单击（开面板）和双击（标记完成）都得靠真的鼠标消息。
-  {
-    LONG_PTR ex = GetWindowLongPtrW(g_window, GWL_EXSTYLE);
-    ex = hovered ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
-                 : (ex | static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
-    SetWindowLongPtrW(g_window, GWL_EXSTYLE, ex);
-  }
+  SetBarClickThrough(!hovered);
   LogToFile(std::string("hover 变化 → ") + (hovered ? "进入" : "离开"));
   Repaint();
 
