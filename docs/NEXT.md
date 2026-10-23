@@ -92,7 +92,7 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`af194ff2e528b4f479e10b925693d099d1506a13`（2026-10-24 01:15，tree 与本地 `9737aa5` 一致）。
+> 当前远端 sha：`1afea5b9588dd145feca5d12a0934b7931d09ea1`（2026-10-24 01:46，tree 与本地 `bded803` 一致）。
 > **推送起点别直接抄这一行**：只改 `docs/NEXT.md` 的那次回填提交总是排在它后面，抄旧 sha 当起点会把已经在远端的提交再重放一遍。开工先现取：
 > `GET https://api.github.com/repos/liyangyu001-hue/dsh-work/git/ref/heads/main`（带 `gh-token`），拿 `.object.sha` 当参数。
 
