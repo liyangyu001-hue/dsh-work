@@ -955,14 +955,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       return 0;
     case kMsgReview: {
       switch (wparam) {
-        case 1: {  // 再拆一层回来了：重拉草稿，并把刚拆过的那颗默认展开
+        case 1: {  // 再拆一层回来了：重拉草稿；刚拆的那颗由 pending 负责摊开
           g_review_busy = false;
           if (ReloadReviewDraft()) {
-            if (g_review_model.selected >= 0 &&
-                g_review_model.selected < static_cast<int>(g_review_model.rows.size())) {
-              g_review_expanded.insert(g_review_model.rows[static_cast<size_t>(g_review_model.selected)].id);
-              ReloadReviewDraft();  // 展开后再摊一次，子行才会出现
-            }
+            // 摊开新子树会把图撑宽：跟本地展开一样重新自适应，别让新节点落到窗户外。
+            dshwork::review::FitView(g_review_model);
+            dshwork::review::ClampPan(g_review_model);
             LayoutReview();
             RepaintReview();
             ShowNotice(L"又拆细了一层", 1600);
@@ -1423,7 +1421,13 @@ void BuildReviewModel(const dshwork::JValue& root) {
   };
 
   for (const JValue& id : roots->array) walk(id.text, 0, -1);
-  if (model.selected >= static_cast<int>(model.rows.size())) model.selected = 0;
+  // 选中项必须落在行内。刚打开时 selected 是 −1（没有行被选过），这时按 Enter 会
+  // 静默什么都不做，底栏却写着「Enter 展开/收起」——真机上就是"按了没反应"（踩过）。
+  if (model.rows.empty()) {
+    model.selected = -1;
+  } else if (model.selected < 0 || model.selected >= static_cast<int>(model.rows.size())) {
+    model.selected = 0;
+  }
 
   // 记住每一行「第一次被看到」的时间：老行沿用之前的时间戳（不重播动画），
   // 新行（比如刚展开出来的子节点）从此刻开始淡入，并错开一点形成瀑布感。
@@ -1864,7 +1868,10 @@ void CloseReview() {
 /* 动作都在后台线程做，回来后用消息让 UI 线程收尾。 */
 void ReviewExpandSelected() {
   const int index = g_review_model.selected;
-  if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) return;
+  if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) {
+    LogToFile("审阅：没有选中的行，忽略展开");
+    return;
+  }
   const dshwork::review::Row row = g_review_model.rows[static_cast<size_t>(index)];
 
   // 已经拆过的：本地展开/收起就够了，不必再花一次模型调用。
