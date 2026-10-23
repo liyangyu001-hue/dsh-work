@@ -1,5 +1,16 @@
 # 变更日志
 
+## 2026-10-23 · AI 会话在跑时，节点图与面板边缘亮蓝边 + 流光
+
+接力板 N-7。数据只认 `/api/state` 节点 `handoff.state == "running"`（`agentSessionId` 只用于日志核对，不拿 `status=active` 猜）。
+
+- **整窗蓝边 + 流光**：`doc.h` 把 `agentSessionId` 带进 `NodeView`，新增 `HasRunningAgent()` / `RunningAgentSession()`；`panel.h` 新增圆角矩形周长参数化 `FramePoint()` 与 `DrawAiFrame()`——三圈随呼吸变亮的 accent 边 + 沿边顺时针 6.4s 一圈的锥形流光（分层窗下用圆点叠，不用 `DrawLine`）。
+- **两个窗口都接上**：节点图画在 `review::Draw` 最后（22 DIP 圆角，不挡节点/页脚/按钮）；面板画在 `DrawPanel` 最后，单独恢复 `Scale(scale)`，不跟内容 zoom 缩。`BuildReviewModel` 开窗即按 running 置位，不依赖后续状态变化。
+- **面板自己的计时器**：面板默认静止，不能借 240Hz 的 morph 计时器整块重画。新增 `kAiRingTimerId = 0x7D / 16ms`，AI 停或 `HidePanel` 立即 KillTimer；节点图沿用既有动画计时器。
+- 踩坑：`0x7C` 与既有 `kBtnPulseTimerId` 撞车，`WM_TIMER` 先命中按钮脉冲分支，环只动了一帧。全仓搜过再定 `0x7D`。
+
+真机 1.5x（仓库外假宿主）：节点图/面板 on/off 截图；120ms 间隔三帧 hash 全不同，流光在走；面板环 60fps 时 CPU 6.0%/6s，AI 停后 0.8%/6s。`pnpm test` 115 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-23 · 审阅窗：换到另一块屏后，宽度跟着那块屏走
 
 接力板上 N-2 留下的问题——`avail_w` 只在开窗那一刻按**小条**那块屏算一次，换屏后还拿着老屏的数。

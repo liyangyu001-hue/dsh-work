@@ -7,7 +7,8 @@
 ---
 
 ## 进度
-- 2026-10-23 · 托盘与退出入口（N-6）：托盘原来只有「打开面板 / 退出」两项，且退出走 PostQuitMessage + 补发 WM_CLOSE —— 消息循环先停，WM_DESTROY 来不及跑，**托盘图标会留成残影**直到鼠标划过。现在：① 退出只发 WM_CLOSE，统一走 WM_DESTROY（摘图标 → 注销热键 → 退循环）；② 新增 RemoveTrayIcon() 供两处复用；③ 菜单补齐「打开节点图」「显示小条」「退出 DSH Work」，左键仍开面板，气泡提示写明两种操作。真机：	askkill /PID（不带 /F）= 发 WM_CLOSE，进程干净退出、无残留进程
+- 2026-10-23 · AI 会话在跑时窗口亮蓝边 + 流光（N-7）：只认 `/api/state` 节点的 `handoff.state == "running"`（`agentSessionId` 随 `NodeView` 带出，只用于日志核对，不拿 `status=active` 猜）。节点图与面板整窗画呼吸蓝边 + 6.4s 一圈的流光；面板用单独的 60fps 计时器（`0x7D`），AI 停或面板收起立即 KillTimer，节点图复用既有 240Hz 动画计时器。真机 1.5x 假宿主：两窗 on/off 截图、120ms 三帧 hash 全不同、面板环 6.0%/6s、AI 停后 0.8%/6s；`pnpm test` 115 绿、`pnpm typecheck` 干净（`c91e503`）
+- 2026-10-23 · 托盘与退出入口（N-6）：托盘原来只有「打开面板 / 退出」两项，且退出走 PostQuitMessage + 补发 WM_CLOSE —— 消息循环先停，WM_DESTROY 来不及跑，**托盘图标会留成残影**直到鼠标划过。现在：① 退出只发 WM_CLOSE，统一走 WM_DESTROY（摘图标 → 注销热键 → 退循环）；② 新增 RemoveTrayIcon() 供两处复用；③ 菜单补齐「打开节点图」「显示小条」「退出 DSH Work」，左键仍开面板，气泡提示写明两种操作。真机：`taskkill /PID`（不带 `/F`）= 发 WM_CLOSE，进程干净退出、无残留进程
 - 2026-10-23 · 审阅窗跟着窗口所在的那块屏算宽度（N-5）：原来 `ReviewAvailWidthDip` / `LayoutReview` 都拿**小条**那块屏（`MonitorFromWindow(g_window, …)`）并且只在开窗那一刻算一次，换屏之后还拿着老屏的数——宽屏上开完挪到窄屏，右边那一截永远在屏幕外。改成三处：① 新增 `ReviewMonitor()`，开着就用审阅窗自己的显示器、没开才退回小条那块；② `LayoutReview` 开着时**只改尺寸、位置原地**（原来每次内容变化都重新居中，换屏后一展开节点就整块跳回小条那块屏），并把窗口夹回工作区；③ 新增 `RefitReviewToMonitor()`，在 `ReviewProc` 收到 `WM_WINDOWPOSCHANGED` / `WM_DISPLAYCHANGE` 时重算，**可用宽真变了才动窗口**，变了就 `Layout` + `FitView`（旧平移是按老屏算的）+ 重画并落一行日志。真窗口验过：窗口被挪到 x=1140 后 → 假工作区 1100 DIP 生效 → 窗口自动缩到 1650×390 物理、内容重新居中、日志「审阅：换屏后按新工作区重排，可用宽=1100」；可用宽没变时挪窗不重排，之后按 Enter 展开时窗口原地长高不跳回居中
 - 2026-10-23 · 审阅窗「刚打开按 Enter 没反应」修掉（`a687996`）：`BuildReviewModel` 只夹选中项上界，而重建前没有行被选过、`selected` 是 −1，`ReviewExpandSelected` 直接静默 return，底栏却写着「Enter 展开/收起」；改成三支（空图 −1 / 越界或负数回 0），打开即可展开。顺手去掉 `kMsgReview case 1` 拿到新草稿后「按同索引再插一次 expanded 并重拉」的重建（行序已变，会摊开无关节点；pending 早就开过刚拆的那颗），改成只重新自适应视野；早退路径补日志。真窗口验过：打开后单发 Enter → 日志「审阅：本地展开 nd_a」、徽标「+2」→「−2」；没有子节点的行 Enter → 宿主 expand → 草稿模式按 pending 展开、视野重新适配。**改前先证伪了接力板上的 N-4 假设**：`has_children` 全仓只有 `BuildReviewModel` 一处赋值，doc / draft 两条路径的徽标在真窗口里都正常，「展开后徽标消失」当前代码复现不出（见 N-4 段）
 - 2026-10-23 · 玻璃条加「打开节点图」第二入口（`e1f8191`）：用户原话「在dsh界面装个打开的按钮 不然不知道怎么打开」，而 `target:"graph"` 通道早就通了、只缺 UI。在「打开面板」右侧加一枚描边 ghost 按钮（图标＝两颗上游圆＋一颗下游圆），点一下直接开只读节点图；没有任务树/状态未到时置灰并把原因写进 title（原生 `ShowReviewDoc` 对空 doc 是静默 `return`，点了会像没反应）。两个入口共用 `openCompanion(target)`，四档反馈文案抽进 `packages/plugin/src/client/open-entry.ts`（6 个单测）。真机 1.5x：click 后 1.2s 小条浮出「节点图已打开」、伴随层被顺手拉起、审阅窗 2400×390 物理自动弹前台
@@ -56,7 +57,7 @@
   学习模式的侧栏 tips（用户明确说本轮不做）。
 
 ## 进度
-- 2026-10-23 · 托盘与退出入口（N-6）：托盘原来只有「打开面板 / 退出」两项，且退出走 PostQuitMessage + 补发 WM_CLOSE —— 消息循环先停，WM_DESTROY 来不及跑，**托盘图标会留成残影**直到鼠标划过。现在：① 退出只发 WM_CLOSE，统一走 WM_DESTROY（摘图标 → 注销热键 → 退循环）；② 新增 RemoveTrayIcon() 供两处复用；③ 菜单补齐「打开节点图」「显示小条」「退出 DSH Work」，左键仍开面板，气泡提示写明两种操作。真机：	askkill /PID（不带 /F）= 发 WM_CLOSE，进程干净退出、无残留进程
+- 2026-10-23 · 托盘与退出入口（N-6）：托盘原来只有「打开面板 / 退出」两项，且退出走 PostQuitMessage + 补发 WM_CLOSE —— 消息循环先停，WM_DESTROY 来不及跑，**托盘图标会留成残影**直到鼠标划过。现在：① 退出只发 WM_CLOSE，统一走 WM_DESTROY（摘图标 → 注销热键 → 退循环）；② 新增 RemoveTrayIcon() 供两处复用；③ 菜单补齐「打开节点图」「显示小条」「退出 DSH Work」，左键仍开面板，气泡提示写明两种操作。真机：`taskkill /PID`（不带 `/F`）= 发 WM_CLOSE，进程干净退出、无残留进程
 - 2026-10-21 · 解构审阅窗上线（草稿层 + 可反复拆 + 确认才落库）；并把非 Tab 的全局热键全部拆掉，面板改用可点的「完成」（`d402078`）
 
 - 解构闭环打通（原生 → 宿主 → 模型 → 任务树）：✅
@@ -72,7 +73,7 @@
 
 ## 推送方式（重要，每天都用得上）
 
-本机 github.com:443 不通、pi.github.com 通（Clash 没开时也是如此）。
+本机 github.com:443 不通、api.github.com 通（Clash 没开时也是如此）。
 所以 **git push 一定会失败**，改走 GitHub Git Data API 逐提交重放：
 
 `
@@ -88,8 +89,29 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。托盘与退出入口（N-6）已交付。**当前任务 = N-7：AI 会话在跑时，节点图与面板边缘显示蓝框 + 流光**（用户原话：「我希望 dsh会话 也能够接入这个系统 但是会在现在弹窗周围加一个蓝边缘框 代表自动运行中」）。数据来源用 /api/state 里节点的 handoff.state 与 gentSessionId——有会话在跑的节点，其所在窗口描一圈呼吸蓝边即可，别去猜别的信号。
+- 阶段：**P2 · AI 在环**。N-7（AI 运行中的窗口蓝边 + 流光）已交付。**当前任务 = N-8：跨 DPI 屏——`g_dpiScale` 还是全局一个值，节点图/面板换到 125% / 200% 的屏上时字号与尺寸都不匹配；改成按窗口所在显示器取 scale。** 下一轮动手前先把两个窗口的 DPI 来源、`g_dpiScale` 的读写点与截图验证方式摸清，再决定是每窗一个值还是每显示器缓存。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
+
+### N-7 AI 会话在跑时，节点图与面板边缘亮蓝框 + 流光 —— ✅ 已交付（`c91e503`）
+
+**为什么**：用户原话「我希望 dsh会话 也能够接入这个系统 但是会在现在弹窗周围加一个蓝边缘框 代表自动运行中」。之前只有面板右列一行「AI 正在做」，节点图/面板本身没有「它在自动运行」的余光信号。
+
+**数据源**：只认 `/api/state` 里节点 `handoff.state == "running"`。`agentSessionId` 随 `NodeView` 带出来，只用于日志核对是哪一次会话，不拿 `status=active` 或标题猜。`doc.h` 新增 `HasRunningAgent()` / `RunningAgentSession()`。
+
+**做法**
+- `doc.h`：`NodeView` 增 `agent_session`，`WalkNodes` 读 `handoff.agentSessionId`。
+- `panel.h`：新增 `FramePoint()`（圆角矩形周长参数化，和节点环同一套顺时针）与 `DrawAiFrame()`——三圈随呼吸变亮的 accent 边 + 沿边顺时针 6.4s 一圈的锥形流光；分层窗下用圆点叠，不用 `DrawLine`（平头会露缺口）。`DrawPanel` 在最后单独恢复 `Scale(scale)` 再画，环不跟内容 zoom 缩。
+- `review.h`：`Model` 增 `ai_running`，`Draw` 末尾按整窗 22 DIP 圆角画环，不挡节点/页脚/「知道了」按钮。
+- `main.cpp`：`BuildReviewModel` 开窗即按 running 置位（不依赖后续状态变化）；面板默认静止，新增 `kAiRingTimerId = 0x7D / 16ms` 只重画面板，AI 停或 `HidePanel` 立即 KillTimer；节点图沿用既有 240Hz 动画计时器。状态切换落日志「节点图边缘亮起/熄灭：… session=」。
+
+**验收**（真窗口 1.5x DPI，仓库外假宿主）
+- [x] 节点图：running → 整窗蓝边 + 彗尾；AI 关掉 → 环消失，节点自身「一圈在转」仍正常
+- [x] 面板：running → 整窗蓝边 + 右下「AI 正在做」；环不挡关闭按钮与内容；AI 关掉 → 环消失
+- [x] 120ms 间隔三帧 hash 全不同，流光在走；面板环 60fps 时 CPU 6.0%/6s，AI 停后 0.8%/6s
+- [x] `pnpm test` 115 绿、`pnpm typecheck` 干净
+- [x] 探针 shim / 原生进程收掉，截图只留在仓库外 `D:\work\AI\work\dshwork-shots\`
+
+**留下的**：60fps 环约 6% of one core（面板可见时）；嫌高可降到 30fps（约一半），但流光会看出台阶。6.4s 一圈、三圈外晕的视觉参数集中在 `DrawAiFrame()`，要调只动那一处。
 
 ### N-1 节点图：连线从斜切贝塞尔改成直角折线 —— ✅ 已交付（`eba985a`）
 
@@ -204,11 +226,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- 托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）—— **当前任务 = N-6**
-- 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
-- 跨 DPI 屏：`g_dpiScale` 还是全局一个值，换到 125%/200% 的屏上字号与尺寸都不匹配（N-5 留下的）
+- 跨 DPI 屏：`g_dpiScale` 还是全局一个值，换到 125%/200% 的屏上字号与尺寸都不匹配（N-5 留下的）—— **当前任务 = N-8**
 - 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条）上再看一眼；能复现就新开一轮、带截图与日志
-- 已交付：N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
+- 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
+- 已交付：N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
@@ -282,6 +303,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **本机只有一块屏（2560×1392 DIP），验「换屏跟宽」必须临时伪造**：在 `ReviewAvailWidthDip()` 里按窗口位置返回一个更窄的值（例如窗口 `left / scale > 700` 时 `avail = 1100`），编到仓库外的一份探针件（改 `build.bat` 的 `/OUT` 即可），真机上 `SetWindowPos` 挪窗 → 看窗口自动缩窄 + 日志。**验完把补丁删干净再重编仓库那份**——`git diff` 里出现 `TEMP` 就是没删。
 - **同一个 `build-native.mjs` 产物这次又能读、能起了**：上一条说的「按哈希拦」是**逐产物、且会变**的（这一轮的 567808 B 就正常）。所以别为它改构建参数；被拦时换一份 `/Od` 探针件验证界面，然后照常 `git` 提交源文件。
 - **审阅窗的尺寸变化只走 `LayoutReview()`**（里面有 `SetWindowPos`）：新增「让窗口长高/变宽」的代码时别再手写一份 `SetWindowPos`，否则「开着时保持位置」「夹回工作区」两条规则会被绕过。`RefitReviewToMonitor()` 就是靠 `avail` 比较 + `refitting` 静态标志防重入的。
+- **`WM_TIMER` 的自定义 id 会撞车，症状是「动画只动一帧」**：N-7 面板环最初用 `0x7C`，正好等于既有 `kBtnPulseTimerId`；`WM_TIMER` 按 id 先命中按钮脉冲分支，它立刻 `KillTimer`，环只画了一帧，120ms 后两张截图完全相同。新增计时器 id 先全仓搜一遍（`0x7D` 已被 AI 环占用），并且连续三帧 hash 全不同才算动画在跑。
+- **面板默认是静止的，常驻动画必须自己续帧**：它只在 morph / squash / chipfade 时借 `kAnimTimerId` 跑 240Hz，结束就 KillTimer；AI 运行中的边缘环不能挂靠它，要单独 60fps 计时器，并在 AI 停 / `HidePanel` / 状态消息到达时 KillTimer，否则面板收起后还在空转。
+- **关掉蓝边后圆角外那一小块蓝不是残留**：面板是分层窗，透明圆角会透出桌面/别的窗口；只看左上角会误判成「环没擦掉」。判断整圈是否熄灭看四条边和整窗，或放大按像素采样，别被背景色骗了。
 
 ---
 
