@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-24 · **修掉「节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层」（`2b95980`）**。先真机复现出两条路：① 图在悬停那 260ms 里打开时，悬停摘掉的 `WS_EX_TRANSPARENT` 没还回去，守卫又提前 return → 此后点药丸面板照样盖到图上（6 次撞 1 次）；② 图开着、光标停在药丸上按 Esc 关图 → 下一个 120ms 悬停轮询立刻判定「刚进入」→ 260ms 后面板自己顶出来（3/3 必现，这就是「反复顶」）。补的是同一条规矩的缺口：`UpdateHover` 守卫里 `KillTimer(kOpenTimerId)` + `SetBarClickThrough(true)`；小条 `WM_LBUTTONDOWN/WM_LBUTTONDBLCLK`、`kOpenTimerId` 回调、`kMsgOpenPanel` 都先看新增的 `ReviewShown()`；`CloseReview` 末尾 `AdoptHoverOnBar()` 把「人就停在药丸上」这次悬停认下来；宿主要 panel 时图开着先收图；命中区抽成 `CursorOnPill()` 两处共用。真机验收 11 项全 PASS（含「穿透位残留 300ms 内自动还原」「残留位下立即单击也不顶面板」「关图后重新悬停仍能开面板」老行为没丢），`pnpm test` 121 绿、`pnpm typecheck` 干净；截图在仓库外 `dshwork-shots\fix-graph-hover.png` / `fix-graph-window.png`
 - 2026-10-23 · **真机徽标复核：N-4 的「+N / −N 展开后消失」在真机上复现不出，这条关掉**。做法：把工作区真实文档（7 颗概念节点、一长条）临时改成「根 + 6 子」形状，验完还原——1600 DIP（2400×390 物理 @150%）下一长条：打开只有根一颗、徽标「+6」；按一次 Enter 后根变「−6」、6 颗子节点并排画齐，徽标仍在节点框内右上角、没消失，「讲讲它」胶囊展开前后都在（截图在仓库外 `dshwork-shots\badge-real*.png`）。结论：徽标逻辑本身没丢，`child_count` 每次重建都按 `children` 长度重算；历史「消失」更像是 `fb114bd` 时代 chip 在右下角时被标题/讲解胶囊挤掉的观感。真机上踩到的两个坑（伴随层令牌 ≠ 网页令牌、玻璃条悬停会顶出面板盖住图）已记进「已知的坑」
 - 2026-10-23 · 事件流 `GET /dsh-work/api/feed`（上一轮 `ade1945` 落主体，本轮收口）：任务文档只有「当前/待办」，看不见「刚刚发生了什么」——这层把 journal 翻成人能读的一行，只做翻译不存储（原始事实仍只有 journal 一份）。`feed.ts` 的 `describeEntry()` 覆盖 13 种意图（`plan.add/remove/rename` 与 `node.skip/evidence` 目前**没有任何代码路径会发**，落到 default 分支照常显示，不被静默吞掉）；`store.tailJournal()` 只读尾巴；路由 `limit` 默认 30 / 上限 100，宿主没注入能力回 503、读失败回空列表不抛。**本轮修的**：`at` 一直原样带出 epoch 毫秒（`clock()` 写了却没被用上，提交信息里说的「换算成本地 HH:mm」其实没生效），改成 `clock(line.at)`，`JournalLine.at` 类型同步改成 `number | string`（真实 journal 存毫秒、老日志存 ISO 串）；补 `node.back`（回退）/ `node.advise`（建议）两个意图，原先落到「·」。测试补 3 处（时间格式化、认不出的时间宁可空着、两个新动词）；`pnpm test` 121 绿、`pnpm typecheck` 干净
 - 2026-10-23 · 节点图与面板按**自己那块屏**的缩放绘制（N-8）：原来 `g_dpiScale` 全进程一个值（跟着小条那块屏走），节点图/面板被挪到 125% / 200% 的屏上时窗口尺寸、字号、命中区全按错的比例算。新增 `g_panelScale` / `g_reviewScale` 与 `ScaleOfWindow(HWND, fallback)`（全仓唯一一处 `GetDpiForWindow`），`UpdatePanelScale()` / `UpdateReviewScale()` 变化时各落一行日志；`PanelTargetRect(monitor, scale)` 显式接缩放；`ReviewAvailWidthDip` / `LayoutReview` / `RepaintReview` / `HitTestDot` / `PanelProc` 四处命中 / `ReviewProc` 四处鼠标坐标全部改读各自那份（画在哪、点在哪同源）。两个窗口都补 `WM_DPICHANGED` 重排：审阅窗刻意不 `FitView`（保住人自己的缩放/平移），面板收起 morph 途中直接 `return`（否则会被重新摆成展开尺寸卡住）。真机 1.5x 之外，仓库外探针件伪造三窗同刻不同缩放（bar 125% / panel 250% / review 200%）验过：窗口物理尺寸 = DIP × 该窗 scale、同一 DIP 坐标在 100% 与 200% 下都命中同一颗节点、面板右上 × 在两档缩放下都关得掉；`pnpm test` 115 绿、`pnpm typecheck` 干净
@@ -88,11 +89,12 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`ac90d3c8fd1ce6e809b75c891f0b952c5349d935`（2026-10-23 23:43，tree 与本地 `259048f` 一致；本地在其之上只有 1 个回填本行的提交，下轮推送会一起带走）
+> 当前远端 sha：`4120a6a723fe2b913c508c82724f92d788113133`（2026-10-24 00:24，tree 与本地 `2b95980` 一致；本行回填那次提交下轮推送会一起带走）
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。N-4 已关（真机复现不出，见 N-4 段）。**当前任务 = 修「节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层」**：先用真机复现（图开着时鼠标从玻璃条上划过 / 停住），确认后决定是做「审阅窗开着时小条不响应悬停」还是「同一次悬停只开一次」；复现不出就换下一个候选：节点图里「点已完成的节点可重设为当前任务」。别先改代码猜。
+- 阶段：**P2 · AI 在环**。上一件「节点图开着时小条仍认鼠标 → 面板被反复顶出」**已交付**（`2b95980`，两条复现路都验过，见进度第一条 + 已知的坑里 `WS_EX_TRANSPARENT` 那条）。
+- **当前任务 = 节点图里「点已完成/进行中的节点可把它设为当前任务」**（上一轮板子给的候选，也是一长条里最自然的下一步操作）。先摸清宿主侧有没有对应的落库意图：看 `packages/plugin/src/index.ts` / `store.ts` 里 journal 意图名与 `POST /dsh-work/api/*` 现有路由，**有就接**（节点图上单击一颗非当前节点 → 发意图 → 状态回来重画，选中态仍是「当前」那一颗）；没有就先写进「等用户决定」再换下一件，别自己发明接口。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
 ### N-8 跨 DPI 屏：节点图与面板按各自那块屏的缩放绘制 —— ✅ 已交付
@@ -254,11 +256,12 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- 节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层：先真机复现再修（见「当前任务」）—— **当前任务**
+- ✅ 节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层：两条路真机复现 + 修掉（`2b95980`，见进度第一条）
+- 节点图里点「已完成/进行中」的节点可把它设为当前任务（见「当前任务」）—— **当前任务**
 - ✅ 徽标复核（N-4）：真机 1600 DIP、7 颗节点上复现不出，已关（见 N-4 段真机记录）
 - 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
 - 节点图里点「已选中的节点」会去拆一层、doc 模式没有 jobId 被宿主回错（见「已知的坑」/「等用户决定」）——若要处理是独立一小轮
-- 已交付：N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
+- 已交付：悬停守卫补全（`2b95980`）、N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
@@ -342,7 +345,11 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **探针脚本的调用方式有讲究**：`poke.ps1` 必须用 pwsh（`& .\poke.ps1 …`）；`powershell -File .\poke.ps1 -Scale 1.0` 会报 `A parameter cannot be found that matches parameter name 'Scale'`（原因未查）。`shot.ps1` 必须给 `-Out`，否则报「缺少一个或多个必需参数: Out」，连 `-Keys` 也一起不生效。
 - **节点命中坐标按 `kHeader`（58 DIP）算，不是 34**：节点顶 = `kHeader + pan_y`、左 = `pan_x`（`review.h` 里 `kHeader = 58.0f`）。1600×260 窗口、pan=600,48、zoom=1 时节点占 y 106..164，点 y=165 就差 1 px 落空（`NodeAt` 返回 −1）。最省事的做法是让探针件把 `pan / zoom / BodyWidth / row0` 一起写进日志，一眼能算出该点哪。
 - **伴随层令牌 ≠ 网页令牌**：`~/.dsh/dsh-work/endpoint.json` 里的 `token` 是网页令牌，拿去打 `/dsh-work/api/*` 一律回 `{"error":"forbidden"}`；伴随层令牌是单独一个文件 `~/.dsh/dsh-work/token`（32 位），请求头 `x-dsh-work-token`。真机开图最省事：`POST /dsh-work/api/ui/open {"target":"graph","at":<epoch 毫秒>}`，`at` 要在 15 秒内（伴随层当过期丢掉），`target:"review"` 会被回 400。
-- **玻璃条悬停会顶出面板**，和节点图叠在一起：自动化截节点图时鼠标必须停在空白处（或先移开再截），否则截到的是面板盖在图上的样子；面板盖着窗口时 `shot.ps1 -Expand` 会 `NO_WINDOW`（标题栏被遮），用仓库外 `dshwork-probe\badge_shot.py`（DPI-aware + 自动 Enter）更稳。
+- **玻璃条悬停会顶出面板**，和节点图叠在一起：自动化截节点图时鼠标必须停在空白处（或先移开再截），否则截到的是面板盖在图上的样子；面板盖着窗口时 `shot.ps1 -Expand` 会 `NO_WINDOW`（标题栏被遮），用仓库外 `dshwork-probe\badge_shot.py`（DPI-aware + 自动 Enter）更稳。**根因已在 `2b95980` 修掉**（图开着时悬停整条不认鼠标、关图瞬间也不补弹）；但截**面板**时鼠标仍别停在药丸上——那时图本来就关着，悬停照旧会开面板。
+- **悬停时摘掉的 `WS_EX_TRANSPARENT` 必须在每条提前 `return` 的路上还回去**：小条平时整窗穿透、只靠 120ms 轮询算悬停，悬停那几秒摘掉穿透才好收单击/双击。`UpdateHover` 里「图开着」的分支原来是提前 `return` 的，于是穿透位留在了摘下状态——图开着时点药丸，面板照样盖到图上（实测 6 次撞 1 次）。同理，悬停时排下的 `kOpenTimerId`（260ms）也得在守卫里 `KillTimer`，否则计时器到点不看新状态，照样 `ShowPanel`。本轮把「穿透位开关」收成一个 `SetBarClickThrough(bool)`，悬停分支和守卫都只调它。
+- **`CloseReview()` 之后马上「重新判定悬停」会自己顶面板**：Esc 关图时光标往往还停在药丸上，下一个 120ms 轮询立刻判「刚进入」→ 260ms 后面板自己弹出来（3/3 必现，用户说的「反复顶」）。修法是 `CloseReview` 末尾 `AdoptHoverOnBar()`：光标真在药丸上就把这次悬停「认下来」（`g_bar_hovered = true` + 摘穿透 + 重画）。副作用是有意的——关图后想再开面板要先移开鼠标再回来（或直接单击药丸）；改成「永远不认下来」就会回到反复弹。
+- **`dshwork-shell.exe` 会被卡巴斯基误报成 `Trojan-Spy.Win32.Convagent.gen`**（2026-10-24 弹窗，按钮写「清除并重启计算机」）：**别点**。它不是用户自己编的那份源码的问题，而是卡巴启发式对无签名 + 分层窗 + 全局热键的 exe 下的判断；点了会删掉 `native\shell\build\dshwork-shell.exe`（有时连重启都建议）。要真机测原生件时先确认 exe 还在，不在就重编。
+- **PowerShell 里别把自定义函数命名成 `Move`**：`Move` 是内置别名（→ `Move-Item`），别名优先级高于函数，于是 `Move $PTS` 会被当成移动文件（报「找不到路径 D:\work\AI\work\600」）。探针脚本里改叫 `Set-Pt` 才生效；症状是「脚本能跑、鼠标却一次没动」，验证结果全假。
 - **同一仓库可能同时在跑别的会话**：本轮开工时 HEAD 已被另一个会话推进到 `259048f`，工作区还留着它未提交的 `native/shell/src/main.cpp`。提交前先 `git log -3` + `git status`，只 `git add` 自己改的文件，别 `git add -A`。
 
 ---
