@@ -110,7 +110,14 @@ IDWriteFactory* g_dwrite = nullptr;
 IDWriteTextFormat* g_formatTitle = nullptr;
 IDWriteTextFormat* g_formatMeta = nullptr;
 
+// 小条自己那块屏的缩放（96 DPI = 1.0）。面板和节点图各有各的一份，
+// 见 g_panelScale / g_reviewScale：三个窗口可能分别落在缩放不同的屏上
+// （150% 的笔记本屏 + 100% 的外接屏是常态），共用一个值换屏后字号和尺寸都对不上。
 float g_dpiScale = 1.0f;
+/** 面板窗口所在屏的缩放：面板跟着小条那块屏开，落位后以窗口自己的 DPI 为准 */
+float g_panelScale = 1.0f;
+/** 节点图窗口所在屏的缩放：换屏后按它重排，点击命中也要用同一个数 */
+float g_reviewScale = 1.0f;
 
 // 绘制用资源随窗口尺寸变化，缓存起来免得每帧重建
 ID2D1DCRenderTarget* g_target = nullptr;
@@ -785,6 +792,21 @@ void Repaint() {
  * monitor 传 nullptr 就留在原处；传了就把小条搬到那块屏（双屏时按热键唤起到光标所在的屏）。
  * 必须先重算 DPI：两块屏缩放不同（150% + 100%）是常态，用旧值搬过去会错位。
  */
+/**
+ * 一个窗口所在屏的缩放（96 DPI = 1.0）。
+ *
+ * 谁画谁按自己那块屏算：小条 g_dpiScale、面板 g_panelScale、节点图 g_reviewScale。
+ * 取不到 DPI（拆屏那一瞬间、窗口还没挂上显示器）就用 fallback，
+ * 别把 0 传下去把窗口算成 0 像素。
+ */
+float ScaleOfWindow(HWND window, float fallback) {
+  if (window == nullptr) return fallback;
+  const UINT dpi = GetDpiForWindow(window);
+  if (dpi == 0) return fallback;
+  const float scale = static_cast<float>(dpi) / 96.0f;
+  return scale < 0.1f ? fallback : scale;
+}
+
 void UpdateDpi();  // 定义在下面，这里先声明
 
 void PositionWindow(HMONITOR monitor = nullptr) {
@@ -851,11 +873,40 @@ UINT kReviewFrameMsForScreen() {
 
 
 
-void UpdateDpi();  // 前向声明：PositionWindow 里要先按目标屏重算 DPI
-
+/** 小条自己那块屏的缩放。面板 / 节点图各有各的（g_panelScale / g_reviewScale）。 */
 void UpdateDpi() {
-  const UINT dpi = GetDpiForWindow(g_window);
-  g_dpiScale = (dpi == 0 ? 96 : static_cast<float>(dpi)) / 96.0f;
+  g_dpiScale = ScaleOfWindow(g_window, 1.0f);
+}
+
+/** 面板窗口自己那块屏的缩放。窗口还没落位时保留上一次的值。 */
+void UpdatePanelScale() {
+  const float scale = ScaleOfWindow(g_panel, g_panelScale);
+  if (scale != g_panelScale) {
+    g_panelScale = scale;
+    LogToFile("面板：缩放改成 " + std::to_string(static_cast<int>(g_panelScale * 100.0f + 0.5f)) + "%");
+  }
+}
+
+/** 节点图窗口自己那块屏的缩放。窗口还没落位时保留上一次的值。 */
+void UpdateReviewScale() {
+  const float scale = ScaleOfWindow(g_review, g_reviewScale);
+  if (scale != g_reviewScale) {
+    g_reviewScale = scale;
+    LogToFile("审阅：缩放改成 " + std::to_string(static_cast<int>(g_reviewScale * 100.0f + 0.5f)) + "%");
+  }
+}
+
+/**
+ * 节点图马上要开到小条那块屏上：先按那块屏的 DPI 定基线。
+ *
+ * 排版（BuildReviewModel 里的 avail_w 和 Layout）都要按「能给多宽」算，
+ * 等窗口摆上去再改就晚了。落位之后 EnsureReviewWindow 还会按窗口自己的 DPI 再校一次。
+ * 已经开着就别动：它有自己的屏，正在看的人不该被搬走。
+ */
+void PrepareReviewScale() {
+  if (g_review != nullptr && g_review_open) return;
+  UpdateDpi();
+  g_reviewScale = g_dpiScale;
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -1226,16 +1277,20 @@ RECT PillRectPx() {
   return r;
 }
 
-/** 长条落位：横向居中，贴在屏幕上沿往下一点。 */
-RECT PanelTargetRect() {
+/**
+ * 长条落位：横向居中，贴在屏幕上沿往下一点。
+ * 尺寸按 scale（面板自己那块屏的缩放），monitor 传 nullptr 就用小条那块屏。
+ */
+RECT PanelTargetRect(HMONITOR monitor, float scale) {
+  if (monitor == nullptr) monitor = MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), &info);
-  const int px_w = static_cast<int>(g_panel_dip_w * g_dpiScale);
-  const int px_h = static_cast<int>(g_panel_dip_h * g_dpiScale);
+  GetMonitorInfoW(monitor, &info);
+  const int px_w = static_cast<int>(g_panel_dip_w * scale);
+  const int px_h = static_cast<int>(g_panel_dip_h * scale);
   RECT r = {};
   r.left = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
-  r.top = info.rcWork.top + static_cast<int>(kPanelTopDip * g_dpiScale);
+  r.top = info.rcWork.top + static_cast<int>(kPanelTopDip * scale);
   r.right = r.left + px_w;
   r.bottom = r.top + px_h;
   return r;
@@ -1356,8 +1411,8 @@ void RepaintPanel() {
   }
   dshwork::PanelFormats formats{g_formatPanelTitle, g_formatBody, g_formatPanelMeta, g_formatNode, g_brush};
   const bool ai_running = dshwork::HasRunningAgent(model);
-  dshwork::ui::DrawPanel(g_target, model, g_focus, g_dpiScale, formats,
-                         static_cast<float>(px_w) / g_dpiScale, static_cast<float>(px_h) / g_dpiScale,
+  dshwork::ui::DrawPanel(g_target, model, g_focus, g_panelScale, formats,
+                         static_cast<float>(px_w) / g_panelScale, static_cast<float>(px_h) / g_panelScale,
                          PanelContentAlpha(), PanelZoom(), ai_running, GetTickCount64());
   const HRESULT draw_result = g_target->EndDraw();
   if (FAILED(draw_result)) LogToFile("面板绘制失败 hr=" + std::to_string(static_cast<long>(draw_result)));
@@ -1395,7 +1450,8 @@ float ReviewAvailWidthDip() {
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
   GetMonitorInfoW(ReviewMonitor(), &info);
-  const float scale = g_dpiScale > 0.1f ? g_dpiScale : 1.0f;
+  // 用节点图自己的缩放：它可能跟小条不在同一块屏上（150% + 100% 是常态）。
+  const float scale = g_reviewScale > 0.1f ? g_reviewScale : 1.0f;
   float avail = static_cast<float>(info.rcWork.right - info.rcWork.left) / scale - kReviewMargin * 2.0f;
   if (avail < kReviewMinWidth) avail = kReviewMinWidth;
   return avail;
@@ -1506,8 +1562,8 @@ void LayoutReview() {
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
   GetMonitorInfoW(ReviewMonitor(), &info);
-  const int px_w = static_cast<int>(width_dip * g_dpiScale);
-  const int px_h = static_cast<int>(height_dip * g_dpiScale);
+  const int px_w = static_cast<int>(width_dip * g_reviewScale);
+  const int px_h = static_cast<int>(height_dip * g_reviewScale);
   RECT now = {};
   const bool keep_place = g_review_open && GetWindowRect(g_review, &now) && now.right > now.left;
   int x = 0;
@@ -1519,7 +1575,7 @@ void LayoutReview() {
     y = now.top;
   } else {
     x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
-    y = info.rcWork.top + static_cast<int>(96 * g_dpiScale);
+    y = info.rcWork.top + static_cast<int>(96 * g_reviewScale);
   }
   // 夹回这块屏的工作区：长高之后尾巴别沉到屏幕外面去。
   if (x + px_w > info.rcWork.right) x = info.rcWork.right - px_w;
@@ -1596,8 +1652,8 @@ void RepaintReview() {
   anim.open = g_review_anim_open;
   anim.highlight_y = g_review_hl_y;
   anim.now = GetTickCount64();
-  dshwork::review::Draw(g_target, model, formats, g_dpiScale, static_cast<float>(px_w) / g_dpiScale,
-                        static_cast<float>(px_h) / g_dpiScale, 1.0f, anim);
+  dshwork::review::Draw(g_target, model, formats, g_reviewScale, static_cast<float>(px_w) / g_reviewScale,
+                        static_cast<float>(px_h) / g_reviewScale, 1.0f, anim);
   if (FAILED(g_target->EndDraw())) LogToFile("审阅窗绘制失败");
 
   POINT source = {0, 0};
@@ -1647,6 +1703,9 @@ bool ReloadReviewDraft() {
 }
 
 
+/** 节点图自己那块屏的缩放。绘制和命中必须读同一个数，否则换屏之后点不到东西。 */
+float ReviewScale() { return g_reviewScale > 0.1f ? g_reviewScale : 1.0f; }
+
 LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   if (message == WM_KEYDOWN) {
     // 键盘走这个窗口自己的消息，不注册任何全局热键：
@@ -1673,6 +1732,16 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     return 0;
   }
+  if (message == WM_DPICHANGED) {
+    // 节点图被摆到了缩放不同的屏上（或者系统缩放刚变过）：字号、窗口尺寸、命中区一起重来。
+    // 刻意不放 FitView：人自己的缩放和平移要保住，只按新比例把窗口重排一次。
+    UpdateReviewScale();
+    LayoutReview();
+    dshwork::review::ClampPan(g_review_model);
+    RepaintReview();
+    LogToFile("审阅：换屏后按新缩放 " + std::to_string(static_cast<int>(ReviewScale() * 100.0f + 0.5f)) + "% 重排");
+    return 0;
+  }
   if (message == WM_WINDOWPOSCHANGED || message == WM_DISPLAYCHANGE) {
     // 换屏 / 分辨率变了：可用宽跟着窗口所在的那块屏重算（没变就什么都不做）。
     RefitReviewToMonitor();
@@ -1684,8 +1753,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     POINT pt = {};
     GetCursorPos(&pt);
     ScreenToClient(window, &pt);
-    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-    const float k = dpi > 0.1f ? dpi : 1.0f;
+    const float k = ReviewScale();
     const float x = static_cast<float>(pt.x) / k;
     const float y = static_cast<float>(pt.y) / k;
     const bool hand =
@@ -1714,8 +1782,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
   }
   if (message == WM_MBUTTONDOWN) {
     // 中键拖动平移。坐标同样要先换算成 DIP（理由见 WM_LBUTTONDOWN 那段）。
-    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-    const float k = dpi > 0.1f ? dpi : 1.0f;
+    const float k = ReviewScale();
     g_review_panning = true;
     g_review_pan_lx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
     g_review_pan_ly = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
@@ -1741,8 +1808,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       TrackMouseEvent(&tme);
       g_review_tracking_leave = true;
     }
-    const float dpi = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-    const float k = dpi > 0.1f ? dpi : 1.0f;
+    const float k = ReviewScale();
     const float mx = static_cast<float>(GET_X_LPARAM(lparam)) / k;
     const float my = static_cast<float>(GET_Y_LPARAM(lparam)) / k;
     if (g_review_panning) {
@@ -1779,8 +1845,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
   if (message == WM_LBUTTONDOWN) {
     // 鼠标坐标是物理像素，而模型与布局全是 DIP。不换算就永远命中不到任何一颗
     // （实测 click y=488 实际落在 DIP 325，差 1.5 倍，被算到节点下方去了）。
-    const float dpi_scale = static_cast<float>(GetDpiForWindow(window)) / 96.0f;
-    const float scale_ok = dpi_scale > 0.1f ? dpi_scale : 1.0f;
+    const float scale_ok = ReviewScale();
     const float x = static_cast<float>(GET_X_LPARAM(lparam)) / scale_ok;
     const float y = static_cast<float>(GET_Y_LPARAM(lparam)) / scale_ok;
     if (dshwork::review::CommitHit(g_review_model, x, y)) {
@@ -2075,6 +2140,8 @@ void ShowReview(const std::wstring& job) {
   g_review_busy = false;
   g_review_note = L"正在再拆一层…";
   g_review_expanded.clear();
+  // 排版要先知道「这块屏能给多宽」，先按小条那块屏的 DPI 定基线，别用上一块屏的。
+  PrepareReviewScale();
   if (!ReloadReviewDraft()) LogToFile("审阅窗：草稿拉不下来");
 
   EnsureReviewWindow();
@@ -2114,6 +2181,7 @@ void ShowReviewDoc() {
   g_review_busy = false;
   g_review_note.clear();
   g_review_expanded.clear();
+  PrepareReviewScale();
   BuildReviewModel(*doc);
   // 必须做一次自适应：NodeAt 以 model.fitted 为前置条件，
   // 没 fit 过的模型点哪都返回 -1 —— 表现就是「图能看，点不动」。
@@ -2164,10 +2232,19 @@ void EnsureReviewWindow() {
     g_review = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kReviewClass, L"DSH Work 审阅",
                                WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
   }
+  // 还没开的时候，位置定在小条那块屏上，缩放也按那块屏算。
+  PrepareReviewScale();
   LayoutReview();
   // 记住唤出之前谁在前台，关窗时还回去。
   g_review_prev_focus = GetForegroundWindow();
   ShowWindow(g_review, SW_SHOW);
+  // 窗口落位之后以它自己的 DPI 再校一次：一般和上面算的一样；不一样说明这块屏的缩放
+  // 刚变过（刚改完系统缩放、或者窗口被别的东西搬过），按新值重排，别用旧尺寸收尾。
+  {
+    const float before = g_reviewScale;
+    UpdateReviewScale();
+    if (g_reviewScale != before) LayoutReview();
+  }
   SetForegroundWindow(g_review);
   SetFocus(g_review);
   g_review_open = true;
@@ -2377,7 +2454,8 @@ void RefreshPanelModel() {
   if (wanted != g_panel_dip_w) {
     g_panel_dip_w = wanted;
     if (g_panel_open && g_panel != nullptr && !g_morph.active) {
-      const RECT target = PanelTargetRect();
+      const RECT target =
+          PanelTargetRect(MonitorFromWindow(g_panel, MONITOR_DEFAULTTONEAREST), g_panelScale);
       SetWindowPos(g_panel, HWND_TOPMOST, target.left, target.top, target.right - target.left,
                    target.bottom - target.top, SWP_NOACTIVATE);
     }
@@ -2484,7 +2562,10 @@ void ShowPanel() {
   if (g_panel == nullptr) return;
   RefreshPanelModel();
   MaybeRequestAdvice();
-  const RECT target = PanelTargetRect();
+  // 面板永远是跟着小条那块屏开的：先按小条现在的 DPI 定面板缩放，再算落点。
+  UpdateDpi();
+  g_panelScale = g_dpiScale;
+  RECT target = PanelTargetRect(MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY), g_panelScale);
   const RECT from = PillRectPx();
 
   // 药丸让位：展开动画从它自己的矩形长出去，两个窗口同时可见就会看到两坨东西
@@ -2493,6 +2574,11 @@ void ShowPanel() {
   // 每次显示都重申置顶：Windows 会在一段时间后把置顶窗口降到普通层（lolPing #70）
   SetWindowPos(g_panel, HWND_TOPMOST, from.left, from.top, from.right - from.left, from.bottom - from.top,
                SWP_NOACTIVATE);
+
+  // 窗口已经落位，现在以它自己那块屏为准：万一和上面算的不一样（缩放刚变过），
+  // 就按新值重算终点，别用旧尺寸收尾。
+  UpdatePanelScale();
+  target = PanelTargetRect(MonitorFromWindow(g_panel, MONITOR_DEFAULTTONEAREST), g_panelScale);
 
   g_morph.active = true;
   g_morph.opening = true;
@@ -2649,14 +2735,14 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
       const int x = GET_X_LPARAM(lparam);
       const int y = GET_Y_LPARAM(lparam);
       // 右上角 × 收起
-      if (x > width - static_cast<int>(34 * g_dpiScale) && y < static_cast<int>(34 * g_dpiScale)) {
+      if (x > width - static_cast<int>(34 * g_panelScale) && y < static_cast<int>(34 * g_panelScale)) {
         HidePanel();
         return 0;
       }
       // 「完成」按钮：这一颗做完了，指针前进一格
       {
         const D2D1_RECT_F done =
-            dshwork::ui::AdvanceRectAt(g_panel_dip_w, g_panel_dip_h, g_dpiScale);
+            dshwork::ui::AdvanceRectAt(g_panel_dip_w, g_panel_dip_h, g_panelScale);
         if (x >= done.left && x <= done.right && y >= done.top && y <= done.bottom) {
           g_btn_pulse_at = GetTickCount64();
           g_btn_pulse_on = true;
@@ -2668,7 +2754,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
       // 一排点：点哪颗就把焦点挪过去，右边就写那件事
       const int count = static_cast<int>(g_panel_model.items.size());
       if (count > 0) {
-        const float scale = g_dpiScale;
+        const float scale = g_panelScale;
         const float dots_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
         const int current = g_panel_model.current >= 0 ? g_panel_model.current : 0;
         int visible = dshwork::ui::VisibleDots(g_panel_dip_w);
@@ -2685,7 +2771,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
       }
       // 右侧那一段就是「当前这件事」的描述。点它 = 进节点图看全貌。
       // 这是人从"我做到哪了"切到"整张地图长什么样"的入口。
-      if (x > static_cast<int>(g_panel_dip_w * 0.42 * g_dpiScale)) {
+      if (x > static_cast<int>(g_panel_dip_w * 0.42 * g_panelScale)) {
         if (g_window != nullptr) PostMessageW(g_window, kMsgDocGraph, 0, 0);
         return 0;
       }
@@ -2701,6 +2787,24 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
       // 鼠标在面板上就不要再触发"离开自动收起"
       return 0;
     }
+    case WM_DPICHANGED: {
+      // 窗口被挪到了缩放不同的屏上（或者系统缩放刚变过）：尺寸、字号、命中区全都要按新比例重来。
+      UpdatePanelScale();
+      // 收起的动画正跑着：让它跑完就藏了，这里再摆一次面板会把它卡在展开状态。
+      if (g_morph.active && !g_morph.opening) return 0;
+      if (!g_panel_open) return 0;
+      // 正在跑的展开 morph 直接收尾——它的起止矩形是按旧缩放算的，继续插值会落错地方。
+      g_morph.active = false;
+      {
+        const RECT target =
+            PanelTargetRect(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), g_panelScale);
+        SetWindowPos(window, HWND_TOPMOST, target.left, target.top, target.right - target.left,
+                     target.bottom - target.top, SWP_NOACTIVATE);
+        RepaintPanel();
+        LogToFile("面板：换屏后按新缩放重排，宽=" + std::to_string(target.right - target.left));
+      }
+      return 0;
+    }
     case WM_DESTROY:
       return 0;
     default:
@@ -2712,7 +2816,7 @@ LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
 int HitTestDot(int px, int py) {
   const int count = static_cast<int>(g_panel_model.items.size());
   if (count <= 0) return -1;
-  const float scale = g_dpiScale;
+  const float scale = g_panelScale;
   const float dots_x = (dshwork::ui::kPadX + dshwork::ui::kLeftBlock + dshwork::ui::kGapLeft) * scale;
   RECT rect = {};
   GetWindowRect(g_panel, &rect);

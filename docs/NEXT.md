@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-23 · 节点图与面板按**自己那块屏**的缩放绘制（N-8）：原来 `g_dpiScale` 全进程一个值（跟着小条那块屏走），节点图/面板被挪到 125% / 200% 的屏上时窗口尺寸、字号、命中区全按错的比例算。新增 `g_panelScale` / `g_reviewScale` 与 `ScaleOfWindow(HWND, fallback)`（全仓唯一一处 `GetDpiForWindow`），`UpdatePanelScale()` / `UpdateReviewScale()` 变化时各落一行日志；`PanelTargetRect(monitor, scale)` 显式接缩放；`ReviewAvailWidthDip` / `LayoutReview` / `RepaintReview` / `HitTestDot` / `PanelProc` 四处命中 / `ReviewProc` 四处鼠标坐标全部改读各自那份（画在哪、点在哪同源）。两个窗口都补 `WM_DPICHANGED` 重排：审阅窗刻意不 `FitView`（保住人自己的缩放/平移），面板收起 morph 途中直接 `return`（否则会被重新摆成展开尺寸卡住）。真机 1.5x 之外，仓库外探针件伪造三窗同刻不同缩放（bar 125% / panel 250% / review 200%）验过：窗口物理尺寸 = DIP × 该窗 scale、同一 DIP 坐标在 100% 与 200% 下都命中同一颗节点、面板右上 × 在两档缩放下都关得掉；`pnpm test` 115 绿、`pnpm typecheck` 干净
 - 2026-10-23 · AI 会话在跑时窗口亮蓝边 + 流光（N-7）：只认 `/api/state` 节点的 `handoff.state == "running"`（`agentSessionId` 随 `NodeView` 带出，只用于日志核对，不拿 `status=active` 猜）。节点图与面板整窗画呼吸蓝边 + 6.4s 一圈的流光；面板用单独的 60fps 计时器（`0x7D`），AI 停或面板收起立即 KillTimer，节点图复用既有 240Hz 动画计时器。真机 1.5x 假宿主：两窗 on/off 截图、120ms 三帧 hash 全不同、面板环 6.0%/6s、AI 停后 0.8%/6s；`pnpm test` 115 绿、`pnpm typecheck` 干净（`c91e503`）
 - 2026-10-23 · 托盘与退出入口（N-6）：托盘原来只有「打开面板 / 退出」两项，且退出走 PostQuitMessage + 补发 WM_CLOSE —— 消息循环先停，WM_DESTROY 来不及跑，**托盘图标会留成残影**直到鼠标划过。现在：① 退出只发 WM_CLOSE，统一走 WM_DESTROY（摘图标 → 注销热键 → 退循环）；② 新增 RemoveTrayIcon() 供两处复用；③ 菜单补齐「打开节点图」「显示小条」「退出 DSH Work」，左键仍开面板，气泡提示写明两种操作。真机：`taskkill /PID`（不带 `/F`）= 发 WM_CLOSE，进程干净退出、无残留进程
 - 2026-10-23 · 审阅窗跟着窗口所在的那块屏算宽度（N-5）：原来 `ReviewAvailWidthDip` / `LayoutReview` 都拿**小条**那块屏（`MonitorFromWindow(g_window, …)`）并且只在开窗那一刻算一次，换屏之后还拿着老屏的数——宽屏上开完挪到窄屏，右边那一截永远在屏幕外。改成三处：① 新增 `ReviewMonitor()`，开着就用审阅窗自己的显示器、没开才退回小条那块；② `LayoutReview` 开着时**只改尺寸、位置原地**（原来每次内容变化都重新居中，换屏后一展开节点就整块跳回小条那块屏），并把窗口夹回工作区；③ 新增 `RefitReviewToMonitor()`，在 `ReviewProc` 收到 `WM_WINDOWPOSCHANGED` / `WM_DISPLAYCHANGE` 时重算，**可用宽真变了才动窗口**，变了就 `Layout` + `FitView`（旧平移是按老屏算的）+ 重画并落一行日志。真窗口验过：窗口被挪到 x=1140 后 → 假工作区 1100 DIP 生效 → 窗口自动缩到 1650×390 物理、内容重新居中、日志「审阅：换屏后按新工作区重排，可用宽=1100」；可用宽没变时挪窗不重排，之后按 Enter 展开时窗口原地长高不跳回居中
@@ -89,8 +90,28 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。N-7（AI 运行中的窗口蓝边 + 流光）已交付。**当前任务 = N-8：跨 DPI 屏——`g_dpiScale` 还是全局一个值，节点图/面板换到 125% / 200% 的屏上时字号与尺寸都不匹配；改成按窗口所在显示器取 scale。** 下一轮动手前先把两个窗口的 DPI 来源、`g_dpiScale` 的读写点与截图验证方式摸清，再决定是每窗一个值还是每显示器缓存。
+- 阶段：**P2 · AI 在环**。N-8（跨 DPI 按窗口取缩放）已交付。**当前任务 = 徽标复核：N-4 的「+N / −N 在展开后消失」在代码与真窗口上都复现不出——`has_children` / `child_count` 全仓只有 `BuildReviewModel` 一处赋值，doc / draft 两条路径在探针真窗口里徽标都正常。请在真机 1600 DIP 一长条、7 颗节点上再看一眼；能复现就带截图与日志新开一轮，复现不出就在 N-4 段写明结论后关掉这条。** 复核前先按 `dshwork-probe\shot.ps1` 起真窗口看，不要先改代码猜。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
+
+### N-8 跨 DPI 屏：节点图与面板按各自那块屏的缩放绘制 —— ✅ 已交付
+
+**为什么**：N-5 留下的②。进程虽然是 `PER_MONITOR_AWARE_V2`，但 `g_dpiScale` 全进程只有一个值、跟着小条那块屏走；节点图/面板被摆到 125% / 200% 的屏上时，窗口尺寸、字号、命中区全按小条的比例算——字小一圈、窗口偏一半，点击还会落空。
+
+**做法**（全部在 `native/shell/src/main.cpp`）
+- `ScaleOfWindow(HWND, fallback)`：全仓唯一的 `GetDpiForWindow`（窗口为空 / 返回 0 / 小于 0.1 都退回 fallback）。`g_dpiScale` 只归小条；新增 `g_panelScale` / `g_reviewScale`，`UpdatePanelScale()` / `UpdateReviewScale()` 变化时各落一行日志。
+- `PanelTargetRect(HMONITOR, float scale)` 显式接缩放（原来读全局）。`ReviewAvailWidthDip` / `LayoutReview` / `RepaintReview` / `HitTestDot` / `PanelProc` 四处命中 / `ReviewProc` 四处鼠标坐标全部改读各自那份——**画在哪、点在哪同源**（两套来源并存就会出现「看得到点不到」）。
+- `ShowPanel` 先按小条那块屏的 DPI 定基线再算落点，窗口落位后用 `UpdatePanelScale()` 以它自己的屏校正一次；`PrepareReviewScale()` 同理给节点图（开着就沿用缓存值）。`EnsureReviewWindow` 落位后再校一次。
+- 两个窗口都补 `WM_DPICHANGED`：审阅窗 `UpdateReviewScale` + `LayoutReview` + `ClampPan` + 重画，**刻意不 `FitView`**（人自己的缩放/平移要保住）；面板先收掉展开 morph 再按新缩放摆回目标位，**收起** morph 途中直接 `return`（否则会被重新摆成展开尺寸、再也关不上）。
+
+**验收**（真机 1.5x + 仓库外探针件伪造缩放；本机只有一块屏）
+- [x] 真机 1.5x 走完 bar → 面板 → 节点图：面板 1494×198、节点图 2400×390 物理，与改前一致（无回归），7 颗一长条、直角折线/流光正常
+- [x] 三窗同刻不同缩放（bar 125% / panel 250% / review 200%）：窗口物理尺寸 = DIP × **该窗** scale；旧代码会全按 1.5 算
+- [x] 换屏重排：review 200% → 3200×520、展开后 3200×588；panel 150% → 250% → 2350×330（top 跟着 `kPanelTopDip × scale`）
+- [x] 命中同源：同一 DIP 坐标 (690,135) 在 100% 与 200% 下都命中同一颗节点（`TEMP 命中 … node=0` → 「审阅：本地展开」）；面板右上 × 在 150% / 250% 下都关得掉
+- [x] `pnpm test` 115 绿、`pnpm typecheck` 干净；探针补丁只在 `dshwork-probe\src-fake`，仓库源码无 `TEMP`
+- [x] 截图（`n8-*.png`）只留在仓库外 `D:\work\AI\work\dshwork-probe\`
+
+**留下的**：Windows 下 `WM_DPICHANGED` 只能由系统同步投递，注入不进去（见「已知的坑」），所以「真的从 A 屏拖到 B 屏」这一步只能靠系统事件触发、本轮用探针件里同一段重排体间接验；本机单屏也没法验「拖过去之后的位置」是否符合直觉。另外发现 doc 模式下再点已选中节点会被宿主回 `缺少 jobId 或 nodeId`（既有问题，见「等用户决定」）。
 
 ### N-7 AI 会话在跑时，节点图与面板边缘亮蓝框 + 流光 —— ✅ 已交付（`c91e503`）
 
@@ -226,10 +247,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- 跨 DPI 屏：`g_dpiScale` 还是全局一个值，换到 125%/200% 的屏上字号与尺寸都不匹配（N-5 留下的）—— **当前任务 = N-8**
-- 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条）上再看一眼；能复现就新开一轮、带截图与日志
+- 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条、7 颗节点）上再看一眼；能复现就新开一轮、带截图与日志 —— **当前任务**
 - 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
-- 已交付：N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
+- 节点图里点「已选中的节点」会去拆一层、doc 模式没有 jobId 被宿主回错（见「已知的坑」/「等用户决定」）——若要处理是独立一小轮
+- 已交付：N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
@@ -238,6 +259,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - `kMinFitZoom` 那句「自动适配也不缩小」目前是死的（见「已知的坑」）。恢复它 = 窄窗口里字不再被缩小、内容超出就靠人拖/滚；不恢复 = 现在这样自动缩到装下。要不要恢复？先不动，N-2 加宽只是让它不那么常触发。
 - **「讲讲它」的讲解会覆盖节点原有的 `advice`**（宿主 `learn` 直接 `node.advise` 落库，这是它有意的设计：面板本来就渲染这个字段）。要不要给讲解单独一个字段、与「建议」并存？先不动，等你拍。
 - **审阅窗现在拖不动**（`WS_POPUP` 无标题栏、没有 `WM_NCHITTEST`）：多显示器上想把它放到另一块屏，目前只能靠系统（或等 N-5 的换屏重排在别处触发）。要不要支持「按住标题栏拖动」？先不动，等你拍；加的话是新增手势（顺便得决定拖到边上要不要吸附）。
+- **只读文档图里再点「已选中」的节点会去请求宿主再拆一层**：`ReviewProc` 的 `again` 分支发 `kMsgReview 2` → 宿主 `/api/plan/expand` 要 `jobId`，doc 没有 → 回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只留一行 `审阅再拆 失败：…` 日志。可选：doc 模式里 `again` 只做本地展开/收起（不请求宿主）；或保留请求、失败时浮一句人话。先不动，等你拍。
 
 ---
 ## 硬约束（每一轮都必须遵守）
@@ -306,6 +328,11 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **`WM_TIMER` 的自定义 id 会撞车，症状是「动画只动一帧」**：N-7 面板环最初用 `0x7C`，正好等于既有 `kBtnPulseTimerId`；`WM_TIMER` 按 id 先命中按钮脉冲分支，它立刻 `KillTimer`，环只画了一帧，120ms 后两张截图完全相同。新增计时器 id 先全仓搜一遍（`0x7D` 已被 AI 环占用），并且连续三帧 hash 全不同才算动画在跑。
 - **面板默认是静止的，常驻动画必须自己续帧**：它只在 morph / squash / chipfade 时借 `kAnimTimerId` 跑 240Hz，结束就 KillTimer；AI 运行中的边缘环不能挂靠它，要单独 60fps 计时器，并在 AI 停 / `HidePanel` / 状态消息到达时 KillTimer，否则面板收起后还在空转。
 - **关掉蓝边后圆角外那一小块蓝不是残留**：面板是分层窗，透明圆角会透出桌面/别的窗口；只看左上角会误判成「环没擦掉」。判断整圈是否熄灭看四条边和整窗，或放大按像素采样，别被背景色骗了。
+- **原生缩放一律经 `ScaleOfWindow(HWND, fallback)`**：`GetDpiForWindow` 全仓只留这一处，两个副窗各缓存一份 `g_panelScale` / `g_reviewScale`（`g_dpiScale` 只归小条）。绘制、布局、命中区必须读同一份；两套来源并存时换屏后就会「看得到、点不到」。
+- **`WM_DPICHANGED` 不能用消息注入伪造**：`PostMessage(hwnd, 0x02E0, …)` 直接失败（`GetLastError = 1159`，ERROR_MESSAGE_SYNC_ONLY，这条只允许同步投递）；`SendMessageTimeout(hwnd, 0x02E0, …, SMTO_ABORTIFHUNG, 3000)` 返回 0，进程里连 `ReviewProc` 入口日志都不出现（同一调用方式投 `0x000F` / `0x0201` 都返回 1）。要在单屏上验换屏重排，只能在**仓库外探针件**里给同一段重排体再挂一个可投的消息触发器（本轮 review=`WM_APP+1`、panel=`WM_APP+2`），验完删补丁重编仓库件。
+- **面板 `WM_DPICHANGED` 撞上「收起」morph 会把面板卡在展开态**：收缩动画跑着时按新缩放重排，会重新摆成展开尺寸并 `g_morph.active=false`，而 `g_panel_open` 还是 true → 之后再也关不掉。护栏：`UpdatePanelScale();` 之后先 `if (g_morph.active && !g_morph.opening) return 0;`，再重排。
+- **探针脚本的调用方式有讲究**：`poke.ps1` 必须用 pwsh（`& .\poke.ps1 …`）；`powershell -File .\poke.ps1 -Scale 1.0` 会报 `A parameter cannot be found that matches parameter name 'Scale'`（原因未查）。`shot.ps1` 必须给 `-Out`，否则报「缺少一个或多个必需参数: Out」，连 `-Keys` 也一起不生效。
+- **节点命中坐标按 `kHeader`（58 DIP）算，不是 34**：节点顶 = `kHeader + pan_y`、左 = `pan_x`（`review.h` 里 `kHeader = 58.0f`）。1600×260 窗口、pan=600,48、zoom=1 时节点占 y 106..164，点 y=165 就差 1 px 落空（`NodeAt` 返回 −1）。最省事的做法是让探针件把 `pan / zoom / BodyWidth / row0` 一起写进日志，一眼能算出该点哪。
 
 ---
 

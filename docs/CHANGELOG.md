@@ -1,5 +1,14 @@
 # 变更日志
 
+## 2026-10-23 · 节点图与面板按各自那块屏的缩放绘制
+
+接力板 N-8。`g_dpiScale` 原来全进程一个值，节点图 / 面板被挪到 125% / 200% 的屏上时，窗口尺寸、字号、命中区都按小条那块屏的比例算。
+
+- **每窗一份缩放**：新增 `ScaleOfWindow(HWND, fallback)`（全仓唯一的 `GetDpiForWindow`）与 `g_panelScale` / `g_reviewScale`；`UpdatePanelScale()` / `UpdateReviewScale()` 变化时各落一行日志。`PanelTargetRect(monitor, scale)` 显式接缩放；`ReviewAvailWidthDip`、`LayoutReview`、`RepaintReview`、`HitTestDot`、`PanelProc` 四处命中、`ReviewProc` 四处鼠标坐标全部改读各自那份 —— 画在哪、点在哪同源。
+- **换屏重排**：两个窗口都处理 `WM_DPICHANGED`。审阅窗 `UpdateReviewScale` + `LayoutReview` + `ClampPan` + 重画，刻意不 `FitView`（保住人自己的缩放 / 平移）；面板先收掉展开 morph 再按新缩放摆回目标位；**收起** morph 途中直接返回，否则面板会被重新摆成展开尺寸、再也关不上。
+- 验证：真机 1.5x 走完 bar → 面板 → 节点图（面板 1494×198、节点图 2400×390 物理，与改前一致，无回归）；仓库外探针件伪造三窗同刻不同缩放（bar 125% / panel 250% / review 200%），窗口物理尺寸 = DIP × 该窗 scale，同一 DIP 坐标在 100% / 200% 下都命中同一颗节点，面板右上 × 两档缩放下都关得掉。
+- 踩坑：`WM_DPICHANGED` 既 `PostMessage` 不了（1159 `ERROR_MESSAGE_SYNC_ONLY`）也 `SendMessageTimeout` 不进去，单屏验重排只能在探针件里另挂一个可投的消息触发器。
+
 ## 2026-10-23 · AI 会话在跑时，节点图与面板边缘亮蓝边 + 流光
 
 接力板 N-7。数据只认 `/api/state` 节点 `handoff.state == "running"`（`agentSessionId` 只用于日志核对，不拿 `status=active` 猜）。
