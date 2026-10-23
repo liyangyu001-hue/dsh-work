@@ -31,6 +31,9 @@ struct Row {
   std::string detail;
   std::string acceptance;
   std::string kind;
+  // 这一颗是不是文档的「当前任务」（doc.pointer 指的正是它）。
+  // 和「选中」是两件事：选中是手里拿着的，当前是文档里站着的那一步。
+  bool current = false;
 
   // 排版结果（世界坐标，DIP）。父节点用它的孩子算垂直位置。
   float x = 0.0f;
@@ -44,8 +47,14 @@ struct Model {
   std::vector<Row> rows;
   int selected = -1;
   int total = 0;
+  // 文档里的当前任务 id（doc.pointer）。空 = 不知道 / 草稿没有这个概念，
+  // 这时一颗都不标 —— 猜错比不标更难看。
+  std::string current_id;
   bool busy = false;
   std::wstring busy_text;
+  // 页脚上的一句临时说明（「这一步已经做完了」这类），几秒后自己消失。
+  // 和 busy 分开：busy 会把按钮一起置灰，一句话的提示不该有那种副作用。
+  std::wstring note;
   // 只读模式：看的是已经落库的文档，不是草稿。按钮变成「知道了」，Enter 只展开/收起。
   bool read_only = false;
   // 图里有没有 AI 会话正在跑（节点 handoff.state == running）。
@@ -603,6 +612,17 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
                     selected ? ui::Fade(ui::kAccent, 0.95f * a) : ui::Fade(0xFFFFFFFF, 0.09f * a),
                     selected ? 1.6f : 0.5f);
 
+    // 「当前任务」：左侧一条强调色竖标。
+    //
+    // 为什么另起一样东西：状态点变色和那圈转动都在"动"，静止的一帧里看不出
+    // 人此刻站在哪一颗上；而且 pointer 也可能指着颗 todo，那时没有转圈可看。
+    // 这一条不动、不闪、不抢标题的位置（左边那条 24 DIP 的空槽就是给它留的）。
+    if (row.current) {
+      ui::FillRound(target, fmt.brush,
+                    D2D1::RectF(row.x + 5.0f, row.y + 11.0f, row.x + 8.5f, row.y + row.h - 11.0f), 1.75f,
+                    ui::Fade(ui::kAccent, 0.95f * a));
+    }
+
     // 「正在做」的框：iOS 那种「一圈在转」的效果。
     //
     // 做法：把圆角矩形周长采样成 96 段，按「离光头的距离」算强度衰减
@@ -769,20 +789,25 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   // 页脚一行话：平时教人怎么用（「讲讲它」必须在这里露一次脸，否则没人知道能点），
   // 卡开着时换成怎么关掉，忙的时候显示进度。
   std::wstring hint;
+  UINT32 hint_ink = ui::kTextDim;
   if (model.busy) {
     hint = model.busy_text;
+  } else if (!model.note.empty()) {
+    // 刚点了一颗不能当当前任务的节点：这句是回话，比平时的说明亮一档。
+    hint = model.note;
+    hint_ink = ui::kText;
   } else if (LessonCardOn(model)) {
     hint = L"讲解开着 · Esc 关掉 · ↑↓ 换一颗 · 拖空白平移 · 滚轮缩放";
   } else if (model.lesson_phase == 1) {
     hint = L"正在讲…（一颗概念节点讲一段，讲完会浮在这下面）· Esc 关掉";
   } else if (model.read_only) {
-    hint = L"↑↓ 选 · Enter 展开/收起 · 点概念节点「讲讲它」听讲解 · 拖空白平移 · Esc 关闭";
+    hint = L"双击节点 = 设为当前任务 · ↑↓ 选 · Enter 展开/收起 · 点概念节点「讲讲它」听讲解 · Esc 关闭";
   } else {
     hint = L"↑↓ 选 · Enter 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
   }
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
-           fmt.brush, ui::Fade(ui::kTextDim, a));
+           fmt.brush, ui::Fade(hint_ink, a));
 
   const D2D1_RECT_F commit = CommitRectAt(width_dip, height_dip);
   ui::FillRound(target, fmt.brush, commit, kCommitH * 0.5f,

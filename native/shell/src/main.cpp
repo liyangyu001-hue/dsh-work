@@ -193,6 +193,14 @@ std::string g_review_pending_expand;
 // 最近一次构建用的 JSON 根（草稿或文档）。本地展开/收起只要重建模型，
 // 不该为此再跑一趟 HTTP —— 那是白白多一次往返。
 dshwork::JValue g_review_root;
+// 最近一次轮询拿到的 /api/state 原文。节点图开着时要靠它跟宿主一起变：
+// UI 线程只解析、不自己发请求（一次请求要等一轮链路，够卡一个帧了）。
+// 由 g_model_mutex 一起守着，和 g_model 同一份节奏。
+std::string g_review_state_raw;
+// 页脚上那句临时说明和它的到期时刻（GetTickCount64 的毫秒）。
+// 到期靠每秒一次的轮询顺带撤掉，不额外挂计时器。
+std::wstring g_review_hint;
+ULONGLONG g_review_hint_until = 0;
 
 void ShowReview(const std::wstring& job);
 void ShowReviewDoc();
@@ -245,6 +253,12 @@ void ReviewCommit();
 void CloseReview();
 // 定义在 ReviewProc 之后：「讲讲它」点下去要起后台线程，这里只先声明。
 void StartLesson(const std::string& node_id);
+// 定义在 ShowReviewDoc 之后：轮询每来一轮都要把开着的节点图跟状态对一次。
+void RefreshReviewDoc();
+/** 页脚上说一句话，ms 毫秒后自己消失（见 SetReviewHint 的定义）。 */
+void SetReviewHint(const std::wstring& text, ULONGLONG ms = 2600);
+/** 把图上第 index 行设成当前任务（定义在 ShowReviewDoc 之后）。 */
+void TryFocusRow(int index);
 // 后台拿回结果后由 kMsgReview 6 在 UI 线程贴到模型上（定义在 StartLesson 之后）。
 void ApplyLessonOutcome();
 // 「讲讲它」的结果：网络在后台线程跑，回来后 PostMessage(kMsgReview, 6) 交给 UI 线程。
@@ -415,6 +429,11 @@ void PollLoop() {
       std::string reason;
       if (dshwork::HttpGetJson(endpoint, L"/dsh-work/api/state", body, reason)) {
         model = dshwork::ModelFromDoc(body);
+        {
+          // 同一份原文留给节点图：它只认 doc，自己再请求一次会和这里错开一拍。
+          std::lock_guard<std::mutex> lock(g_model_mutex);
+          g_review_state_raw = body;
+        }
         // 事件流和状态同一次轮询：都是读宿主，分两次请求会让两屏数据不同步
         {
           std::string feed_body;
@@ -974,6 +993,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
           LogToFile(std::string("节点图边缘") + (ai_running ? "亮起：AI 运行中" : "熄灭：没有运行中的会话") +
                     (session.empty() ? "" : " session=" + session));
         }
+        // 状态里「当前任务」换人了（刚从图上点了一颗）：图得跟着重画，
+        // 否则点完只剩一条 HTTP 日志，人看到的是"点了没反应"。
+        RefreshReviewDoc();
       }
       return 0;
     case WM_LBUTTONDBLCLK:
@@ -1514,6 +1536,9 @@ void BuildReviewModel(const dshwork::JValue& root) {
   // 注意：这里不要清 g_review_expanded —— 它是「哪几颗摊开着」的跨次记忆，
   // 每次重建都清掉的话，子行刚放出来就会在下一帧塌回去。
   model.selected = g_review_model.selected;
+  // 「当前任务」：文档的 pointer 指到哪颗，图上就在哪颗上打标。
+  // 草稿（plan 的 nodes 是数组）没有 pointer，读出来是空串，于是一颗都不标。
+  model.current_id = root.GetString("pointer");
 
   const JValue* nodes = root.Get("nodes");
   const JValue* roots = root.Get("roots");
@@ -1550,6 +1575,7 @@ void BuildReviewModel(const dshwork::JValue& root) {
     row.detail = node.GetString("detail");
     row.acceptance = node.GetString("acceptance");
     row.status = node.GetString("status", "todo");
+    row.current = !model.current_id.empty() && id == model.current_id;
     // 概念节点靠它区分：读不到就当普通任务，绝不凭空标成「要学」。
     row.kind = node.GetString("kind", "task");
     // 运行中的交接：图里只要有一颗在跑，整扇窗就亮蓝边（见 review.h Draw）。
@@ -1690,6 +1716,11 @@ void RepaintReview() {
   if (g_review_busy) {
     model.busy = true;
     model.busy_text = g_review_note;
+  }
+  // 页脚那句临时说明：还在有效期内才贴。到期是 RefreshReviewDoc 负责清，
+  // 这里再判一次，是为了"刚过期那一帧"也别多显示半秒。
+  if (!g_review_hint.empty() && GetTickCount64() < g_review_hint_until) {
+    model.note = g_review_hint;
   }
   dshwork::review::Anim anim;
   anim.open = g_review_anim_open;
@@ -1921,9 +1952,9 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
       if (is_double) {
-        const std::string id = g_review_model.rows[static_cast<size_t>(index)].id;
-        std::thread([id]() { PostIntent("node.focus", id); }).detach();
-        LogToFile("审阅：设为当前任务 " + id);
+        // 手势是「双击同一颗」。没做单击：单击还得留给选中和展开，
+        // 更要紧的是单击就改状态的话，光看图就会把当前任务一路挪走。
+        TryFocusRow(index);
         g_review_last_click_row = -1;
         return 0;
       }
@@ -1937,7 +1968,6 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
           PostMessageW(g_window, kMsgReview, 2, 0);
         }
       }
-      RepaintReview();
       RepaintReview();
     }
     return 0;
@@ -2185,6 +2215,8 @@ void ShowReview(const std::wstring& job) {
   g_review_read_only = false;
   g_review_busy = false;
   g_review_note = L"正在再拆一层…";
+  g_review_hint.clear();
+  g_review_hint_until = 0;
   g_review_expanded.clear();
   // 排版要先知道「这块屏能给多宽」，先按小条那块屏的 DPI 定基线，别用上一块屏的。
   PrepareReviewScale();
@@ -2226,6 +2258,8 @@ void ShowReviewDoc() {
   g_review_job.clear();
   g_review_busy = false;
   g_review_note.clear();
+  g_review_hint.clear();
+  g_review_hint_until = 0;
   g_review_expanded.clear();
   PrepareReviewScale();
   BuildReviewModel(*doc);
@@ -2243,6 +2277,124 @@ void ShowReviewDoc() {
   ForceForeground(g_review);
   RepaintReview();
   LogToFile("节点图打开（文档） 行数=" + std::to_string(g_review_model.rows.size()));
+}
+
+/* ───────────────────── 节点图跟着状态走 ───────────────────── */
+
+/** 页脚上说一句话，ms 毫秒后自己消失。 */
+void SetReviewHint(const std::wstring& text, ULONGLONG ms) {
+  g_review_hint = text;
+  g_review_hint_until = GetTickCount64() + ms;
+  // 立刻重画一次：不然要等下一次轮询（最多一秒）才看见这句回话。
+  RepaintReview();
+}
+
+/**
+ * 把某颗节点的祖先都摊开。
+ *
+ * 当前任务可能折在收起来的层里：重建后它依然不在行里，「选中跟过去」就没有落点。
+ * 父子关系用 children 反推（文档和草稿都有这个字段），不认 parentId —— 喂进来的
+ * 文档形态不止一种，缺 parentId 时不该整条路径直接断掉。
+ */
+void ExpandAncestorsOf(const dshwork::JValue& doc, const std::string& id) {
+  const dshwork::JValue* nodes = doc.Get("nodes");
+  if (nodes == nullptr || !nodes->IsObject() || id.empty()) return;
+  if (nodes->Get(id) == nullptr) return;
+  std::map<std::string, std::string> parent_of;
+  for (const auto& kv : nodes->object) {
+    const dshwork::JValue* children = kv.second.Get("children");
+    if (children == nullptr || !children->IsArray()) continue;
+    for (const dshwork::JValue& child : children->array) parent_of[child.text] = kv.first;
+  }
+  std::string cursor = id;
+  for (int guard = 0; guard < 64; ++guard) {  // 走不了几步，防的是环形数据
+    const auto it = parent_of.find(cursor);
+    if (it == parent_of.end()) return;
+    g_review_expanded.insert(it->second);
+    cursor = it->second;
+  }
+}
+
+/**
+ * 让开着的节点图跟着宿主状态走。
+ *
+ * 以前文档地图是「打开那一刻的快照」：点完意图发出去了，图一直不动，
+ * 在人看来就是"点了没反应"。这里每次轮询（kMsgModel，一秒一次）对一次状态，
+ * 只有「当前任务换人了」才重建 —— 每秒重建会把键盘选中的那一行拽回去。
+ */
+void RefreshReviewDoc() {
+  if (g_review == nullptr || !g_review_open) return;
+  // 页脚那句话到期就撤。轮询一秒一次，够当钟用，不必再挂一条计时器。
+  if (g_review_hint_until != 0 && GetTickCount64() >= g_review_hint_until) {
+    g_review_hint.clear();
+    g_review_hint_until = 0;
+    RepaintReview();
+  }
+  if (!g_review_read_only) return;  // 草稿没有「当前任务」这回事
+  std::string raw;
+  {
+    std::lock_guard<std::mutex> lock(g_model_mutex);
+    raw = g_review_state_raw;
+  }
+  if (raw.empty()) return;
+  dshwork::JValue root;
+  if (!dshwork::ParseJson(raw, root)) return;
+  const dshwork::JValue* doc = root.Get("doc");
+  if (doc == nullptr || !doc->IsObject()) return;
+  const std::string pointer = doc->GetString("pointer");
+  if (pointer == g_review_model.current_id) return;  // 没换人：一个像素都不动
+  if (g_review_model.rows.empty()) return;
+
+  // 平移、缩放、讲解卡、哪些层摊开着都是「人手里的上下文」，重建时原样留着。
+  const dshwork::review::Model before = g_review_model;
+  ExpandAncestorsOf(*doc, pointer);
+  BuildReviewModel(*doc);
+  g_review_model.pan_x = before.pan_x;
+  g_review_model.pan_y = before.pan_y;
+  g_review_model.zoom = before.zoom;
+  g_review_model.fitted = before.fitted;
+  g_review_model.lesson_node = before.lesson_node;
+  g_review_model.lesson_phase = before.lesson_phase;
+  g_review_model.lesson_title = before.lesson_title;
+  g_review_model.lesson_text = before.lesson_text;
+  g_review_model.lesson_hint = before.lesson_hint;
+  g_review_model.lesson_unsupported = before.lesson_unsupported;
+  // 选中跟到新的当前任务：人刚在图上点它，视线就在那一颗上。
+  for (size_t i = 0; i < g_review_model.rows.size(); ++i) {
+    if (g_review_model.rows[i].id != pointer) continue;
+    g_review_model.selected = static_cast<int>(i);
+    break;
+  }
+  dshwork::review::ClampPan(g_review_model);
+  LayoutReview();  // 行数可能变了：窗口按新的内容高度长一下
+  RepaintReview();
+  LogToFile("节点图跟着状态重画：当前任务 → " + pointer);
+}
+
+/**
+ * 双击一颗节点 = 把它设成当前任务。
+ *
+ * 判定权在宿主（state.ts 的 node.focus 只让 todo/active 上位），本地一个字都不改：
+ * 发完等下一次轮询把新状态带回来重画。这里只干两件事——拦住注定被拒的情况
+ * （当场说清楚，别让人对着没反应的屏幕猜），以及把意图发出去。
+ */
+void TryFocusRow(int index) {
+  if (!g_review_read_only) return;  // 草稿里的节点还没落库，宿主认不出这些 id
+  if (index < 0 || static_cast<size_t>(index) >= g_review_model.rows.size()) return;
+  const dshwork::review::Row& row = g_review_model.rows[static_cast<size_t>(index)];
+  if (row.status == "done" || row.status == "skipped") {
+    // 收尾过的节点不能上位；要重开得走另一条路（见 NEXT.md「等用户决定」）。
+    SetReviewHint(row.status == "done" ? L"这一步已经做完了，不能再当当前任务"
+                                       : L"这一步已经跳过了，不能再当当前任务");
+    return;
+  }
+  if (row.id == g_review_model.current_id) {
+    SetReviewHint(L"它已经是当前任务了");
+    return;
+  }
+  const std::string id = row.id;
+  LogToFile("审阅：设为当前任务 " + id);
+  std::thread([id]() { PostIntent("node.focus", id); }).detach();
 }
 
 /**
