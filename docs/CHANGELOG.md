@@ -1,5 +1,16 @@
 # 变更日志
 
+## 2026-10-23 · 审阅窗：刚打开就有选中项，Enter 立刻能展开
+
+接力板上挂着 N-4「展开后 +N / −N 徽标消失」。先把这条假设证伪，再修掉同一条线上真机真按不动的那处。
+
+- **证伪「`has_children` 在重建后丢了」**：全仓只有 `BuildReviewModel` 一处给它赋值（取 `children` 数组长度），绘制处还在节点框内、被 `PushAxisAlignedClip` 裁着。用假宿主 + 真窗口把两条数据形态都试了：doc（`nodes` 是对象）「+2」→ 展开「−2」；draft（`nodes` 是数组）同样「−2」，子行都在。待办句最早写在 `fb114bd`，那时徽标还在右下角、与第二轮标题/讲解 pill 抢位置，`aa5ea03` 挪到右上角后这个现象就复现不出来了。
+- **真机上真正按不动的是 Enter**：`ShowReviewDoc` / `ShowReview` 重建前没有行被选过，`selected` 是 −1；`BuildReviewModel` 只夹了上界，于是 `ReviewExpandSelected` 静默 `return`——底栏却写着「Enter 展开/收起」。改成三支：空图 −1、负数或越界回 0。
+- **再拆回来不再重复重建**：`kMsgReview` 的 case 1 拿到新草稿后又按"同索引"往 `g_review_expanded` 塞一次再重拉。展开/拆细后行序会变，同索引已不是刚拆的那颗，会摊开无关节点；而 `ReloadReviewDraft` 早按 `g_review_pending_expand` 展开过。改成重新自适应视野（`FitView` + `ClampPan`）。
+- 「没有选中的行」这条早退路径补了一行日志，免得以后又是"按了没反应"却查不到。
+
+真机 1.5x：打开节点图后**单发 Enter** 直接展开根节点（日志「审阅：本地展开 nd_a」，徽标 +2 → −2）；选到没有子节点的行按 Enter → 宿主 `/api/plan/expand` → 草稿模式加载、根节点按 pending 展开、视野重新适配、没有别的节点被误展开。`pnpm test` 115 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-23 · 玻璃条上多了「打开节点图」：一眼找得到入口
 
 用户原话是「在dsh界面装个打开的按钮 不然不知道怎么打开」——玻璃条上原来只有一枚「打开面板」，节点图还得先进面板再点当前任务，路径两跳、没人猜得到。宿主的 `POST /dsh-work/api/ui/open` 早就认 `target:"graph"`，缺的只是这颗按钮。

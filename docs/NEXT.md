@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-23 · 审阅窗「刚打开按 Enter 没反应」修掉（`a687996`）：`BuildReviewModel` 只夹选中项上界，而重建前没有行被选过、`selected` 是 −1，`ReviewExpandSelected` 直接静默 return，底栏却写着「Enter 展开/收起」；改成三支（空图 −1 / 越界或负数回 0），打开即可展开。顺手去掉 `kMsgReview case 1` 拿到新草稿后「按同索引再插一次 expanded 并重拉」的重建（行序已变，会摊开无关节点；pending 早就开过刚拆的那颗），改成只重新自适应视野；早退路径补日志。真窗口验过：打开后单发 Enter → 日志「审阅：本地展开 nd_a」、徽标「+2」→「−2」；没有子节点的行 Enter → 宿主 expand → 草稿模式按 pending 展开、视野重新适配。**改前先证伪了接力板上的 N-4 假设**：`has_children` 全仓只有 `BuildReviewModel` 一处赋值，doc / draft 两条路径的徽标在真窗口里都正常，「展开后徽标消失」当前代码复现不出（见 N-4 段）
 - 2026-10-23 · 玻璃条加「打开节点图」第二入口（`e1f8191`）：用户原话「在dsh界面装个打开的按钮 不然不知道怎么打开」，而 `target:"graph"` 通道早就通了、只缺 UI。在「打开面板」右侧加一枚描边 ghost 按钮（图标＝两颗上游圆＋一颗下游圆），点一下直接开只读节点图；没有任务树/状态未到时置灰并把原因写进 title（原生 `ShowReviewDoc` 对空 doc 是静默 `return`，点了会像没反应）。两个入口共用 `openCompanion(target)`，四档反馈文案抽进 `packages/plugin/src/client/open-entry.ts`（6 个单测）。真机 1.5x：click 后 1.2s 小条浮出「节点图已打开」、伴随层被顺手拉起、审阅窗 2400×390 物理自动弹前台
 - 2026-10-23 · 节点图上概念节点有了「讲讲它」入口：右下角原来的「学」换成可点 pill，点了先出「正在讲…」，模型讲完把正文 + 练习提示落成图区底部的卡片（Esc / 点空白收起，再点一颗换内容，窗口随卡片长高不盖节点）。宿主 `/api/learn` 回包补了 `view`（标题/正文/提示/是否支持），失败按「宿主没这个接口 / 没这个节点 / 模型没答上来 / 连不上宿主」分四档写清，没有接口时按钮置灰且不再发请求。顺手修了一处真 bug：审阅窗按键被 `WM_KEYDOWN` 与定时器轮询各投一遍，一次 Esc 会先收卡再收窗（240Hz 下两遍间隔 < 60ms），改成同键 220ms 去重（`8fb316f`）。真机 1.5x：点第 7 颗 6s 出卡（物理 2400×390 → 2400×522）、点卡外收起回 390、Esc 后窗口仍在（修复前 `vis=False`）
 - 2026-10-22 · 节点图默认宽 1320 → **1600 DIP**（一长条一次看全 7 颗，全尺寸不缩），并加**屏幕工作区兜底**：工作区比 1600 DIP 窄时窗口退到「工作区宽 − 32 DIP」（下限 640），不再冲出屏幕。真机 1.5x（物理 3840×2160）验证：窗口 2400×390 物理 = 1600×260 DIP 居中，7 颗全尺寸；临时把常量抬到 2600 复验兜底落回 2528 DIP、两侧各 16 DIP（`62a10bd`）
@@ -80,11 +81,11 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`78bb3f673c12a78d3bdb369d88efee6afd2d85a3`（2026-10-23 22:07，tree 与本地 `8ddcb8f` 一致 = `fa4b9b2`；本地在其之上只有 1 个回填本行的提交，下轮推送会一起带走）
+> 当前远端 sha：`a687996c26be35049dfffade7f5c351ad2600a2e`（2026-10-23 22:29，含本轮 N-4 提交；本地在其之上只有回填本行 / 接力板的那一个提交，下轮推送会一起带走）
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。交接入口已通：玻璃条上的「打开面板」（`eed4aed`）与「打开节点图」（`e1f8191`）。**当前任务 = N-4**（审阅窗展开后「+N / −N」徽标消失）。
+- 阶段：**P2 · AI 在环**。交接入口已通：玻璃条上的「打开面板」（`eed4aed`）与「打开节点图」（`e1f8191`）。N-4 已处理完（复现不出去、修掉了这条线上真机上真正按不动的那处，见下面 N-4 段）。**当前任务 = N-5：多显示器时 `avail_w` 跟着窗口所在屏变**。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
 ### N-1 节点图：连线从斜切贝塞尔改成直角折线 —— ✅ 已交付（`eba985a`）
@@ -157,14 +158,35 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 **留下的**：`opening` 是两枚按钮共用的单标志，点一个时另一个也会短暂变淡（一起 1~2s，可接受，真机没看出来）；置灰态只靠 `disabled` + `opacity .55`，没做专门的「空任务树」截图（切空工作区会动用户数据，没做）。
 
+### N-4 审阅窗「+N / −N」徽标在展开后消失 —— ⚠ 当前代码复现不出；修掉了这条线上真机真按不动的那处（`a687996`）
+
+**证伪接力板上的假设（「`has_children` 在重建后丢了」）**
+- `has_children` / `child_count` 全仓只有一处赋值：`native/shell/src/main.cpp:1413-1416`，取 `children` 数组长度；`BuildReviewModel` 每次都重建，没有别的路径能把它清掉。
+- 绘制在 `native/shell/src/review.h:691-699`，位置在节点框内右上角，且被 `PushAxisAlignedClip(box)` 裁着——几何上裁不到；`child_count > 0` 才画，所以"没画出来"等价于"JSON 里 children 空/缺"。
+- 假宿主 + 真窗口实测两条数据形态都正常：doc（`nodes` 是**对象**）路径「+2」→ 展开「−2」；draft（`nodes` 是**数组**）路径同样「−2」，子行都画得出来（截图 `dshwork-probe\badge-before*.png`、`fix-enter.-keys.png`、`fix-draft2.png`）。
+- 待办句最早出现在 `fb114bd`（2026-10-22 审阅窗那一轮），而 chip 当时在**右下角**、第二轮标题与讲解 pill 都在那片；`aa5ea03` 才把 chip 挪到右上角并给概念节点加标记/让出标题宽度。倾向结论：那是历史布局问题，已在 `aa5ea03` 顺带消失。
+
+**这轮真修掉的**
+- **刚打开的节点图按 Enter 没反应**：`ShowReviewDoc` / `ShowReview` 重建前没有行被选过，`selected` 是 −1，`ReviewExpandSelected` 静默 return，而底栏写着「Enter 展开/收起」——用户看到的就是"按了没反应"。`BuildReviewModel` 尾部改成三支：空图 −1、负数越界或过大回 0（原来只夹上界）。
+- **`kMsgReview case 1` 多重建一次**：拿到新草稿后又按"同索引"把新模型里那一行塞进 `g_review_expanded` 再 `ReloadReviewDraft()`。展开/拆细后行序会变，同索引早就不是刚拆的那颗，会摊开无关节点；而 `ReloadReviewDraft` 内部已按 `g_review_pending_expand` 展开过刚拆的那颗。改成 `FitView` + `ClampPan` + `LayoutReview` + `RepaintReview`（新子树把图撑宽时自动重适配）。
+- 「没有选中的行」这条早退路径补一行日志，别再让真机上的"按了没反应"无从查起。
+
+**验收**（真窗口，1.5x DPI）
+- [x] 打开节点图后**单发 Enter**直接展开根节点：日志「审阅：本地展开 nd_a」，徽标「+2」→「−2」，子行与直角折线正常
+- [x] 选到没有子节点的行按 Enter → 宿主 `/api/plan/expand` 成功 → 草稿模式加载（标题「草稿：探测」）、根节点按 pending 展开成「−2」、视野重新适配、没有别的节点被误展开
+- [x] `pnpm test` 115 绿、`pnpm typecheck` 干净
+- [x] 验证用的是同一份源码 `/W0 /Od` 编出的探针件（`/O2` 产物被本机安全策略按哈希拦下，见「已知的坑」）
+
+**留下的**：徽标请在真机（1600 DIP、7 颗一长条）上再瞄一眼，若还能复现就新开一轮带截图。探针设施留在仓库外 `D:\work\AI\work\dshwork-probe\`（`shim.mjs` 假宿主 + `shot.ps1` 按 pid 截真窗口、可投键），下轮验原生界面直接复用。
+
 ---
 
 ## 队列（做完一个换一个，不要并行）
 
-- 多显示器时 `avail_w` 不跟着窗口所在屏变（只在弹窗时算一次）—— **下一轮**（N-4 交付后接这件）
+- 多显示器时 `avail_w` 不跟着窗口所在屏变（只在弹窗时算一次）—— **当前任务 = N-5**
 - 托盘与退出入口（现在只能 `Stop-Process -Name dshwork-shell`）
-- N-4 审阅窗「+N / −N」徽标随重建丢失 → **已提到「当前任务」**
-- 已交付：N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
+- 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条）上再看一眼；能复现就新开一轮、带截图与日志
+- 已交付：N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
@@ -220,7 +242,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - 真机截图会被「预览版说明」欢迎弹窗挡住：Playwright 里先点「继续」再截，别以为页面没渲染。
 - 宿主重启前必须按端口杀监听进程（`Get-NetTCPConnection -LocalPort 64001 -State Listen`），并确认工作目录是 `D:\work\AI\work`，否则任务为空；起完检查 `endpoint.json` 的 pid 是否变了。
 - **验证原生界面不必重启真宿主**：把 `DSH_HOME` 指到临时目录（`<tmp>\dsh-work\endpoint.json` 写 `{"version":1,"url":"http://127.0.0.1:64077","token":"<够长>"}`）再起 `dshwork-shell.exe`，它会读这个 endpoint；本地起个 shim 服务 `/dsh-work/api/state` 就能拿假文档渲染**真窗口**。`ui.target` 必须配一个 15 秒内的 `ui.at`（epoch 毫秒）才会被当成「人刚点的按钮」，否则只更新小条不弹窗。
-- **`FindWindow("DSHWorkNativeReview")` 可能返回 0**（跨进程 + DPI 虚拟化时踩到），改用 `EnumWindows` 按 pid 枚举再比类名；要展开节点不用抢焦点，`PostMessage(hwnd, WM_KEYDOWN, VK_DOWN/VK_RETURN, 0)` 直接投递即可。注意 `ShowReviewDoc` 会清空 `g_review_expanded`——文档节点图刚打开时**只有根节点**，得再按一次 Enter 展开才有跨行连线。
+- **`FindWindow("DSHWorkNativeReview")` 可能返回 0**（跨进程 + DPI 虚拟化时踩到），改用 `EnumWindows` 按 pid 枚举再比类名；要展开节点不用抢焦点，`PostMessage(hwnd, WM_KEYDOWN, VK_DOWN/VK_RETURN, 0)` 直接投递即可。注意 `ShowReviewDoc` 会清空 `g_review_expanded`——文档节点图刚打开时**只有根节点**，要展开得再按一次 Enter（这一下在 N-4 之前是静默无反应，`a687996` 已修）。
 - **别用最近邻放大拼图判断线直不直**：3~4 倍 `NearestNeighbor` 重采样会让本来就直的竖线看起来错位 1 px（本轮差点误判成「折线有缝」）。量像素用 `GetPixel` 逐行扫，一次就能定性。
 - `native/shell/src/review.h` 的 `kMinFitZoom` 是**假生效**：第 80 行注释里有一个字面 `\n`，把 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释；第 234 行的 `if (zoom < kMinFitZoom) …` 同样整行是注释。所以「自动适配也不缩小」其实没实现，内容宽时会缩到 1.0 以下（N-2 加宽后本机已不再缩；真要修会改变窄屏行为，见「等用户决定」）。同样的字面 `\n` 写法别再引入。
 - **要验证「屏幕不够宽就收窄」必须临时把 `kWindowW` 抬到工作区宽（DIP）以上**：本机工作区 2560 DIP，1600 永远走不到回退分支，看着像根本没做。用 2600 那次实测落回 2528 DIP；**验完一定改回来重编**——真机跑的是最后一次编出的二进制，别把调试值留在仓库里。
@@ -232,6 +254,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **玻璃条上的「打开节点图」必须自己判空**：原生 `ShowReviewDoc` 读到空 doc 是静默 `return`——不弹窗、不报错、小条也没提示，表现就是「点了没反应」。所以按钮按节点数置灰，`nodeCount===null`（状态还没到）也别当成 0。
 - **点「打开节点图」会顺手把伴随层拉起来**（宿主 `spawn` 的是 `native/shell/build/dshwork-shell.exe`），随后桌面会多一个 TOPMOST 的审阅窗。验证完记得 `Stop-Process -Name dshwork-shell`，别把用户的桌面一直占着；顺带它还会把 `endpoint.json` 的 pid 写成自己。
 - **Playwright 探针取提示胶囊要取全部 `[aria-live="polite"]`**：玻璃条标题也是 `role=status aria-live=polite`，`querySelector` 只拿得到第一个（标题），提示胶囊是第二个、2.8s 后自己消失；`querySelectorAll` 再挑最后一句才靠得住。
+- **编译出来的 exe 突然"读不了也起不来"时，别在 ACL / 占用上死磕**（2026-10-23 踩了一小时）：`node scripts/build-native.mjs dshwork-shell` 报成功后，`[IO.File]::ReadAllBytes` / `certutil -hashfile` / `Start-Process` 一律 `拒绝访问`（`ERROR_ACCESS_DENIED`），而 `icacls` 干净（无 DENY）、文件**删得掉**、同目录里复制进来的 `whoami.exe` 能读能跑、Defender 报 `AntivirusEnabled=False`。对照实验：同一份源码换 `/W0 /Od` 编到 `D:\work\AI\work\dshwork-probe\shell-t3.exe` → 读、启动都正常；`/O2` 编到任何路径、任何名字都被挡（把 hello.exe 改名成 `native\shell\build\dshwork-shell.exe` 也会被挡）。结论：**本机那个安全策略按产物哈希/内容拦，不是我们的代码、不是 ACL、不是占用**。办法：另编一份 `/Od` 的探针件来真机验证界面（同源码只差优化等级），仓库里照旧留 `build-native.mjs` 的产物；别为了这个改构建参数提交。
+- **`job_kill` / `Stop-Job` 杀掉 pwsh 后台作业不会带走它起的 `node` 子进程**：探针 shim 重启时必报 `EADDRINUSE 127.0.0.1:64077`，原生日志只写「轮询失败：请求失败」（很容易误判成协议不对）。先 `Get-NetTCPConnection -LocalPort 64077 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }` 再起。
 
 ---
 
