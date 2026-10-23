@@ -197,6 +197,11 @@ dshwork::JValue g_review_root;
 // UI 线程只解析、不自己发请求（一次请求要等一轮链路，够卡一个帧了）。
 // 由 g_model_mutex 一起守着，和 g_model 同一份节奏。
 std::string g_review_state_raw;
+// 「这份文档画出来的行变了没有」的签名：树形状 + 每颗的 status / kind / 标题 +
+// 运行中的交接。只比 doc.pointer 的话，人在别处把某颗做完了（当前任务没换人），
+// 图上那颗永远还是旧的圆点。BuildReviewModel 每次重建都会重算它，所以本地展开、
+// 换草稿、开新文档之后它和行始终对得上。
+std::string g_review_signature;
 // 页脚上那句临时说明和它的到期时刻（GetTickCount64 的毫秒）。
 // 到期靠每秒一次的轮询顺带撤掉，不额外挂计时器。
 std::wstring g_review_hint;
@@ -1525,10 +1530,71 @@ float ReviewAvailWidthDip() {
 void RepaintReview();
 void TickReviewAnim();
 
+/** 一颗节点对「画出来的那张图」的贡献：状态、外形、标题、有没有人在替它干活。 */
+void AppendNodeSignature(const dshwork::JValue& node, std::string& out) {
+  out += node.GetString("status", "todo");
+  out.push_back('\x1f');
+  out += node.GetString("kind", "task");
+  out.push_back('\x1f');
+  out += node.GetString("title");
+  out.push_back('\x1f');
+  const dshwork::JValue* handoff = node.Get("handoff");
+  if (handoff != nullptr && handoff->IsObject()) out += handoff->GetString("state");
+  out.push_back('\x1f');
+  const dshwork::JValue* children = node.Get("children");
+  if (children != nullptr && children->IsArray()) {
+    for (const dshwork::JValue& child : children->array) {
+      out += child.text;
+      out.push_back(',');
+    }
+  }
+  out.push_back('\x1e');
+}
+
+/**
+ * 这份文档「画出来会变吗」的签名 —— 变了才重建。
+ *
+ * 只比 doc.pointer 不够：人在别处把某一颗做完了、当前任务并没换人，图上那颗
+ * 就会一直挂着旧的圆点，得关掉重开才变。所以签名要覆盖「重建出来的行会不一样」
+ * 的全部东西：树形状（谁挂在哪、顺序）+ 每颗的 status / kind / 标题 + 交接状态。
+ *
+ * 不能拿原文 JSON 直接比：宿主每次回包都可能换字段顺序、多带 seq / ui 之类
+ * 无关字段，那会变成每秒重建一次 —— 症状比原问题更烦人。
+ */
+std::string ReviewDocSignature(const dshwork::JValue& doc) {
+  using dshwork::JValue;
+  std::string sig = doc.GetString("pointer");
+  sig.push_back('\x1e');
+  const JValue* roots = doc.Get("roots");
+  if (roots != nullptr && roots->IsArray()) {
+    for (const JValue& id : roots->array) {
+      sig += id.text;
+      sig.push_back(',');
+    }
+  }
+  sig.push_back('\x1e');
+  const JValue* nodes = doc.Get("nodes");
+  if (nodes == nullptr) return sig;
+  // 两种形态都要认：草稿是数组、落库文档是对象。对象本身按 id 有序，
+  // 数组就按原顺序 —— 顺序决定行的先后，不能被当成「没变」。
+  if (nodes->IsArray()) {
+    for (const JValue& node : nodes->array) AppendNodeSignature(node, sig);
+  } else if (nodes->IsObject()) {
+    for (const auto& entry : nodes->object) {
+      sig += entry.first;
+      sig.push_back('\x1f');
+      AppendNodeSignature(entry.second, sig);
+    }
+  }
+  return sig;
+}
+
 /** 把草稿 JSON 摊平成行：结构折进 depth，绘制与命中只认行。 */
 void BuildReviewModel(const dshwork::JValue& root) {
   using dshwork::JValue;
   g_review_root = root;
+  // 记下这份输入画出来是什么样：轮询那边拿同一套签名比，没变就一个像素都不动。
+  g_review_signature = ReviewDocSignature(root);
   dshwork::review::Model model;
   model.title = dshwork::Widen(root.GetString("title"));
   // 宽度先定下来：Layout/FitView 都要按它能给多少宽来排版，等开窗时再改就晚了。
@@ -2342,12 +2408,23 @@ void RefreshReviewDoc() {
   const dshwork::JValue* doc = root.Get("doc");
   if (doc == nullptr || !doc->IsObject()) return;
   const std::string pointer = doc->GetString("pointer");
-  if (pointer == g_review_model.current_id) return;  // 没换人：一个像素都不动
+  // 拿整份文档的签名比一次：树形状、每颗的状态、交接状态都算在里面。
+  // 只看 pointer 的话，人在别处把一颗做完了（当前任务没换人），图上那颗
+  // 就会一直挂着旧圆点，得关掉重开才变。
+  if (ReviewDocSignature(*doc) == g_review_signature) return;  // 真的没变：一个像素都不动
   if (g_review_model.rows.empty()) return;
 
   // 平移、缩放、讲解卡、哪些层摊开着都是「人手里的上下文」，重建时原样留着。
   const dshwork::review::Model before = g_review_model;
-  ExpandAncestorsOf(*doc, pointer);
+  const bool pointer_changed = pointer != g_review_model.current_id;
+  // 选中项按 id 记：行索引会跟着树形状整体挪位，照抄编号会选到别的颗上去。
+  std::string selected_id;
+  if (before.selected >= 0 && static_cast<size_t>(before.selected) < before.rows.size()) {
+    selected_id = before.rows[static_cast<size_t>(before.selected)].id;
+  }
+  // 只有真的换了当前任务才把祖先摊开（人要看清走到哪了）。单纯某颗状态变了
+  // 就别动他手里的折叠：他可能正盯着另一支看。
+  if (pointer_changed) ExpandAncestorsOf(*doc, pointer);
   BuildReviewModel(*doc);
   g_review_model.pan_x = before.pan_x;
   g_review_model.pan_y = before.pan_y;
@@ -2359,16 +2436,19 @@ void RefreshReviewDoc() {
   g_review_model.lesson_text = before.lesson_text;
   g_review_model.lesson_hint = before.lesson_hint;
   g_review_model.lesson_unsupported = before.lesson_unsupported;
-  // 选中跟到新的当前任务：人刚在图上点它，视线就在那一颗上。
-  for (size_t i = 0; i < g_review_model.rows.size(); ++i) {
-    if (g_review_model.rows[i].id != pointer) continue;
+  // 换人了：选中跟到新的当前任务——人刚在图上点它，视线就在那一颗上。
+  // 没换人：留在原来那颗，哪怕它换了行号。
+  const std::string& anchor = pointer_changed ? pointer : selected_id;
+  for (size_t i = 0; i < g_review_model.rows.size() && !anchor.empty(); ++i) {
+    if (g_review_model.rows[i].id != anchor) continue;
     g_review_model.selected = static_cast<int>(i);
     break;
   }
   dshwork::review::ClampPan(g_review_model);
   LayoutReview();  // 行数可能变了：窗口按新的内容高度长一下
   RepaintReview();
-  LogToFile("节点图跟着状态重画：当前任务 → " + pointer);
+  LogToFile(pointer_changed ? "节点图跟着状态重画：当前任务 → " + pointer
+                            : std::string("节点图跟着状态重画：状态变了（当前任务没换人）"));
 }
 
 /**
