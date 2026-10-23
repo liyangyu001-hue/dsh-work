@@ -539,7 +539,7 @@ inline void DrawFeed(ID2D1RenderTarget* target, const WorkModel& model, const Pa
   const float h = dip_h * scale;
   const D2D1_RECT_F box = D2D1::RectF(20.0f * scale, h - 30.0f * scale, w - 20.0f * scale, h - 8.0f * scale);
   target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-  Text(target, model.feed.front(), fmt.meta, box, fmt.brush, Fade(0x9AA0A6, alpha * 0.72f));
+  Text(target, model.feed.front(), fmt.meta, box, fmt.brush, Fade(0x9AA0A6, alpha * 0.66f));
   target->PopAxisAlignedClip();
 }
 
