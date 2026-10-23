@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-23 · **真机徽标复核：N-4 的「+N / −N 展开后消失」在真机上复现不出，这条关掉**。做法：把工作区真实文档（7 颗概念节点、一长条）临时改成「根 + 6 子」形状，验完还原——1600 DIP（2400×390 物理 @150%）下一长条：打开只有根一颗、徽标「+6」；按一次 Enter 后根变「−6」、6 颗子节点并排画齐，徽标仍在节点框内右上角、没消失，「讲讲它」胶囊展开前后都在（截图在仓库外 `dshwork-shots\badge-real*.png`）。结论：徽标逻辑本身没丢，`child_count` 每次重建都按 `children` 长度重算；历史「消失」更像是 `fb114bd` 时代 chip 在右下角时被标题/讲解胶囊挤掉的观感。真机上踩到的两个坑（伴随层令牌 ≠ 网页令牌、玻璃条悬停会顶出面板盖住图）已记进「已知的坑」
 - 2026-10-23 · 事件流 `GET /dsh-work/api/feed`（上一轮 `ade1945` 落主体，本轮收口）：任务文档只有「当前/待办」，看不见「刚刚发生了什么」——这层把 journal 翻成人能读的一行，只做翻译不存储（原始事实仍只有 journal 一份）。`feed.ts` 的 `describeEntry()` 覆盖 13 种意图（`plan.add/remove/rename` 与 `node.skip/evidence` 目前**没有任何代码路径会发**，落到 default 分支照常显示，不被静默吞掉）；`store.tailJournal()` 只读尾巴；路由 `limit` 默认 30 / 上限 100，宿主没注入能力回 503、读失败回空列表不抛。**本轮修的**：`at` 一直原样带出 epoch 毫秒（`clock()` 写了却没被用上，提交信息里说的「换算成本地 HH:mm」其实没生效），改成 `clock(line.at)`，`JournalLine.at` 类型同步改成 `number | string`（真实 journal 存毫秒、老日志存 ISO 串）；补 `node.back`（回退）/ `node.advise`（建议）两个意图，原先落到「·」。测试补 3 处（时间格式化、认不出的时间宁可空着、两个新动词）；`pnpm test` 121 绿、`pnpm typecheck` 干净
 - 2026-10-23 · 节点图与面板按**自己那块屏**的缩放绘制（N-8）：原来 `g_dpiScale` 全进程一个值（跟着小条那块屏走），节点图/面板被挪到 125% / 200% 的屏上时窗口尺寸、字号、命中区全按错的比例算。新增 `g_panelScale` / `g_reviewScale` 与 `ScaleOfWindow(HWND, fallback)`（全仓唯一一处 `GetDpiForWindow`），`UpdatePanelScale()` / `UpdateReviewScale()` 变化时各落一行日志；`PanelTargetRect(monitor, scale)` 显式接缩放；`ReviewAvailWidthDip` / `LayoutReview` / `RepaintReview` / `HitTestDot` / `PanelProc` 四处命中 / `ReviewProc` 四处鼠标坐标全部改读各自那份（画在哪、点在哪同源）。两个窗口都补 `WM_DPICHANGED` 重排：审阅窗刻意不 `FitView`（保住人自己的缩放/平移），面板收起 morph 途中直接 `return`（否则会被重新摆成展开尺寸卡住）。真机 1.5x 之外，仓库外探针件伪造三窗同刻不同缩放（bar 125% / panel 250% / review 200%）验过：窗口物理尺寸 = DIP × 该窗 scale、同一 DIP 坐标在 100% 与 200% 下都命中同一颗节点、面板右上 × 在两档缩放下都关得掉；`pnpm test` 115 绿、`pnpm typecheck` 干净
 - 2026-10-23 · AI 会话在跑时窗口亮蓝边 + 流光（N-7）：只认 `/api/state` 节点的 `handoff.state == "running"`（`agentSessionId` 随 `NodeView` 带出，只用于日志核对，不拿 `status=active` 猜）。节点图与面板整窗画呼吸蓝边 + 6.4s 一圈的流光；面板用单独的 60fps 计时器（`0x7D`），AI 停或面板收起立即 KillTimer，节点图复用既有 240Hz 动画计时器。真机 1.5x 假宿主：两窗 on/off 截图、120ms 三帧 hash 全不同、面板环 6.0%/6s、AI 停后 0.8%/6s；`pnpm test` 115 绿、`pnpm typecheck` 干净（`c91e503`）
@@ -87,11 +88,11 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`27afa44f78e742a34c8d4b8c745e7dc1e60081c4`（2026-10-23 23:27，tree 与本地 `39c461a` 一致；本地在其之上只有 1 个回填本行的提交，下轮推送会一起带走）
+> 当前远端 sha：`ac90d3c8fd1ce6e809b75c891f0b952c5349d935`（2026-10-23 23:43，tree 与本地 `259048f` 一致；本地在其之上只有 1 个回填本行的提交，下轮推送会一起带走）
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。N-8（跨 DPI 按窗口取缩放）已交付。**当前任务 = 徽标复核：N-4 的「+N / −N 在展开后消失」在代码与真窗口上都复现不出——`has_children` / `child_count` 全仓只有 `BuildReviewModel` 一处赋值，doc / draft 两条路径在探针真窗口里徽标都正常。请在真机 1600 DIP 一长条、7 颗节点上再看一眼；能复现就带截图与日志新开一轮，复现不出就在 N-4 段写明结论后关掉这条。** 复核前先按 `dshwork-probe\shot.ps1` 起真窗口看，不要先改代码猜。
+- 阶段：**P2 · AI 在环**。N-4 已关（真机复现不出，见 N-4 段）。**当前任务 = 修「节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层」**：先用真机复现（图开着时鼠标从玻璃条上划过 / 停住），确认后决定是做「审阅窗开着时小条不响应悬停」还是「同一次悬停只开一次」；复现不出就换下一个候选：节点图里「点已完成的节点可重设为当前任务」。别先改代码猜。
 - 规矩不变：一件事做完就停；需要拍板的设计问题写进「等用户决定」，不要卡在那里。
 
 ### N-8 跨 DPI 屏：节点图与面板按各自那块屏的缩放绘制 —— ✅ 已交付
@@ -224,7 +225,12 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - [x] `pnpm test` 115 绿、`pnpm typecheck` 干净
 - [x] 验证用的是同一份源码 `/W0 /Od` 编出的探针件（`/O2` 产物被本机安全策略按哈希拦下，见「已知的坑」）
 
-**留下的**：徽标请在真机（1600 DIP、7 颗一长条）上再瞄一眼，若还能复现就新开一轮带截图。探针设施留在仓库外 `D:\work\AI\work\dshwork-probe\`（`shim.mjs` 假宿主 + `shot.ps1` 按 pid 截真窗口、可投键），下轮验原生界面直接复用。
+**真机复核（2026-10-23）—— 复现不出，本条关闭**
+- 用的是工作区真实文档（7 颗概念节点、标题「搞懂幂等及其与反复重试的关系」）：先备份 `work.json`，再把同一份数据临时改成「根 + 6 子」（只改 `parentId` / `children` / `roots` / `pointer`），验完已还原（`roots=7 nodes=7`，备份在仓库外 `dshwork-probe\work.json.bak`）。
+- 宿主与伴随层都是真进程，审阅窗 2400×390 物理 = 1600 DIP 一长条（@150%）：打开只有根一颗、徽标「+6」；按一次 Enter 后根变「−6」、6 颗子节点并排画齐（`用例子定义幂等` / `区分幂等与重试安全` / `制作操作判断表` / `归纳重试导致问题的条件` / `整理常见防重手段与边界` / `用自测讲清二者关系`），徽标稳定在节点框内右上角、没消失；放大裁剪确认「−」号正常（`dshwork-shots\badge-real.png`、`badge-real-expanded.png`、两张 `-zoom.png`）。
+- 结论：徽标逻辑没丢，`child_count` 每次重建都按 `children` 长度重算；「消失」是 `fb114bd` 时代 chip 在右下角时被标题 / 讲解胶囊挤掉的观感（`aa5ea03` 挪到右上后已消失）。
+
+**留下的**：要再验一次直接跑 `dshwork-probe\badge_shot.py --pid <dshwork-shell 的 pid>`（DPI-aware 抓真窗、自动按 Enter）；别在面板盖着图的时候用 `shot.ps1 -Expand`，会 `NO_WINDOW`。探针设施都在仓库外 `D:\work\AI\work\dshwork-probe\`，下轮验原生界面直接复用。
 
 ### N-5 多显示器时可用宽跟着窗口所在屏变 —— ✅ 已交付
 
@@ -248,7 +254,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
-- 徽标复核：N-4 在代码与真窗口上都复现不出，请在真机（1600 DIP 一长条、7 颗节点）上再看一眼；能复现就新开一轮、带截图与日志 —— **当前任务**
+- 节点图开着时小条仍认鼠标 → 面板被反复顶出、图上一层套一层：先真机复现再修（见「当前任务」）—— **当前任务**
+- ✅ 徽标复核（N-4）：真机 1600 DIP、7 颗节点上复现不出，已关（见 N-4 段真机记录）
 - 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
 - 节点图里点「已选中的节点」会去拆一层、doc 模式没有 jobId 被宿主回错（见「已知的坑」/「等用户决定」）——若要处理是独立一小轮
 - 已交付：N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
@@ -334,6 +341,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **面板 `WM_DPICHANGED` 撞上「收起」morph 会把面板卡在展开态**：收缩动画跑着时按新缩放重排，会重新摆成展开尺寸并 `g_morph.active=false`，而 `g_panel_open` 还是 true → 之后再也关不掉。护栏：`UpdatePanelScale();` 之后先 `if (g_morph.active && !g_morph.opening) return 0;`，再重排。
 - **探针脚本的调用方式有讲究**：`poke.ps1` 必须用 pwsh（`& .\poke.ps1 …`）；`powershell -File .\poke.ps1 -Scale 1.0` 会报 `A parameter cannot be found that matches parameter name 'Scale'`（原因未查）。`shot.ps1` 必须给 `-Out`，否则报「缺少一个或多个必需参数: Out」，连 `-Keys` 也一起不生效。
 - **节点命中坐标按 `kHeader`（58 DIP）算，不是 34**：节点顶 = `kHeader + pan_y`、左 = `pan_x`（`review.h` 里 `kHeader = 58.0f`）。1600×260 窗口、pan=600,48、zoom=1 时节点占 y 106..164，点 y=165 就差 1 px 落空（`NodeAt` 返回 −1）。最省事的做法是让探针件把 `pan / zoom / BodyWidth / row0` 一起写进日志，一眼能算出该点哪。
+- **伴随层令牌 ≠ 网页令牌**：`~/.dsh/dsh-work/endpoint.json` 里的 `token` 是网页令牌，拿去打 `/dsh-work/api/*` 一律回 `{"error":"forbidden"}`；伴随层令牌是单独一个文件 `~/.dsh/dsh-work/token`（32 位），请求头 `x-dsh-work-token`。真机开图最省事：`POST /dsh-work/api/ui/open {"target":"graph","at":<epoch 毫秒>}`，`at` 要在 15 秒内（伴随层当过期丢掉），`target:"review"` 会被回 400。
+- **玻璃条悬停会顶出面板**，和节点图叠在一起：自动化截节点图时鼠标必须停在空白处（或先移开再截），否则截到的是面板盖在图上的样子；面板盖着窗口时 `shot.ps1 -Expand` 会 `NO_WINDOW`（标题栏被遮），用仓库外 `dshwork-probe\badge_shot.py`（DPI-aware + 自动 Enter）更稳。
+- **同一仓库可能同时在跑别的会话**：本轮开工时 HEAD 已被另一个会话推进到 `259048f`，工作区还留着它未提交的 `native/shell/src/main.cpp`。提交前先 `git log -3` + `git status`，只 `git add` 自己改的文件，别 `git add -A`。
 
 ---
 
