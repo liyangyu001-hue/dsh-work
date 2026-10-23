@@ -22,12 +22,13 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviseNode } from './advise.ts';
 import { learnNode } from './learning.ts';
 import { planFromText } from './planning.ts';
+import { describeEntry, titleLookup } from './feed.ts';
 import { createUiBridge, resolveCompanionExecutable, spawnCompanion } from './ui-open.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
@@ -508,6 +509,16 @@ export function apply(ctx: any, config?: PluginConfig): void {
     ]);
     const ui = createUiBridge(shellExe === null ? {} : { launch: () => spawnCompanion(shellExe) });
 
+    // 事件流：日志里存的只有 id，标题按当前文档现取（标题会改，日志不改）。
+    const feed: FeedApi = {
+      async read(limit: number) {
+        const lines = await store.tailJournal(limit);
+        const doc = store.snapshot;
+        const nodes = doc.nodes as unknown as Record<string, { title?: string }>;
+        const titleOf = titleLookup(nodes);
+        return lines.map((line) => describeEntry(line, titleOf)).reverse();
+      },
+    };
     const http = createHttpHandler({
       runtime: {
         version,
@@ -528,6 +539,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       advise,
       learn,
       planText,
+      feed,
       ui,
     });
 

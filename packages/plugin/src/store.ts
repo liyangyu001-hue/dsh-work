@@ -29,6 +29,7 @@ import type {
   JournalEntry,
   WorkDoc,
 } from '@dshwork/core';
+import type { JournalLine } from './feed.ts';
 
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 
@@ -140,6 +141,28 @@ export class WorkStore {
     return this.doc.seq;
   }
 
+  /**
+   * 读日志尾巴（最新的在后调用方自己 reverse）。
+   *
+   * 为什么只提供「尾巴」：事件流是给人看的最近几十条，不是审计导出；
+   * 整文件读进来会让日志涨到几 MB 之后每次开面板都慢一拍。
+   */
+  async tailJournal(limit = 30): Promise<JournalLine[]> {
+    const raw = await readFileOrNull(this.journalPath);
+    if (raw === null || raw === '') return [];
+    const lines = raw.split('\n');
+    const out: JournalLine[] = [];
+    for (let i = lines.length - 1; i >= 0 && out.length < limit; i -= 1) {
+      const text = (lines[i] ?? '').trim();
+      if (text === '') continue;
+      try {
+        out.push(JSON.parse(text) as JournalLine);
+      } catch {
+        // 半行（写到一半断电）跳过即可，不值得为它挡住整个事件流
+      }
+    }
+    return out.reverse();
+  }
   get lastError(): string | null {
     return this.lastWriteError;
   }

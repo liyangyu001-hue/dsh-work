@@ -48,6 +48,10 @@ export interface WorkRuntime {
   subscribe(listener: (doc: WorkDoc) => void): () => void;
 }
 
+/** 事件流：把 journal 翻成给人读的行。 */
+export interface FeedApi {
+  read(limit: number): Promise<unknown[]>;
+}
 export interface HttpOptions {
   runtime: WorkRuntime;
   /** 返回 null 放行；返回数字则作为拒绝状态码。 */
@@ -60,6 +64,8 @@ export interface HttpOptions {
   learn?: LearnApi;
   /** 一句话生成计划：同样可选，没注入就 503。 */
   planText?: PlanTextApi;
+  /** 事件流：没注入就 503；纯展示，失败也不该拖垮面板。 */
+  feed?: FeedApi;
   /**
    * 打开桌面面板的桥：浏览器按钮 → 宿主 → 伴随层轮询。
    * 没注入时按钮回 503，其余路由不受影响。
@@ -181,6 +187,25 @@ export function createHttpHandler(options: HttpOptions) {
       return;
     }
 
+    if (pathname === '/api/feed') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      if (!options.feed) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供事件流能力' });
+        return;
+      }
+      const asked = Number.parseInt(url.searchParams.get('limit') ?? '', 10);
+      // 上限 100：这是给人看的最近几十条，别让人把整个日志拖下来
+      const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 100) : 30;
+      try {
+        sendJson(res, 200, { ok: true, items: await options.feed.read(limit) });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error), items: [] });
+      }
+      return;
+    }
     if (pathname === '/api/state') {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         sendJson(res, 405, { error: 'method not allowed' });
