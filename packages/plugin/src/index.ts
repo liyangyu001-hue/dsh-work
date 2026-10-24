@@ -30,6 +30,7 @@ import { learnNode } from './learning.ts';
 import { planFromText } from './planning.ts';
 import { describeEntry, titleLookup } from './feed.ts';
 import { createUiBridge, resolveCompanionExecutable, spawnCompanion } from './ui-open.ts';
+import { listWorkspaces, pickRoot, type RootDecision } from './root.ts';
 import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
@@ -89,14 +90,47 @@ export function apply(ctx: any, config?: PluginConfig): void {
   );
 
   const cfg: PluginConfig = config && typeof config === 'object' ? config : {};
-  const root = typeof cfg.root === 'string' && cfg.root.trim() !== '' ? cfg.root : process.cwd();
+  // 真正的解析在 initialize() 里做：workspaceRegistry 是异步引导的服务，
+  // apply 同步阶段读它多半还没起来（见 root.ts 的取舍说明）。
+  let root = process.cwd();
 
   void initialize().catch((error: unknown) => {
     const text = error instanceof Error ? error.message : String(error);
     console.error(`[dsh-work] 初始化失败：${text}`);
   });
 
+  /**
+   * 解析任务库根目录，必要时等一会儿 workspaceRegistry。
+   *
+   * 为什么不能只读一次：registry 是异步引导的服务（要先等 sessionPersistence
+   * 才能建 canonical-cwd 索引），插件却在 apply 之后立刻初始化 —— 第一轮读到的
+   * 经常是「服务还没起来」。这里最多等 1.5s：等到了就用登记的工作区，
+   * 等不到就退回 cwd（与旧版行为一致，不影响没有 registry 的宿主）。
+   */
+  async function resolveRoot(): Promise<RootDecision> {
+    const read = (): RootDecision =>
+      pickRoot({
+        configured: cfg.root,
+        workspaces: listWorkspaces((service) => ctx.get(service as never)),
+        cwd: process.cwd(),
+      });
+    let decision = read();
+    for (let attempt = 0; attempt < 15 && decision.source === 'cwd'; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      decision = read();
+    }
+    return decision;
+  }
+
   async function initialize(): Promise<void> {
+    const decision = await resolveRoot();
+    root = decision.root;
+    // 绑错了根目录时用户只会看到一条空玻璃条，所以这一行必须能看见。
+    console.log(
+      `[dsh-work] 任务库根目录：${root}（来源：${
+        decision.source === 'config' ? '插件配置' : decision.source === 'workspace' ? '宿主工作区登记' : '进程 cwd'
+      }）`,
+    );
     const store = await WorkStore.open({ root });
     const version = await readVersion();
     // 一次性把宿主实际提供的服务名打进日志。cordis 的 ctx 是代理，
@@ -105,7 +139,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
     {
       const probe = ['agents', 'sessions', 'sessionController', 'llm', 'tools', 'webServer',
         'subprocess', 'schedule', 'tokenMeter', 'storageDomain', 'workspace', 'workspaces',
-        'connection', 'logger'];
+        'workspaceRegistry', 'connection', 'logger'];
       const found: string[] = [];
       for (const name of probe) {
         try {

@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-24 · 修掉「打开节点图」永远置灰：插件改为跟随宿主工作区登记
+
+用户说的「在dsh界面装个打开的按钮 不然不知道怎么打开」——按钮早在 `e1f8191` 就有，真正的问题是它**永远是灰的**：插件拿 `process.cwd()` 当任务库根目录，而桌面 profile 的 cwd 是 profile 目录，于是绑到 291 B 的空库（0 颗节点），`graphEntry(0)` 按设计置灰；真库在 `D:\work\AI\work\.dsh-work\`（`seq=90`、7 颗节点）。
+
+- 新增 `packages/plugin/src/root.ts`：`pickRoot` / `pickWorkspaceRoot` / `listWorkspaces`——**插件配置 `root` > `ctx.get('workspaceRegistry').list()` 里带会话的那个工作区 > 进程 cwd**。不把 registry 写进 `inject`（硬依赖只有 `tools` / `webServer`，加进去会让没这个服务的宿主整条装不起来），改用可选 `ctx.get`，读不到就回落 cwd。9 个单测。
+- `packages/plugin/src/index.ts`：`initialize()` 先 `await resolveRoot()`。registry 是异步引导的（第一版只读一次拿到「服务还没起」，日志里 root 是探针目录），改成最多等 1.5s（15 × 100ms，只在 source 仍是 cwd 时等），并落一行「任务库根目录：… （来源：插件配置/宿主工作区登记/进程 cwd）」。
+- 真机决定性验证：故意从**错误 cwd** `D:\work\AI\work\dshwork-probe` 起 dev 宿主（正是桌面 profile 的失效形状）→ 日志「来源：宿主工作区登记」、`/api/state` 回 `seq=90 nodes=7`；随后截 dev 宿主（1440×900，仓库外 `dshwork-shots\devhost-bar.png`）玻璃条 `7/7` + 「打开节点图」可点（对照桌面 GUI 那张：无计数、灰掉）。
+- **桌面版要重启一次**才会加载新 bundle；重启后「打开节点图」应当从灰变亮。
+- `pnpm test` 130 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-24 · 第三轮核实四件老队列，并查到「入口只在 dev 预览里」
 
 同一份固定提示语第三次把「① 入口按钮 ② 直角折线 ③ 加宽 ④ 讲讲它」排成优先级。逐条在源码和 `git log` 里对：四件分别对应 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f`，全部已交付，本轮零代码改动。
