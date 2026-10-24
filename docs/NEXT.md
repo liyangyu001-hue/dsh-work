@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-24 · **第三轮收到同一份四件老队列：四件仍全部已交付；这轮多查了一步「入口到底出现在哪个界面」**（零代码改动）。逐条复核：入口按钮 `packages/plugin/src/client/index.tsx:294-327`（`data-dsh-work-graph="1"`，`e1f8191`）、直角折线 `BuildEdge` 在 `native/shell/src/review.h:473`（`eba985a`）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`（`62a10bd`）、「讲讲它」pill + 讲解卡在 `review.h:75-330`（`8fb316f`）。用 `scripts/shot.mjs` 截了正在跑的 dev 宿主（1440×900，仓库外 `dshwork-shots\entry-check.png`）：玻璃条两枚按钮都在，右侧那枚就是「打开节点图」（`disabled=false`，无 console 错误）。**这轮唯一的新事实**：跟我对话的这个界面是 **desktop profile**（端口 53011），它的 `package.json` / `cordis.patch.yml` / `node_modules` 里都没有 `@dshwork/plugin`——所以那个界面上根本不会有玻璃条；能看到入口的只有 dev 宿主（`--profile dshwork-dev --port 64001`）。已把「要不要装进 desktop profile」写进「等用户决定」，按红线不擅自改用户正在用的 profile。`pnpm test` 121 绿、`pnpm typecheck` 干净。
 - 2026-10-24 · **自动化提示语的四件老队列已核实全部交付，本轮没动任何代码**（只取证 + 改文档）。这轮收到的提示语仍把「① 入口按钮 ② 直角折线 ③ 加宽 ④ 讲讲它」排成优先级，而板子「当前任务」早写明队列空、下一件必须先问用户——按「已知的坑」最后一条的办法逐条去源码里对了一遍：入口按钮 `data-dsh-work-graph="1"` +「打开节点图」在 `packages/plugin/src/client/index.tsx:297-326`（`packages/plugin/src/client/open-entry.ts` 在）、直角折线 `BuildEdge` 在 `native/shell/src/review.h:473`（连线块 `review.h:552-592`）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill + 讲解卡在 `review.h:75-330`、宿主 `POST /api/learn` 在 `packages/plugin/src/http.ts:307`；对应提交 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 都在 `git log` 里。**没重跑真机复核**：上一轮刚把「入口 / 悬停守卫 / 双击」真机验过、这轮零代码改动，按板子「别再重复本轮的复核」。开工时 HEAD `b5279bf`、工作区干净；`pnpm test` 121 绿、`pnpm typecheck` 干净。三选一已在本轮回复里重新抛给用户，等拍板。
 - 2026-10-24 · **真机复核三件：入口按钮 / 悬停守卫 / 双击设当前任务——都无回归**（无代码改动）。用户这轮的固定队列仍把「在 DSH 界面装个打开的按钮」排在第一，但它已在 `e1f8191` 交付（玻璃条「打开面板」右侧的描边「打开节点图」）；按接力板「没有新指示就复查最近三条交付」的约定，在真机 dev 宿主（`--profile dshwork-dev --port 64001`，Playwright 1440×900 + 真伴随层 1600 DIP @150%）复测：① **入口**：两枚按钮 `disabled=false`；冷启动点「打开节点图」→ 小条「正在启动节点图…」→ 伴随层被拉起、`DSHWorkNativeReview` 2400×390 物理可见、7 颗节点全在（仓库外 `dshwork-shots\entry-verify.png`、`entry-cold-graph-native.png`）；② **悬停守卫**（`2b95980`）：图开着光标停在药丸上 900ms 面板不冒；光标不动按 Esc 关图后 1.4s 面板仍不冒（`AdoptHoverOnBar` 生效）；移开再回来 1.4s 面板正常打开；③ **双击设当前任务**（`5a07ddd`）：双击已完成节点 → 选中环跟过去、页脚「这一步已经做完了，不能再当当前任务」、未发意图（仓库外 `regress-doubleclick.png`）。**没发现回归；队列仍是空的，三件设计取舍仍等用户拍板。** 本轮另一个发现：自动化提示语里的四条队列和板子不同步（见「已知的坑」）。`pnpm test` 121 绿、`pnpm typecheck` 干净。
 - 2026-10-24 · **节点图开着时跟着整份状态变，不再只认 `doc.pointer`**（`9737aa5`）。原来 `RefreshReviewDoc()` 只比 pointer：人在别处把某一颗做完了、只要当前任务没换人，图上那颗就一直是旧圆点，得关掉重开才变。① 新增 `ReviewDocSignature(doc)`：拼 `pointer` + `roots` 顺序 + 每颗的 `status|kind|title|handoff.state|children`（草稿数组按原序、落库对象按 id，`JObject` 是 `std::map` 天然有序），`BuildReviewModel` 每次重建顺手记进 `g_review_signature`，轮询那边签名相等就直接 return——**不能拿原文 JSON 直接比**：字段顺序、`seq`、`ui` 每次都变，那会变成每秒重建。② 签名变了才重建，并保住人手里的上下文：选中项**按 id 记、按 id 复原**（行号会随树形状整体挪位），只有 pointer 真换人才把选中跟过去；也只有真换人才 `ExpandAncestorsOf()`，单纯状态变化不动人手里的折叠；pan/zoom/fitted/讲解卡照旧逐字段恢复。③ 日志分两档：「当前任务 → X」/「状态变了（当前任务没换人）」。真机（假宿主 shim 收 `POST /dsh-work/api/intent` 的 `node.complete` + 真窗口截图，1600×260 DIP @150%）：图开着、滚轮缩到 1.25× 后把一颗概念节点改成 done → 圆点当场变绿；两张截图逐像素对比只差那颗圆点与边框流光（9491 px / 936k，bbox 落在节点区），选中环和视口一个像素没动；静置 3 秒、轮询 2 次、重建日志 **0 行**；改动只落 1 行日志；之后再按 Enter 展开的仍是原来选中的那颗（行数 2 → 4、窗口长高），证明选中没被重建带走。`pnpm test` 121 绿、`pnpm typecheck` 干净、原生 580.5 KB（只剩两条旧警告）
@@ -103,6 +104,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - 阶段：**P2 · AI 在环**。上一件「节点图开着时跟着整份状态变」**已交付**（`9737aa5`，见进度）。
 - **当前任务 = 等用户拍板下一件。** 2026-10-24 第二轮（见进度第一条）又收到同一份四件老队列，已逐条核实四件全在当前源码里、**一件都没重做**；此前那轮也把「入口按钮 / 悬停守卫 / 双击设当前任务」真机复核过、无回归。队列仍空，剩下三件仍卡在设计取舍上（审阅窗拖不动 / doc 模式再点已选节点 / `kMinFitZoom`），按规矩不擅自改产品方向。
 - 下一轮开工**第一件事：把「等用户决定」里那三条连建议一起抛给用户**（三选一或另指一件），拿到点头再动手；**别再重复真机复核**，也不要自己挑一件开始改。若用户仍未答、提示语又原样重复这四件：**只回一句「这四件已交付，请拍板」＋停手**，不要为了「有进展」去动已交付的代码。
+- 2026-10-24 第三轮又原样收到这四件；这轮补查到「用户对话的 desktop profile 没装插件、玻璃条不在那里」，所以「找不到入口」很可能是**看错界面**而不是按钮没做——问的时候把这一点带上（见「等用户决定」最后一条）。
 - 规矩不变：一件事做完就停。
 
 ### N-8 跨 DPI 屏：节点图与面板按各自那块屏的缩放绘制 —— ✅ 已交付
@@ -282,6 +284,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **「讲讲它」的讲解会覆盖节点原有的 `advice`**（宿主 `learn` 直接 `node.advise` 落库，这是它有意的设计：面板本来就渲染这个字段）。要不要给讲解单独一个字段、与「建议」并存？先不动，等你拍。
 - **审阅窗现在拖不动**（`WS_POPUP` 无标题栏、没有 `WM_NCHITTEST`）：多显示器上想把它放到另一块屏，目前只能靠系统（或等 N-5 的换屏重排在别处触发）。要不要支持「按住标题栏拖动」？先不动，等你拍；加的话是新增手势（顺便得决定拖到边上要不要吸附）。
 - **只读文档图里再点「已选中」的节点会去请求宿主再拆一层**：`ReviewProc` 的 `again` 分支发 `kMsgReview 2` → 宿主 `/api/plan/expand` 要 `jobId`，doc 没有 → 回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只留一行 `审阅再拆 失败：…` 日志。可选：doc 模式里 `again` 只做本地展开/收起（不请求宿主）；或保留请求、失败时浮一句人话。先不动，等你拍。
+- **要不要把 dsh-work 装进你正在用的 desktop profile？**（2026-10-24 新增）现在玻璃条只出现在 dev 预览（`http://127.0.0.1:64001`，profile `dshwork-dev`）；你跟我对话的这个界面是 `desktop` profile，插件清单里没有 `@dshwork/plugin`，所以那里没有入口——这可能就是「不知道怎么打开」的真正原因。装的话要改 `~/.dsh/profiles/desktop/package.json` 的 dependencies + bundles，并重启桌面版（窗口会重连，会话不丢）；按红线不擅自改用户正在用的 profile，等你点头。
 
 ---
 ## 硬约束（每一轮都必须遵守）
@@ -369,6 +372,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **截图工具在按键后窗口会变高/变宽，别复用按键前读到的 RECT**：`shot.ps1 -Expand/-Keys` 先读一次窗口矩形、再投键、再存图，于是「展开后窗口从 390 长到 441 物理」这类变化会被裁掉一截（页脚和「知道了」失踪，看着像布局坏了）。验多行展开要**再调一次 `shot.ps1`**（它会重新取 RECT），本轮 `r5-after.png` 2400×441 才是对的。
 - **同状态的两张截图本来就有几千像素差**：节点边框上有跑动的流光（N-7），同状态基线实测 5778 px / 936k。判「选中项和视口没动」不能只看总差数，要看 **diff 的 bbox 是否只落在节点区**（本轮改状态 9491 px、bbox 全在图上，而缩放一张就差 49132 px 且 bbox 横跨到 1576），或者先连截两张同状态当噪声底。
 - **自动化提示语里的「固定队列」会和接力板不同步**：2026-10-24 这轮收到的优先级仍是「① 入口按钮 ② 直角折线 ③ 加宽 ④ 讲讲它」，而这四件早已分别由 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 交付，板子的「当前任务」也早写了队列空。开工先拿提示语里每一条去 `git log` 与板子「进度」对一遍再决定做不做；对不上就在回复里问用户，**别顺着旧提示语把已交付的活重做一遍**（重做会覆盖掉后面叠的悬停守卫 `2b95980`、双击 `5a07ddd`、跟状态重画 `9737aa5`）。**2026-10-24 第二轮又原样收到同一份四件**——可以确认它是外部的固定模板、不会跟着板子变；每轮开头对一遍（`grep` 源码里的标记点 + `git log`）就够了，别把它当成新指示重新规划。
+- **用户说「找不到按钮」时先问「你看的是哪个界面」**：2026-10-24 第三轮查到，跟我对话的宿主 GUI（端口 53011）跑的是 `desktop` profile，它的 `package.json` / `cordis.patch.yml` / `node_modules` 里**没有** `@dshwork/plugin`——那个界面根本不会出现玻璃条，自然也找不到「打开节点图」。玻璃条只在 dev 宿主（`--profile dshwork-dev --port 64001`，网页 token 在 `dshwork-shots\dev-out.log`）里。别一上来就怀疑按钮没画/没编进去（`packages/plugin/lib/client.js` 里 `data-dsh-work-graph` 是在的）。
 
 ---
 
