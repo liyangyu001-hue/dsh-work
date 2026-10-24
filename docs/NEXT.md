@@ -98,7 +98,7 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`01ac4bef5ff220a02bb5957cc9ab19c3a99951a7`（2026-10-24 第六轮推送后，tree 与本地 `8db6ca8` 一致；这一轮把「桌面 GUI 入口实测」的接力板与变更日志推上去了）。
+> 当前远端 sha：`1732b95c654f9065706246cf159119b13196dff9`（2026-10-24 第七轮推送后，tree 与本地 `d96c00a` 一致；这一轮把「四件老活对账 + 两件取舍落地位置」的接力板与变更日志推上去了）。
 > 本轮开工时现取到的是 `8709f6dea60200232c517f25afe091b57522d304`（上一次「记 sha」提交推送后的 sha），仍按上面的办法现取，别抄这一行。
 > **推送起点别直接抄这一行**：只改 `docs/NEXT.md` 的那次回填提交总是排在它后面，抄旧 sha 当起点会把已经在远端的提交再重放一遍。开工先现取：
 > `GET https://api.github.com/repos/liyangyu001-hue/dsh-work/git/ref/heads/main`（带 `gh-token`），拿 `.object.sha` 当参数。
@@ -371,6 +371,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **`CloseReview()` 之后马上「重新判定悬停」会自己顶面板**：Esc 关图时光标往往还停在药丸上，下一个 120ms 轮询立刻判「刚进入」→ 260ms 后面板自己弹出来（3/3 必现，用户说的「反复顶」）。修法是 `CloseReview` 末尾 `AdoptHoverOnBar()`：光标真在药丸上就把这次悬停「认下来」（`g_bar_hovered = true` + 摘穿透 + 重画）。副作用是有意的——关图后想再开面板要先移开鼠标再回来（或直接单击药丸）；改成「永远不认下来」就会回到反复弹。
 - **`dshwork-shell.exe` 会被卡巴斯基误报成 `Trojan-Spy.Win32.Convagent.gen`**（2026-10-24 弹窗，按钮写「清除并重启计算机」）：**别点**。它不是用户自己编的那份源码的问题，而是卡巴启发式对无签名 + 分层窗 + 全局热键的 exe 下的判断；点了会删掉 `native\shell\build\dshwork-shell.exe`（有时连重启都建议）。要真机测原生件时先确认 exe 还在，不在就重编。
 - **PowerShell 里别把自定义函数命名成 `Move`**：`Move` 是内置别名（→ `Move-Item`），别名优先级高于函数，于是 `Move $PTS` 会被当成移动文件（报「找不到路径 D:\work\AI\work\600」）。探针脚本里改叫 `Set-Pt` 才生效；症状是「脚本能跑、鼠标却一次没动」，验证结果全假。
+- **查远端 sha 别把 PAT 塞进 `Authorization: x-access-token:…`**：`Invoke-RestMethod -Headers @{Authorization = "x-access-token:$token"}` 会当场报 `The format of value 'x-access-token:ghp_…' is invalid`（.NET 的 `WebRequest` 会校验 Authorization 的 scheme，只认 Basic/Bearer 这类），**不是 token 坏了**。改 `Authorization = "Bearer $token"` 就能取到 `git/ref/heads/main` 的 `.object.sha`；`GUIDE.md` 里那套 `x-access-token:` + base64 是给 `git -c http.extraHeader` 用的，别照搬到 API。
+- **文档类提交也会被 CRLF 警告刷屏**：`docs/CHANGELOG.md` 是 CRLF，`Set-Content`/`edit` 写回后 git 会提示 `CRLF will be replaced by LF`；只是警告，提交照常，别去改 `.gitattributes` 折腾。
 - **同一仓库可能同时在跑别的会话**：本轮开工时 HEAD 已被另一个会话推进到 `259048f`，工作区还留着它未提交的 `native/shell/src/main.cpp`。提交前先 `git log -3` + `git status`，只 `git add` 自己改的文件，别 `git add -A`。
 - **「当前任务」的 id 在 `/api/state` 的 `doc.pointer` 里**（`packages/core/src/types.ts:80`，`WorkDoc.pointer: NodeId | null`），不在 `doc.nodes` 上。草稿（解构未落库）的 `nodes` 是**数组**且没有 pointer，`GetString("pointer")` 读成空串——所以文档图才标当前任务，草稿图一颗都不标（别顺手把空串当成「全部是当前」）。
 - **无 BOM 的 UTF-8 `.ps1` 会被 `powershell.exe` 按 ANSI 解码**：中文注释解出来的字节里可能凑出被 PowerShell 当成引号的字符，于是 `Add-Type -TypeDefinition @'…'@` 的 here-string 当场断掉，报的却是 `A 'using' statement must appear before any other statements in a script`（看着像 P/Invoke 少写了个分号，其实是注释）。探针脚本的注释一律写 ASCII（或另存成带 BOM 的 UTF-8）。
