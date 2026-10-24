@@ -47,8 +47,8 @@ inline std::string Narrow(const std::wstring& text) {
   return out;
 }
 
-/** endpoint.json 的路径。和 Node 側同一口径：优先 DSH_HOME，其次 USERPROFILE\.dsh */
-inline std::wstring EndpointPath() {
+/** `~/.dsh/dsh-work` 目录。和 Node 側同一口径：优先 DSH_HOME，其次 USERPROFILE\.dsh */
+inline std::wstring DshWorkDir() {
   wchar_t buffer[MAX_PATH * 2] = {};
   const DWORD env_len = GetEnvironmentVariableW(L"DSH_HOME", buffer, MAX_PATH);
   std::wstring home;
@@ -59,7 +59,26 @@ inline std::wstring EndpointPath() {
     if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) == 0) return {};
     home = std::wstring(profile) + L"\\.dsh";
   }
-  return home + L"\\dsh-work\\endpoint.json";
+  return home + L"\\dsh-work";
+}
+
+/** endpoint.json 的路径。 */
+inline std::wstring EndpointPath() {
+  const std::wstring dir = DshWorkDir();
+  if (dir.empty()) return {};
+  return dir + L"\\endpoint.json";
+}
+
+/**
+ * 审阅窗上次被拖到的位置（物理像素）。
+ *
+ * 和 endpoint.json 放同一个目录：宿主重启会重写 endpoint.json，但这一份是
+ * 伴随层自己的「用户偏好」，宿主不认识它，互不干扰。
+ */
+inline std::wstring PlacementPath() {
+  const std::wstring dir = DshWorkDir();
+  if (dir.empty()) return {};
+  return dir + L"\\review-placement.json";
 }
 
 inline Endpoint ReadEndpoint() {

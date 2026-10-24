@@ -1,5 +1,17 @@
 # 变更日志
 
+## 2026-10-25 · 节点图拖到哪儿，重开还在那儿：位置落盘到 `~/.dsh/dsh-work/review-placement.json`
+
+上一轮加「按住标题栏拖动」时，位置只记在进程内 —— 伴随层一退出就回到屏幕中央。这一轮把它落盘：
+
+- `native/shell/src/host.h`：把「`DSH_HOME` 优先、否则 `USERPROFILE\.dsh`」这段目录解析抽成 `DshWorkDir()`，`EndpointPath()` 复用它；新增 `PlacementPath()` = `DshWorkDir() + L"\\review-placement.json"`。放 `endpoint.json` 同目录、但**单独一个文件**：`endpoint.json` 由宿主每次启动重写，伴随层往里面塞字段会被抹掉。
+- `native/shell/src/main.cpp`：新增 `SaveReviewPlacement(int x, int y)` / `bool LoadReviewPlacement(int& x, int& y)`，内容就一句 `{"x": 3888, "y": 460}`。读的一侧容错：文件不存在、JSON 坏了、`x`/`y` 不是数字、超过 4 KB，一律当「没记过」回退到默认居中；写的一侧失败也不打断拖拽。`WM_EXITSIZEMOVE` 记完位置顺手保存；`EnsureReviewWindow()` 开头懒加载一次（`g_review_placement_loaded`），读到就落日志「审阅：接着上次的位置 (x, y) 开」。
+- 位置进来之后仍然走上一轮那套 `MonitorFromPoint(…, MONITOR_DEFAULTTONEAREST)` + `LayoutReview()` 末尾夹回 `rcWork`，所以拔掉显示器/改分辨率不会把窗口丢到看不见的地方。
+
+真机三步（每步都是真的杀掉进程重开）：① 删掉文件 → 起伴随层开图落在 `720,144`（居中）→ 拖到第二块屏 `3888,460 1872x390`，文件写出 `{"x": 3888, "y": 460}`；② `Stop-Process` 后起**新进程** → 空窗直接落在 `3888,460 1872x390`，日志「接着上次的位置 (3888, 460) 开」，7 颗节点全在窗内（仓库外 `dshwork-shots\reopen-remembered.png`）；③ 手写坏值 `{"x": 9000, "y": 9000}` 再重启 → 落回 `3888,618`（第二块屏工作区右下角），没跑出屏幕（`reopen-bogus.png`）。
+
+原生 590.0 KB（只比拖动前的 583.5 多 6.5 KB；中途试过 `sstream`/`ifstream` 读文件，白涨 15~17 KB，最后改用 Win32 `CreateFileW` + `ReadFile`），只剩 `grab_dxgi.h(219) C4127`、`main.cpp(1346) C4715` 两条旧警告；`pnpm test` 130 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-25 · 审阅窗能按住标题栏拖了：松手记住位置，拖到另一块屏按那块屏的宽度重排
 
 节点图窗口是 `WS_POPUP` 的分层窗、没有标题栏，也从没处理过 `WM_NCHITTEST`——在双屏上想把它挪到另一块屏，只能靠系统窗口菜单或者干脆重开。这一轮补上：

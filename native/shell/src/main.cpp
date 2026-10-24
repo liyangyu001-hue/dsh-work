@@ -236,10 +236,13 @@ float g_review_pan_ly = 0.0f;
 bool g_review_closing = false;
 bool g_review_tracking_leave = false;
 // 人把节点图拖到过哪里：松手后记住，下次再打开还从那儿开（不吸附屏幕边缘）。
-// 只记在本次进程内 —— 跨重启落盘还没做，见 NEXT.md「等用户决定」。
+// 落盘在 ~/.dsh/dsh-work/review-placement.json（和 endpoint.json 同目录），
+// 伴随层重启之后照样从那儿开；文件不存在就用默认的居中。
 bool g_review_user_placed = false;
 int g_review_user_x = 0;
 int g_review_user_y = 0;
+// 那次「从盘上读回来」的尝试只做一次（懒加载，放在第一次开窗时）。
+bool g_review_placement_loaded = false;
 // 拖动进行中。放在 WM_ENTERSIZEMOVE 与 WM_EXITSIZEMOVE 之间：
 // 「鼠标移出去就收窗」在这期间必须失效，否则拖到一半窗口自己淡出了。
 bool g_review_moving = false;
@@ -420,6 +423,51 @@ void LogToFile(const std::string& message) {
   char stamp[32];
   snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d", now.wHour, now.wMinute, now.wSecond);
   file << "[" << stamp << "] " << message << "\n";
+}
+
+/**
+ * 审阅窗上次被拖到的位置（物理像素）。
+ *
+ * 存成两字段的小 JSON，和 endpoint.json 同目录 —— 宿主重启会重写 endpoint.json，
+ * 但这份是伴随层自己的偏好，宿主不认识它，互不干扰。写失败（目录不存在、被占用）
+ * 就算了：这一次拖照常有效，只是下次回到居中，不弹窗也不打断人。
+ */
+void SaveReviewPlacement(int x, int y) {
+  const std::wstring path = dshwork::PlacementPath();
+  if (path.empty()) return;
+  const std::string text = "{\"x\": " + std::to_string(x) + ", \"y\": " + std::to_string(y) + "}\n";
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return;
+  DWORD written = 0;
+  WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+  CloseHandle(file);
+}
+
+/** 读回上次记的位置。没拖过 / 文件坏了 / 两个字段不齐都当没记过（返回 false）。 */
+bool LoadReviewPlacement(int& x, int& y) {
+  const std::wstring path = dshwork::PlacementPath();
+  if (path.empty()) return false;
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  std::string text;
+  char chunk[256];
+  DWORD read = 0;
+  while (ReadFile(file, chunk, sizeof(chunk), &read, nullptr) && read > 0) {
+    text.append(chunk, static_cast<size_t>(read));
+    if (read < sizeof(chunk)) break;
+    if (text.size() > 4096) break;  // 这文件只该有几十字节；再大就是坏了
+  }
+  CloseHandle(file);
+  dshwork::JValue value;
+  if (!dshwork::ParseJson(text, value)) return false;
+  const dshwork::JValue* px = value.Get("x");
+  const dshwork::JValue* py = value.Get("y");
+  if (px == nullptr || py == nullptr) return false;
+  if (px->type != dshwork::JValue::Type::Number || py->type != dshwork::JValue::Type::Number) return false;
+  x = static_cast<int>(px->number);
+  y = static_cast<int>(py->number);
+  return true;
 }
 
 void PollLoop() {
@@ -1959,6 +2007,7 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       g_review_user_placed = true;
       g_review_user_x = win.left;
       g_review_user_y = win.top;
+      SaveReviewPlacement(win.left, win.top);
       LogToFile("审阅：拖到 (" + std::to_string(win.left) + ", " + std::to_string(win.top) + ")，下次打开还从这儿开");
     }
     return 0;
@@ -2593,6 +2642,19 @@ void ForceForeground(HWND hwnd) {
 
 /** 两个入口共用的开窗动作：建窗口、定位、抢焦点、放动画。 */
 void EnsureReviewWindow() {
+  // 上次拖到哪儿？只读一次盘：开了窗之后再读也没意义（位置早就排好了）。
+  // 读不到就是没拖过，走默认的居中；读到了也要按那块屏的工作区夹一次（显示器可能已经拔了）。
+  if (!g_review_placement_loaded) {
+    g_review_placement_loaded = true;
+    int placed_x = 0;
+    int placed_y = 0;
+    if (LoadReviewPlacement(placed_x, placed_y)) {
+      g_review_user_placed = true;
+      g_review_user_x = placed_x;
+      g_review_user_y = placed_y;
+      LogToFile("审阅：接着上次的位置 (" + std::to_string(placed_x) + ", " + std::to_string(placed_y) + ") 开");
+    }
+  }
   if (g_review == nullptr) {
     WNDCLASSEXW cls = {};
     cls.cbSize = sizeof(cls);
