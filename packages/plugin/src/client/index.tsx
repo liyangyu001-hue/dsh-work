@@ -196,7 +196,7 @@ function Bar(): React.ReactElement {
       <div
         style={{
           position: "fixed",
-          top: 8,
+          top: 52,  // 52 = 窗口标题栏高度再留一点；贴 top:8 会压在标题栏上
           left: "50%",
           transform: "translateX(-50%)",
           display: "flex",
