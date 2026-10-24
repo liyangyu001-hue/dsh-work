@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-24 · 桌面 GUI 入口实测：玻璃条 7/7、「打开节点图」可点、真点一次弹出节点图窗口
+
+上一轮修掉「插件绑空任务库」之后，玻璃条本该亮起来。这一轮去**用户真正在用的 desktop profile**（宿主 pid 30624、端口 57758）把它验实，**零代码改动**：
+
+- `~/.dsh/dsh-work/endpoint.json` 已是 `root=D:\work\AI\work` / `workspace=work`（`publishEndpoint` 写的），带同目录 token 打 `/dsh-work/api/state` 回 200、`seq=90 roots=7 nodes=7`——桌面宿主绑的是真库。
+- 窗口截图（仓库外 `dshwork-shots\desktop-gui-after-restart.png`）：玻璃条「● 全部已完成 7/7」+ 描边「打开节点图」高亮可点；对照上一轮 `dshwork-shots\desktop-gui.png` 的计数「—」与灰按钮。
+- **DPI-aware 真点一次**（屏幕物理 `2104,474`，150% @3840×2160）：1s 内 `dshwork-shell` 被拉起（pid 65004），`DSHWorkNativeReview` 2400×390 弹出，7 颗概念节点、每颗「讲讲它」胶囊、页脚键位提示齐全，标题正是「搞懂幂等及其与反复重试的关系」（`dshwork-shots\desktop-graph-window.png`）。验完 `Stop-Process -Name dshwork-shell` 并让光标归位，桌面不留窗。
+
+`pnpm test` 130 绿、`pnpm typecheck` 干净。四件老队列（入口 / 直角折线 / 加宽 / 讲讲它）到此在用户真正看的界面上全部到位，入口这条结案。
+
 ## 2026-10-24 · 只读文档节点图：再点已选中节点不再请求宿主拆层，点收起也真的会收起
 
 接力板「等用户决定」第①条（板上注明「纯 bug、修法唯一、不动产品方向，建议先做」）。在只读文档图里再点一颗已选中的节点，原来有两条错路：
