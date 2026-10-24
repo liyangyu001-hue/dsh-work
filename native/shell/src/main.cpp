@@ -417,6 +417,9 @@ void LogToFile(const std::string& message) {
 void PollLoop() {
   using namespace std::chrono_literals;
   std::string last_reason;
+  // 事件流是「有就看一眼」的附加信息，失败了不能让整条轮询喊救命，
+  // 但也绝不能静默——面板上那一行空着时，人分不清是「没有事件」还是「请求挂了」。
+  std::string last_feed_note;
   // 宿主重启后 ui.seq 会归零，所以按时间戳判新旧；只认 15 秒内的指令，
   // 免得伴随层晚启动时把一个陈年请求又弹一遍。
   double last_ui_at = 0.0;
@@ -443,6 +446,7 @@ void PollLoop() {
         {
           std::string feed_body;
           std::string feed_reason;
+          std::string feed_note;
           if (dshwork::HttpGetJson(endpoint, L"/dsh-work/api/feed?limit=3", feed_body, feed_reason)) {
             dshwork::JValue feed_root;
             if (dshwork::ParseJson(feed_body, feed_root)) {
@@ -459,7 +463,17 @@ void PollLoop() {
                   model.feed.push_back(row);
                 }
               }
+              feed_note = "事件流：" + std::to_string(model.feed.size()) + " 条";
+            } else {
+              feed_note = "事件流解析失败（响应 " + std::to_string(feed_body.size()) + " 字节）";
             }
+          } else {
+            feed_note = "事件流读取失败：" + feed_reason;
+          }
+          // 只报变化：这个循环 240ms 一圈，每圈都写就把日志刷成瀑布了
+          if (feed_note != last_feed_note) {
+            LogToFile(feed_note);
+            last_feed_note = feed_note;
           }
         }
         if (model.state != dshwork::WorkModel::State::Online) {

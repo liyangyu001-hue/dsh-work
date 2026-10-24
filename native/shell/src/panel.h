@@ -320,16 +320,6 @@ inline void DrawPanel(ID2D1RenderTarget* target, const WorkModel& model, int foc
   const float h = dip_h * scale;
   // 收起来时高度接近药丸，圆角跟着收到一半高，才是一条胶囊
   const float half = h / 2.0f;
-  // 事件流：贴在底边上方一行。没有事件就不占位，避免空面板出现一条莫名留白。
-  if (model.feed.empty() == false) {
-    const float feed_y = h - 30.0f * scale;
-    target->PushAxisAlignedClip(D2D1::RectF(20.0f * scale, feed_y, w - 20.0f * scale, h - 8.0f * scale),
-                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    Text(target, model.feed.front(), fmt.meta,
-         D2D1::RectF(20.0f * scale, feed_y, w - 20.0f * scale, h - 8.0f * scale), fmt.brush,
-         Fade(0x9AA0A6, alpha * 0.72f));
-    target->PopAxisAlignedClip();
-  }
 
   const float radius = half < 26.0f * scale ? half : 26.0f * scale;
 
@@ -539,7 +529,15 @@ inline void DrawFeed(ID2D1RenderTarget* target, const WorkModel& model, const Pa
   const float h = dip_h * scale;
   const D2D1_RECT_F box = D2D1::RectF(20.0f * scale, h - 30.0f * scale, w - 20.0f * scale, h - 8.0f * scale);
   target->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-  Text(target, model.feed.front(), fmt.meta, box, fmt.brush, Fade(0x9AA0A6, alpha * 0.66f));
+  /*
+   * 颜色必须给不透明值（0xFF......）。面板是分层窗口：D2D 把颜色写进 DIB 时
+   * 已经按预乘 alpha 处理一次，UpdateLayeredWindow(ULW_ALPHA) 再乘一次 —— 任何
+   * alpha < 1 的颜色都会被压暗近一倍，alpha≈0.4 的文字在深色底上直接看不见。
+   * 2026-10-25 实测同一串字：0xFF9AA0A6 清楚、0x9AA0A6 只剩零星噪点、0x659AA0A6 全无。
+   * 所以「暗」用不透明暗色表达（和面板里其他次要文字同一套颜色），
+   * 整体淡出仍旧交给 alpha —— 面板稳态 alpha=1，只有收起动画里才会变小。
+   */
+  Text(target, model.feed.front(), fmt.meta, box, fmt.brush, Fade(kTextDim, alpha));
   target->PopAxisAlignedClip();
 }
 

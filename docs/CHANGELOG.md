@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-25 · 面板底部事件流一行终于画出来了：分层窗口把 alpha 平方了一次
+
+交接板上挂了两轮的「面板底部事件流一行从来不显示」修掉了。查法按板上留的线索走：先补一行永久日志确认数据到没到——`[02:42:32] 事件流：3 条`，说明 `/dsh-work/api/feed` 与每秒轮询都正常（`main.cpp:445-480` 拼 `at + 双空格 + verb + " · " + text`，`:505-508` 进 `g_model`，`:2754-2769` 进 `g_panel_model`）。再在 `main.cpp:1497` 前打 `DrawFeed` 的入参，稳态 `n=3 alpha=1.000000 px=1494x234`——调用与尺寸都对。接着往 `DrawFeed` 里塞一条暗红 `FillRound`：带子画出来了，文字仍然没有，于是问题锁死在「这段文字本身画不出来」。
+
+颜色阶梯很快给出答案：同一串 `23:59  推进 · 完成当前并前进`，`fmt.body` + `0xFFFFFFFF` 清楚、`fmt.meta` + `0xFF9AA0A6` 可见、`0x9AA0A6`（alpha 0.6）只剩几十个噪点、`0x659AA0A6`（0.4）与背景完全无差（逐像素 `lum min=max=27`）。面板是 `UpdateLayeredWindow(ULW_ALPHA)` 的分层窗口，D2D 目标是 `D2D1_ALPHA_MODE_PREMULTIPLIED` 的 DIB——alpha 被预乘了**两次**，0.6 实际变 0.36、0.4 变 0.16。而事件流那行写的正是 `Fade(0x9AA0A6, alpha*0.66f)`，约 0.4，于是永远看不见。
+
+改法：`native/shell/src/panel.h` 的 `DrawFeed` 改用不透明暗色 `Fade(kTextDim, alpha)`（与「7/7 已完成」同档灰，整体淡出仍交给 alpha），并把这段原因写进函数注释，免得下一轮又有人用半透明去调暗；顺手删掉 `DrawPanel` 里那份被面板底盖住、从来没生效过的重复画法（原 `panel.h:323-332`）和全部临时探针。
+
+真机验收（`POST /dsh-work/api/ui/open {"target":"panel"}` 打开面板 + DPI-aware 抓窗）：左下角出现 `23:59  推进 · 完成当前并前进`（仓库外 `dshwork-shots\panel-feed-fixed.png`）。原生构建 582.5 KB，只剩 `grab_dxgi.h(219) C4127`、`main.cpp(1290) C4715` 两条旧警告；`pnpm test` 130 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-24 · 队列真的空了：四件老活逐条对账，两件设计取舍连落地位置勘定好，等用户点头
 
 **零代码改动**的一轮。自动化提示语每次仍把「① 入口按钮 ② 直角折线 ③ 加宽 ④ 讲讲它」排成优先级，但这四件早已分别由 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 交付，接力板「当前任务」也早写了队列空。开工照「已知的坑」最后一条逐条对源码：
