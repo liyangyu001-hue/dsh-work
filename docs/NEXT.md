@@ -100,8 +100,8 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：`3a2c89bb073cc7ab33c4cf59d3ed00a28bfb1831`（2026-10-25 推送后，tree 与本地 `e792c48` 一致；这一轮把「面板事件流一行」的修法与接力板推上去了）。
-> 上一轮记的 `1732b95c654f9065706246cf159119b13196dff9`（2026-10-24 第七轮）与 `8709f6dea60200232c517f25afe091b57522d304` 都已是历史，仅作对照。
+> 当前远端 sha：`7877904529af809e024d1997aacce2b9f18725f8`（2026-10-25 推送后，tree 与本地 `dee0de3` 一致；这一轮把「审阅窗按住标题栏拖动」的改法与接力板推上去了）。
+> 上一轮记的 `3a2c89bb073cc7ab33c4cf59d3ed00a28bfb1831`（面板事件流那轮）、`1732b95c654f9065706246cf159119b13196dff9`（2026-10-24 第七轮）与 `8709f6dea60200232c517f25afe091b57522d304` 都已是历史，仅作对照。
 > 本轮开工时现取到的是 `8709f6dea60200232c517f25afe091b57522d304`（上一次「记 sha」提交推送后的 sha），仍按上面的办法现取，别抄这一行。
 > **推送起点别直接抄这一行**：只改 `docs/NEXT.md` 的那次回填提交总是排在它后面，抄旧 sha 当起点会把已经在远端的提交再重放一遍。开工先现取：
 > `GET https://api.github.com/repos/liyangyu001-hue/dsh-work/git/ref/heads/main`（带 `gh-token`），拿 `.object.sha` 当参数。
