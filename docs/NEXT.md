@@ -401,3 +401,12 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - 2026-10-19 P1-2b 完成：**面板**落地。热键语义从"按下即截图"改为"按下开面板"——小条是收起态、面板是展开态，同一个东西的两个形态；面板里做任务卡带（当前居中、左右为已完成/待进行，`scroll-snap` 居中）、详情列（目标/验收）、页脚键位提示，键盘 `Enter` 完成并前进、`Backspace` 退一步、`Esc` 收起、`Tab` 进框选，框选结束/取消后按原样恢复面板。玻璃底改用"抓一张背后桌面 → CSS 模糊"的方案（`backdrop.cjs`）：CSS `backdrop-filter` 对透明窗口背后的桌面无效，Win11 `acrylic` 又会吃掉圆角。`plan.set` 新增可选 `title`，拆解时顺带给文档命名。
 
 - 2026-10-19 P1-3 完成：**视觉识别**落地，提交 `7e53a78`。链路 `panel → main.cjs → POST /dsh-work/api/recognize → 宿主 ctx.llm.stream → plan.set`；作业化（POST 只受理、GET 轮询取结果）是为了不让几十秒的模型调用挂在同步响应上，超时/卸载用 `AbortController` 真停。解析是纯函数：失败一次「就地修格式」重问一次，仍失败返回可读原因且不写文档；`looksLikeOutline` 挡住散文被误认成任务；`kind:'concept'` 走同一解析路径。模型选择 插件 Config → `agentDefaultModel` → `deepseek-official/deepseek-v4-flash`。新增 `recognize.ts`、`recognize.test.ts`、`http.test.ts`，测试 73 绿、typecheck 绿、build 通过。**遗留**：真机端到端没跑——跑着的宿主加载的还是旧 bundle（`/api/recognize` 返回 404），重启 `dsh web` 后补验；`attachments.admitPromptContent` 与视觉模型的实际输出质量也未实测。
+
+## 2026-10-25 交接（上下文耗尽前）
+
+**状态**：网页按钮 + 桌面胶囊 + 托盘三处入口均已可用；开机自启已写 HKCU\...\Run（值 DSHWorkShell）。
+
+**待办（按顺序）**：
+1. 事件流一行不显示：g_model 在 main.cpp:507 已带 eed，g_panel_model = g_model 在 2742，理论应能到面板。下一步在 DrawPanel 里临时打一条 eed.size() 日志确认数据到没到。
+2. 网页按钮 position: fixed; top: 8 压在窗口标题栏上，建议改为「悬停顶部才淡入」。
+3. 节拍时钟 Pulse（tick/breath/burst，参数 ~/.dsh/dsh-work/anim.json 热加载）+ 状态矩阵。
