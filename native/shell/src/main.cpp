@@ -235,6 +235,14 @@ float g_review_pan_lx = 0.0f;
 float g_review_pan_ly = 0.0f;
 bool g_review_closing = false;
 bool g_review_tracking_leave = false;
+// 人把节点图拖到过哪里：松手后记住，下次再打开还从那儿开（不吸附屏幕边缘）。
+// 只记在本次进程内 —— 跨重启落盘还没做，见 NEXT.md「等用户决定」。
+bool g_review_user_placed = false;
+int g_review_user_x = 0;
+int g_review_user_y = 0;
+// 拖动进行中。放在 WM_ENTERSIZEMOVE 与 WM_EXITSIZEMOVE 之间：
+// 「鼠标移出去就收窗」在这期间必须失效，否则拖到一半窗口自己淡出了。
+bool g_review_moving = false;
 constexpr float kReviewCloseMs = 190.0f;
 // 动画帧间隔：固定 60fps。跟屏幕刷新率绑定过一版，240Hz 下等于 4ms 一帧，
 // 画不完就堆积，反而卡。动画本身是按时间算的，帧率低也不会变慢。
@@ -1530,10 +1538,10 @@ HMONITOR ReviewMonitor() {
   return MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY);
 }
 
-float ReviewAvailWidthDip() {
+float ReviewAvailWidthDip(HMONITOR monitor = nullptr) {
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(ReviewMonitor(), &info);
+  GetMonitorInfoW(monitor != nullptr ? monitor : ReviewMonitor(), &info);
   // 用节点图自己的缩放：它可能跟小条不在同一块屏上（150% + 100% 是常态）。
   const float scale = g_reviewScale > 0.1f ? g_reviewScale : 1.0f;
   float avail = static_cast<float>(info.rcWork.right - info.rcWork.left) / scale - kReviewMargin * 2.0f;
@@ -1704,17 +1712,30 @@ void BuildReviewModel(const dshwork::JValue& root) {
 
 void LayoutReview() {
   if (g_review == nullptr) return;
-  // 每开一次都按当前屏幕重算：换了显示器 / 改了缩放也能落回可用范围。
-  g_review_model.avail_w = ReviewAvailWidthDip();
+  // 先定「这会摆在 / 已经摆在哪块屏上」。
+  // 人自己拖过、而窗口此刻关着：按他拖到的那个位置认屏。不这么做的话，重开会用
+  // 小条那块屏的可用宽去算宽度，却把窗口摆到人上次拖到的窄屏上 —— 宽度和位置对不上，
+  // 宽窗就会有一截跑到屏幕外面（双屏下一眼就能看见）。
+  HMONITOR monitor = ReviewMonitor();
+  if (!g_review_open && g_review_user_placed) {
+    const POINT probe = {g_review_user_x + 24, g_review_user_y + 24};
+    monitor = MonitorFromPoint(probe, MONITOR_DEFAULTTONEAREST);
+  }
+  // 每开一次都按那块屏重算：换了显示器 / 改了缩放也能落回可用范围。
+  g_review_model.avail_w = ReviewAvailWidthDip(monitor);
   const float width_dip = dshwork::review::WindowWidth(g_review_model);
   const float height_dip = dshwork::review::WindowHeight(g_review_model);
   MONITORINFO info = {};
   info.cbSize = sizeof(info);
-  GetMonitorInfoW(ReviewMonitor(), &info);
+  GetMonitorInfoW(monitor, &info);
   const int px_w = static_cast<int>(width_dip * g_reviewScale);
   const int px_h = static_cast<int>(height_dip * g_reviewScale);
   RECT now = {};
   const bool keep_place = g_review_open && GetWindowRect(g_review, &now) && now.right > now.left;
+  // 位置落进哪块屏的工作区：默认就是「小条 / 图现在待的那块屏」；
+  // 人自己拖过的话认他拖到的那块（把第二块显示器拔了之后，那个点会落到
+  // 最近的屏上，下面的夹取再把它拉回可用范围）。
+  RECT work = info.rcWork;
   int x = 0;
   int y = 0;
   if (keep_place) {
@@ -1722,15 +1743,24 @@ void LayoutReview() {
     // 每次都重新居中会让窗口在展开时整块跳一下，看起来像闪断。
     x = now.left;
     y = now.top;
+  } else if (g_review_user_placed) {
+    // 上次是人自己拖过去的：还从那儿开。刻意不吸附屏幕边缘 ——
+    // 「半屏并排」「两块屏各占一角」都靠这一条。
+    x = g_review_user_x;
+    y = g_review_user_y;
+    const POINT anchor = {x + px_w / 2, y + px_h / 2};
+    MONITORINFO placed = {};
+    placed.cbSize = sizeof(placed);
+    if (GetMonitorInfoW(MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST), &placed)) work = placed.rcWork;
   } else {
     x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - px_w) / 2;
     y = info.rcWork.top + static_cast<int>(96 * g_reviewScale);
   }
-  // 夹回这块屏的工作区：长高之后尾巴别沉到屏幕外面去。
-  if (x + px_w > info.rcWork.right) x = info.rcWork.right - px_w;
-  if (x < info.rcWork.left) x = info.rcWork.left;
-  if (y + px_h > info.rcWork.bottom) y = info.rcWork.bottom - px_h;
-  if (y < info.rcWork.top) y = info.rcWork.top;
+  // 夹回那块屏的工作区：长高之后尾巴别沉到屏幕外面去。
+  if (x + px_w > work.right) x = work.right - px_w;
+  if (x < work.left) x = work.left;
+  if (y + px_h > work.bottom) y = work.bottom - px_h;
+  if (y < work.top) y = work.top;
   SetWindowPos(g_review, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
 }
 
@@ -1901,6 +1931,43 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     RefitReviewToMonitor();
     return DefWindowProcW(window, message, wparam, lparam);
   }
+  if (message == WM_NCHITTEST && g_review_open && !g_review_closing) {
+    // 头带（58 DIP）整条都能按着拖：那里只有标题和「N 件事」，没有任何可点控件，
+    // 不必抠洞。窗口是 WS_POPUP、没有标题栏，不给 HTCAPTION 的话按住只会派发给
+    // WM_LBUTTONDOWN，人能用的就只剩中键平移 —— 在用户看来就是「这张图拖不动」。
+    const POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};  // 屏幕坐标，不是客户区
+    RECT win = {};
+    if (GetWindowRect(window, &win)) {
+      const int header_px = static_cast<int>(dshwork::review::kHeader * ReviewScale());
+      if (pt.x >= win.left && pt.x < win.right && pt.y >= win.top && pt.y < win.top + header_px) return HTCAPTION;
+    }
+    return HTCLIENT;
+  }
+  if (message == WM_ENTERSIZEMOVE) {
+    // 拖动开始：这段时间不收窗（见 WM_MOUSELEAVE）。
+    g_review_moving = true;
+    return 0;
+  }
+  if (message == WM_EXITSIZEMOVE) {
+    // 松手：先夹回屏幕，再记位置。
+    // 拖动途中窗口可能因为「换屏重排」变了尺寸（宽屏 → 窄屏），按新尺寸看，
+    // 落点的尾巴会伸到屏幕外面；松手那一刻把它推回来，人看到的才是完整一扇窗。
+    g_review_moving = false;
+    LayoutReview();
+    RECT win = {};
+    if (GetWindowRect(window, &win)) {
+      g_review_user_placed = true;
+      g_review_user_x = win.left;
+      g_review_user_y = win.top;
+      LogToFile("审阅：拖到 (" + std::to_string(win.left) + ", " + std::to_string(win.top) + ")，下次打开还从这儿开");
+    }
+    return 0;
+  }
+  if (message == WM_SETCURSOR && LOWORD(lparam) == HTCAPTION && g_review_open) {
+    // 头带能拖：指针换成「移动」，不然没人看得出来这里按下去能拖。
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    return TRUE;
+  }
   if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && g_review_open) {
     // 指针落在能点的地方才变手型：「讲讲它」和右下角那颗「知道了」。
     // 这张图整体是只读的，别的区域不该给出"能点"的错觉。
@@ -1988,8 +2055,8 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
   if (message == WM_MOUSELEAVE) {
     g_review_tracking_leave = false;
     // 指针离开这张图 = 人已经不看它了，收起来；但必须是淡出，不能啪一下消失。
-    // 中键拖拽时偶尔会甩出边界，那不算"离开"。
-    if (!g_review_panning && g_review_open && !g_review_closing) {
+    // 中键拖拽时偶尔会甩出边界，那不算"离开"；正在按住标题栏拖动同理。
+    if (!g_review_panning && !g_review_moving && g_review_open && !g_review_closing) {
       g_review_closing = true;
       g_review_anim_at = GetTickCount64();
       SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
@@ -2553,6 +2620,10 @@ void EnsureReviewWindow() {
   }
   SetForegroundWindow(g_review);
   SetFocus(g_review);
+  // 落位之后再自适应一次：排版那一刻的可用宽是按「小条那块屏」算的，真正落位时可能
+  // 换成了人上次把图拖过去的那块窄屏 —— 不重排，最右边那几颗节点会留在窗外。
+  dshwork::review::FitView(g_review_model);
+  dshwork::review::ClampPan(g_review_model);
   g_review_open = true;
   // 从头放一遍淡入。
   g_review_anim_open = 0.0f;

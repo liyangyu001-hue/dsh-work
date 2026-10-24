@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-25 · **审阅窗现在能按住标题栏拖动、松手记住位置，拖到第二块屏会按那块屏的宽度重排**（接力板「等用户决定」第①条；用户当晚接了第二块显示器、回「接好了」= 点头，默认取舍按我事前说的「不吸附、松手记住位置」）。做法全在 `native/shell/src/main.cpp`：① `ReviewProc` 新增 `WM_NCHITTEST`——窗口是 `WS_POPUP`、没有标题栏，所以头带（`review.h:95` 的 `kHeader = 58.0f` × `ReviewScale()`，里面本来就没有可点控件、不用抠洞）返回 `HTCAPTION`，拖动交给系统的非客户区拖动，不自己算 `SetWindowPos`；② `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` 维护 `g_review_moving`，退出时**先** `LayoutReview()`（`keep_place` 分支把窗口原地夹回工作区，否则松手时尾巴会伸出屏幕 802 px）**再** `GetWindowRect` 记 `g_review_user_placed/x/y` + 日志「审阅：拖到 (x, y)，下次打开还从这儿开」；③ `LayoutReview()` 增加「先定屏」——没开着且有人工位置时用 `MonitorFromPoint` 取那块屏，`ReviewAvailWidthDip(HMONITOR)` 按**那块**屏算可用宽（原来只按小条/窗口所在屏，重开时会拿宽屏的 1600 DIP 摆到窄屏上）；④ `EnsureReviewWindow()` 落位后补 `FitView + ClampPan`（窄屏上最右几颗会留在窗外）；⑤ `WM_MOUSELEAVE` 的自动收起加 `!g_review_moving` 守卫（拖到屏幕边缘甩出去就自己关了）。另外 `WM_SETCURSOR` 的 `HTCAPTION` 分支给 `IDC_SIZEALL`。真机（第二块屏 1920×1080 @150%，主屏 3840×2160 @150%）：主屏 `BEFORE 720,144 2400x390` → 拖到第二块屏 `AFTER 3888,460 1872x390`，日志「审阅：换屏后按新工作区重排，可用宽=1248」+「审阅：拖到 (3888, 460)」；关→重开后 `keep=0 placed=1` 停在原处、7 颗全在窗内（没补 `FitView` 时最右一颗被裁）；拖回左上角 → `AFTER 0,580`（x 被夹回 `work.left`）。截图在仓库外 `dshwork-shots\drag4-monitor2.png` / `drag4-reopen.png` / `final-drag.png`；原生 583.5 KB（只剩 `grab_dxgi.h(219) C4127`、`main.cpp(1298) C4715` 两条旧警告）。
 - 2026-10-25 · **面板底部那条事件流终于真的画出来了：根因是分层窗口把 alpha 平方了一次，而那一行用的是 0.4 的半透明灰**（接力板交接待办 1，本轮唯一一件事）。按板上提示先补日志：`[02:42:32] 事件流：3 条` ⇒ 宿主 `/dsh-work/api/feed` 与轮询都对（另用 `x-dsh-work-token` 直接 GET 也回 `{"ok":true,"items":[…"at":"23:59","verb":"推进","text":"完成当前并前进"…]}`）；`main.cpp:1497` 前的 TEMP 日志稳态 `n=3 alpha=1.000000 px=1494x234` ⇒ `DrawFeed` 被调用、窗口尺寸对；在 `DrawFeed` 里塞一条 `FillRound(…, 0x60FF0000)` 暗红带**画得出来** ⇒ 坐标系与执行路径没问题，只有文字不见。接着做颜色阶梯（同一串文字）：`fmt.body`+`0xFFFFFFFF` 清楚可见（证明字符串非空、`Widen`/JValue 都对），`fmt.meta`+`0xFF9AA0A6` 也可见，`0x9AA0A6`（alpha 0.6）只剩零星噪点，`0x659AA0A6`（0.4）整条没有。逐像素统计（y=190..222）：修前那条带 `lum min=max=27`、一个像素都没画；0.6 那列 max 91、0.4 那列与背景无差。**根因**：面板是 `UpdateLayeredWindow(ULW_ALPHA)` 的分层窗口，D2D 往 `D2D1_ALPHA_MODE_PREMULTIPLIED` 的 DIB 里已经预乘过一次，ULW 又乘一次 ⇒ alpha 被平方（0.6→0.36、0.4→0.16），而那行写的正是 `Fade(0x9AA0A6, alpha*0.66f)`。**改法**：`native/shell/src/panel.h` 的 `DrawFeed` 换成 `Fade(kTextDim, alpha)`（不透明暗色，与「7/7 已完成」同一档，整体淡出仍交给 alpha），并把这段原因写进函数注释；顺手删掉 `DrawPanel` 里那份被面板底盖住的重复死代码（原 `panel.h:323-332`）和全部 TEMP 探针。真机（`POST /dsh-work/api/ui/open` + `dshwork-probe\shot-window.ps1`）：面板左下角出现 `23:59  推进 · 完成当前并前进`（仓库外 `dshwork-shots\panel-feed-fixed.png`）。原生 582.5 KB（只剩 `grab_dxgi.h(219) C4127`、`main.cpp(1290) C4715` 两条旧警告）；`pnpm test` 130 绿、`pnpm typecheck` 干净。
 - 2026-10-24 · **这一轮没有能开工的活：固定队列四件全是已交付，绿门 130/130；把两件设计取舍连「改哪几行」一起勘定，等用户点头**（零代码改动）。按「已知的坑」最后一条，先拿自动化提示语的四件去源码与 `git log` 对账（见「当前任务」里那串行号），一件不差，所以**没有重做**。工作区干净、HEAD `e72a533`；`pnpm test` 130 绿、`pnpm typecheck` 干净。然后把①审阅窗拖动（`main.cpp:1849` 加 `WM_NCHITTEST`，`ScreenToClient` 后用 `kHeader × g_reviewScale` 判头带，头带无控件不必抠洞）与②`kMinFitZoom`（`review.h:105` / `:278` 两处被注释里的字面 `\n` 吞掉）的落地位置、代价、仍需拍板的小问写进「当前任务」，**没动代码**——红线不许擅自改产品方向。
 - 2026-10-24 · **桌面 GUI 上「打开节点图」真的活了：玻璃条 7/7、按钮可点、真点一次就弹出节点图窗口**（用户「不然不知道怎么打开」这条的最后一环，零代码改动）。上一轮修完根目录后板子还挂着两问：桌面版重启后玻璃条亮没亮、按钮能不能开图。本轮在用户正在用的 `desktop` profile（宿主 pid 30624、端口 57758）上实测三道：① `~/.dsh/dsh-work/endpoint.json` 已是 `root=D:\work\AI\work` / `workspace=work`（`publishEndpoint` 写的），带同目录 token 打 `/dsh-work/api/state` 回 200、`seq=90 roots=7 nodes=7`；② 窗口截图（仓库外 `dshwork-shots\desktop-gui-after-restart.png`）：玻璃条「● 全部已完成 7/7」+ 描边「打开节点图」高亮，对照上一轮 `desktop-gui.png` 的「—」和灰按钮；③ **DPI-aware 真点一次**（屏幕物理 2104,474，150% @3840×2160）→ 1s 内 `dshwork-shell` 被拉起（pid 65004）、`DSHWorkNativeReview` 2400×390 弹出，7 颗概念节点、每颗「讲讲它」胶囊、页脚键位提示全在，标题正是「搞懂幂等及其与反复重试的关系」（`dshwork-shots\desktop-graph-window.png`）。验完 `Stop-Process -Name dshwork-shell`、光标放回原处，桌面不留窗。`pnpm test` 130 绿、`pnpm typecheck` 干净。**四件老队列在用户真正看的界面上全部到位，入口这条结案。**
@@ -109,9 +110,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 - 阶段：**P2 · AI 在环**。**队列里的活真的空了**：2026-10-24 这轮又按「已知的坑」最后一条，把自动化提示语里的四件（入口 / 直角折线 / 加宽 / 讲讲它）逐条对过源码——入口 `packages/plugin/src/client/index.tsx:297`（`data-dsh-work-graph="1"`）+ `:326`（「打开节点图」）、直角折线 `native/shell/src/review.h:473`（`BuildEdge`，`:569` 调用）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill `review.h:723-748` + 页脚提示 `review.h:804`；`git log` 里 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 全在。`pnpm test` 130 绿、`pnpm typecheck` 干净、工作区干净、HEAD `e72a533`。**别再把这些重做一遍。**
 - 2026-10-25 本轮已把「2026-10-25 交接」的待办 1（面板底部事件流一行不显示）修好并真机验完：`DrawFeed` 改不透明暗色 + 删掉重复死代码（见进度第一条）。交接里另两条：待办 2（网页按钮压标题栏）已被 `f7d2c3e` 改成 `top:52` 解决；待办 3（Pulse 节拍时钟 + 状态矩阵）还没人接。
-- **当前任务 = 等用户拍板下一件。** 两件都卡在设计取舍（红线：不擅自改产品方向），**本轮已把「改哪几行」勘定在这里**，点头就能直接开工：
-  - **① 审阅窗按住标题栏拖动**（推荐先做：多显示器上现在真拿不过去，是最硬的可用性缺口）。落地：`native/shell/src/main.cpp:1849` 的 `ReviewProc` 加 `case WM_NCHITTEST` —— 它给的是**屏幕坐标**，先 `ScreenToClient`，再和 `review.h:95` 的 `kHeader = 58.0f × g_reviewScale` 比（不要在这里改用 `GetDpiForWindow`：绘制、命中、布局必须同源）。头带里现在**没有任何可点控件**（标题「DSH Work 审阅」+ 节点计数；提交按钮「知道了」在页脚 `review.h:815`），所以不必抠洞。要用户拍的两件小事：拖到屏幕边缘要不要吸附；松手要不要记住位置（现在每次弹窗都由 `LayoutReview()` 重新居中，且「开着时只改尺寸、位置原地」是 N-5 定的规矩，拖动不能把它绕过）。
-  - **② 恢复 `kMinFitZoom`**（次之，改的是窄窗口里的视觉行为）。落地：`review.h:105` 那一行 `kMinZoom` 的注释里有一个**字面 `\n`**，把后面的 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释了；`:278` 的 `if (zoom < kMinFitZoom) zoom = kMinFitZoom;` 同样整行是注释。两条拆成独立行、放开 clamp，就是「自动适配也不缩小」；代价是窗口窄于内容时（`avail_w` < 1600 DIP，或展开后行变多）内容会被裁、只能靠拖动/缩放看全。1600 DIP 默认宽下本机几乎不触发。
+- **当前任务 = 等用户拍板下一件。** 本轮已把第①条**审阅窗拖动做掉并真机验完**（见进度第一条：`WM_NCHITTEST` → `HTCAPTION`、松手记住位置、换屏按那块屏重排、拖动时不被自动收起）。只剩第②条卡在设计取舍（红线：不擅自改产品方向），落地位置已勘定，点头就能直接开工：
+  - **① 审阅窗按住标题栏拖动 —— ✅ 本轮已交付**（用户 2026-10-25 接了第二块显示器后点头）。位置只记在本次进程内，跨重启落盘、拖到屏边要不要吸附这两件仍等拍板（见「等用户决定」）。
+  - **② 恢复 `kMinFitZoom`**（剩下的那一件，改的是窄窗口里的视觉行为）。落地：`review.h:105` 那一行 `kMinZoom` 的注释里有一个**字面 `\n`**，把后面的 `constexpr float kMinFitZoom = 1.0f;` 一起吞进注释了；`:278` 的 `if (zoom < kMinFitZoom) zoom = kMinFitZoom;` 同样整行是注释。两条拆成独立行、放开 clamp，就是「自动适配也不缩小」；代价是窗口窄于内容时（`avail_w` < 1600 DIP，或展开后行变多）内容会被裁、只能靠拖动/缩放看全。1600 DIP 默认宽下本机几乎不触发。
 - 拿到点头再动手，一件事做完就停。「桌面版重启后玻璃条亮了吗」别再问用户：上一轮已实测亮着（7/7、按钮可点、真点一次弹出图窗）。
 - 2026-10-24 第三轮那条「desktop profile 没装插件」已被**实测推翻**：`C:\Users\25108\.dsh\profiles\desktop\package.json` 里 `@dshwork/plugin` 在 dependencies 也在 `dsh.profile.bundles` 里（用户 08:44 自己装的），`node_modules\@dshwork` 也在。玻璃条确实渲染在那个界面里（截图 `dshwork-shots\desktop-gui.png`），别再拿「看错界面」解释。
 - 规矩不变：一件事做完就停。
@@ -282,7 +283,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - ✅ 节点图里点「已完成/进行中」的节点可把它设为当前任务：宿主 `node.focus` 早就有，补上「看得见当前那颗 + 状态回来重画 + 被拒时回话」，手势定为双击（`5a07ddd`，见进度第一条）
 - ✅ 节点图开着时跟着整份状态变（不只跟 `doc.pointer`）：签名覆盖树形状 + 每颗 status/kind/标题/交接，变了才重建且保住选中与视口（`9737aa5`，见进度第一条）
 - ✅ 徽标复核（N-4）：真机 1600 DIP、7 颗节点上复现不出，已关（见 N-4 段真机记录）
-- 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
+- ✅ 审阅窗「拖不动」：按住标题栏可拖、松手记住位置、拖到第二块屏按那块屏的宽度重排（`WM_NCHITTEST` → `HTCAPTION`，见进度第一条）
+- 恢复 `kMinFitZoom`：仍等用户点头（见「等用户决定」）
 - ✅ 节点图里点「已选中的节点」会去请求宿主拆层、doc 模式没有 jobId 被宿主回错 → 只读模式改成页脚一句人话、不发请求；顺手修掉「点收起不重建模型所以收不起来」（见进度第一条）
 - 已交付：悬停守卫补全（`2b95980`）、N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
@@ -290,11 +292,12 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 等用户决定
 
-- **下一件做什么（二选一，原第①条本轮已做掉）**：① 审阅窗「按住标题栏拖动」（新手势，顺带要定拖到屏边要不要吸附）；② 恢复 `kMinFitZoom`（改的是窄窗口里的视觉行为，要权衡）。建议顺序 ①→②；用户没拍之前不改。
+- **下一件做什么**：① 审阅窗「按住标题栏拖动」**已做掉**（2026-10-25，见进度第一条）；剩下的候选是 ② 恢复 `kMinFitZoom`（改的是窄窗口里的视觉行为，要权衡）。②的改法与代价在「当前任务」，点头就开工。
+- **拖动还留两小问等拍板**：① 拖到屏幕边缘要不要**吸附**（现在纯粹跟着鼠标走，停在哪儿是哪儿）；② 位置要不要**跨重启记住**（现在只记在本次进程内，`dshwork-shell` 一退出就回到居中；要落盘得定存哪儿——`endpoint.json` 旁边还是 `~/.dsh/dsh-work/` 下单独一个文件）。两条都不影响现在能拖。
 - **「设为当前任务」的手势现在是双击，要不要改成单击？** 单击更符合「点谁就是谁」的直觉，但代价有两层：① 单击本来用于选中，双击那一半就没了；② `node.focus` 会 `demoteOtherActive`（`state.ts:368-377`），也就是**光看图就会把当前任务一路挪走**——只想翻一眼图的人会把进度改掉。现在保住的是双击（要么明确点两次，要么选完按 Enter 的本地展开）；单击要等这张图能区分「浏览」与「操作」再说，例如单击选中、选中后再单击才生效。等你拍。
 - **`kMinFitZoom` 那句「自动适配也不缩小」目前是死的**（见「已知的坑」）。恢复它 = 窄窗口里字不再被缩小、内容超出就靠人拖/滚；不恢复 = 现在这样自动缩到装下。要不要恢复？先不动，N-2 加宽只是让它不那么常触发。
 - **「讲讲它」的讲解会覆盖节点原有的 `advice`**（宿主 `learn` 直接 `node.advise` 落库，这是它有意的设计：面板本来就渲染这个字段）。要不要给讲解单独一个字段、与「建议」并存？先不动，等你拍。
-- **审阅窗现在拖不动**（`WS_POPUP` 无标题栏、没有 `WM_NCHITTEST`）：多显示器上想把它放到另一块屏，目前只能靠系统（或等 N-5 的换屏重排在别处触发）。要不要支持「按住标题栏拖动」？先不动，等你拍；加的话是新增手势（顺便得决定拖到边上要不要吸附）。
+- ~~**审阅窗现在拖不动**~~ —— **已解决**（2026-10-25）：`ReviewProc` 的 `WM_NCHITTEST` 把头带返回 `HTCAPTION`，按住标题栏就能拖；松手记位置、重开还在那儿、拖到另一块屏按那块屏的宽度重排。剩下「吸附 / 跨重启记住」两小问见上一条。
 - **多工作区时玻璃条该绑哪一个？**（2026-10-24 第四轮新增，暂按「有会话的那个」实现）你这台机器上 `~/.dsh/storages/workspace.json` 只登记了一个工作区（`D:\work\AI\work`），所以现在没有歧义。但只要注册了第二个工作区，「任务库根目录」就得挑一个：现在的规则是 **插件配置 `root` > 登记表里带 `sessionIds` 的那个（= 最常用的工作区）> 进程 cwd**。要不要改成「跟着当前会话所在的工作区走」（那样玻璃条会随对话切换而换库，更像 IDE 的「当前项目」）、或者干脆让用户在面板里选一次并记住？先按现在的规则，等你拍。
 
 ---
@@ -393,6 +396,11 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **只读文档图（`g_review_read_only`，`ShowReviewDoc()` 置 true）不能去请求宿主拆层/撤层**：文档模式开图时 `g_review_job.clear()`，`/dsh-work/api/plan/expand|collapse` 只会回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只剩「这一步没成，看看日志」这句误导人的话。`ReviewExpandSelected()` / `ReviewCollapseSelected()` 都先看这个标志，用 `SetReviewHint` 回一句人话并落日志；草稿模式（有 jobId）行为不变。
 - **`UpdateLayeredWindow` + `ULW_ALPHA` 的分层窗口里，半透明 alpha 会被乘两次**：面板/节点图的 D2D 目标是 `D2D1_ALPHA_MODE_PREMULTIPLIED` 的 DIB，D2D 写进去时已经预乘一次，`UpdateLayeredWindow` 又按 alpha 合一次 ⇒ 实际 alpha = a²（实测 0.6 → 0.36、0.4 → 0.16，等于画在背景上看不见；本轮事件流那行就是被这个吃掉的）。所以在面板/节点图里表达「暗」要用**不透明暗色**（`kTextDim` = `0xFF9A9AA0` 这种），别再叠 `Fade(color, 0.6f)` 做第二重调暗；整体淡出（morph 期 alpha 0→1）仍走 `Fade(..., alpha)` 是安全的，因为只有一重。判据：同一串字 `0xFFFFFFFF` 清楚、`0xFF9AA0A6` 可见、`0x9AA0A6` 只剩几十个噪点、`0x659AA0A6` 整条带的 `lum` 与背景完全一致。
 - **桌面 profile 的 `@dshwork/plugin` 是 `link:D:/work/AI/work/dsh-work/packages/plugin`（不是 npm 包）**：宿主半边（`lib/index.js`）改完要 `node scripts/build-plugin.mjs`，再**重启桌面版**才加载；玻璃条那半边（`lib/client.js`）另需 `node scripts/build-client.mjs`。桌面进程不弹窗、不留「已重启」标记，**别拿文件 mtime 猜**（本机时钟被回拨过，mtime 会冒出 `20:27` 这种未来时间）——读 `~/.dsh/dsh-work/endpoint.json` 的 `root`/`workspace`，再打 `/dsh-work/api/state` 看 `seq`/`roots`/`nodes` 对不对，才是可信判据。
+- **`WS_POPUP` 无标题栏的窗口要能按住拖动，就在自己的窗口过程里对头带回 `HTCAPTION`**：`WM_NCHITTEST` 的 `lparam` 是**屏幕坐标**（不是客户区坐标），和 `GetWindowRect` 直接比即可；返回 `HTCAPTION` 之后拖动由系统跑非客户区那一套循环。**别自己在 `WM_MOUSEMOVE` 里算 `SetWindowPos`** —— 那样会绕过 `LayoutReview()` 里的「开着时只改尺寸、位置原地」「夹回工作区」两条规矩（N-5 定的），窗口能被拖出屏幕且再也回不来。
+- **拖动期间 `WM_MOUSELEAVE` 照样会来**（把图甩到屏幕边缘时指针先离开窗口）：审阅窗「指针离开就淡出收起」那条必须加 `!g_review_moving` 守卫，否则拖到边上松手前窗口就自己关了，看着像「拖动失败」。
+- **`WM_EXITSIZEMOVE` 里要「先重排、再记位置」**：松手那一刻窗口可能有一大半在屏幕外（实测尾巴伸出 802 px），先 `LayoutReview()` 用 `keep_place` 夹回工作区，再 `GetWindowRect` 记下来的才是人真正看到的那个位置。
+- **常驻探针（pwsh/.NET）读窗口矩形必须先 `SetProcessDpiAwarenessContext(-4)`**：本轮又踩了一次——同一条脚本读出 `133,440 1600x260`（正好是 200/1.5、660/1.5、2400/1.5、390/1.5），差点误判成「位置没记住」。凡是要打印 rect / 算点击坐标的探针，第一行就声明 DPI 感知（`dshwork-probe\shot-window.ps1`、`drag-header.ps1` 都已这样写）。
+- **自动化拖窗的第一步经常被「窗口还没被激活」吃掉**：`drag-header.ps1` 第一次跑回 `NOT_MOVED`，原样重试就成功。脚本里先 `SetForegroundWindow(hwnd)` 再按，别急着改代码。
 - **验证「网页改动在桌面 GUI 里生效」不需要网页 token**：走「截窗口 + 物理坐标点击」。`dshwork-probe\shot-window.ps1 -Pid2 <持有该窗的 pid>`（它先 `SetProcessDpiAwarenessContext(-4)`，会打印 WIN rect）抓图，量按钮像素 **÷ 缩放比** 得窗口内物理坐标，屏幕坐标 = 窗口 rect + 它；本轮 150% @3840×2160 下「打开节点图」中心 = 屏幕 `(2104,474)`，`SetCursorPos` + `mouse_event(0x2/0x4)` 一次就成。**网页内容别用 `PostMessage` 点**（那是 `click-rel.ps1` 给原生窗用的，Chromium 渲染进程未必收）。点完立刻 `Get-Process dshwork-shell` + `EnumWindows` 找 `DSHWorkNativeReview` 才算数——节点图窗（2400×390、从 y≈144 起）会盖住居中的 GUI 顶部玻璃条，toast 可能压根看不见；验完 `Stop-Process -Name dshwork-shell`，**并把光标移回原处**（留在按钮上，悬停 260ms 会自己把面板顶出来）。
 
 ---

@@ -1,5 +1,18 @@
 # 变更日志
 
+## 2026-10-25 · 审阅窗能按住标题栏拖了：松手记住位置，拖到另一块屏按那块屏的宽度重排
+
+节点图窗口是 `WS_POPUP` 的分层窗、没有标题栏，也从没处理过 `WM_NCHITTEST`——在双屏上想把它挪到另一块屏，只能靠系统窗口菜单或者干脆重开。这一轮补上：
+
+- `ReviewProc` 新增 `WM_NCHITTEST`：`lparam` 是屏幕坐标，落在窗口顶部 `kHeader`（58 DIP）× `ReviewScale()` 的带内就回 `HTCAPTION`。头带里本来只有标题和「N 件事」，没有可点控件，所以不用给控件抠洞。返回 `HTCAPTION` 之后拖动完全交给系统那一套非客户区循环，不再自己算 `SetWindowPos`——否则会绕过 `LayoutReview()` 里「开着时只改尺寸、位置原地」和「夹回工作区」两条 N-5 定下的规矩。
+- `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` 维护 `g_review_moving`；松手时**先** `LayoutReview()` 把窗口夹回所在屏的工作区（实测松手那一刻尾巴能伸出屏幕 802 px），**再** `GetWindowRect` 记住位置并落日志「审阅：拖到 (x, y)，下次打开还从这儿开」。
+- `LayoutReview()` 增加「先定屏」：没开着、且人拖过位置时，用 `MonitorFromPoint` 取那块屏，让 `ReviewAvailWidthDip(HMONITOR)` 按**那块**屏算可用宽。原来只按小条/窗口所在屏算，重开时会把 1600 DIP 的宽窗摆到 1920×1080 的窄屏上。`EnsureReviewWindow()` 落位后补一次 `FitView + ClampPan`，否则窄屏上最右边那几颗节点会留在窗外。
+- `WM_MOUSELEAVE` 的自动收起加了 `!g_review_moving` 守卫：拖到屏幕边缘时指针会先离开窗口，不绕过它就会出现「拖到一半自己关了」。`WM_SETCURSOR` 在 `HTCAPTION` 上给 `IDC_SIZEALL`，让人看得出这条能拖。
+
+真机验收（用户当晚接上的第二块屏 1920×1080 @150%，主屏 3840×2160 @150%）：主屏 `BEFORE 720,144 2400x390` → 拖到第二块屏 `AFTER 3888,460 1872x390`，日志「审阅：换屏后按新工作区重排，可用宽=1248」+「审阅：拖到 (3888, 460)」；关掉再开 `keep=0 placed=1` 停在原处、7 颗节点全在窗内；拖回左上角 `AFTER 0,580`（x 被工作区左边界夹住）。截图在仓库外 `dshwork-shots\drag4-monitor2.png`、`drag4-reopen.png`、`final-drag.png`。原生构建 583.5 KB，只剩 `grab_dxgi.h(219) C4127`、`main.cpp(1298) C4715` 两条旧警告；`pnpm test` 130 绿（第一次跑挂了一条 `store.test.ts` 的 `ENOTEMPTY` 清理竞态，重跑即过）、`pnpm typecheck` 干净。
+
+位置目前只记在本次进程内：跨重启落盘、拖到屏边要不要吸附，都写进 `docs/NEXT.md` 的「等用户决定」等拍板。
+
 ## 2026-10-25 · 面板底部事件流一行终于画出来了：分层窗口把 alpha 平方了一次
 
 交接板上挂了两轮的「面板底部事件流一行从来不显示」修掉了。查法按板上留的线索走：先补一行永久日志确认数据到没到——`[02:42:32] 事件流：3 条`，说明 `/dsh-work/api/feed` 与每秒轮询都正常（`main.cpp:445-480` 拼 `at + 双空格 + verb + " · " + text`，`:505-508` 进 `g_model`，`:2754-2769` 进 `g_panel_model`）。再在 `main.cpp:1497` 前打 `DrawFeed` 的入参，稳态 `n=3 alpha=1.000000 px=1494x234`——调用与尺寸都对。接着往 `DrawFeed` 里塞一条暗红 `FillRound`：带子画出来了，文字仍然没有，于是问题锁死在「这段文字本身画不出来」。
