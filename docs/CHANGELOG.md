@@ -1,5 +1,18 @@
 # 变更日志
 
+## 2026-10-24 · 只读文档节点图：再点已选中节点不再请求宿主拆层，点收起也真的会收起
+
+接力板「等用户决定」第①条（板上注明「纯 bug、修法唯一、不动产品方向，建议先做」）。在只读文档图里再点一颗已选中的节点，原来有两条错路：
+
+- **叶子节点会去请求宿主拆层**：`ReviewProc` 的 `again` 分支发 `kMsgReview 2` → `ReviewExpandSelected()` **无条件** POST `/dsh-work/api/plan/expand`，而文档模式没有 jobId（`ShowReviewDoc()` 里 `g_review_job.clear()`）→ 宿主回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只留一句「这一步没成，看看日志」。
+- **点父节点「收起」其实没反应**：`again` 分支就地 `g_review_expanded.erase(row.id)` 就完了，可行是 `BuildReviewModel` 摊平出来的，集合变了界面没重建——既不收起也不落日志（这条是本轮顺手翻出来的，接力板原来只记了上面那条）。
+
+改 `native/shell/src/main.cpp` 三处：① `again` 只保留唯一出口 `PostMessageW(g_window, kMsgReview, 2, 0)`（删掉就地擦集合的分支，并注明「行是 BuildReviewModel 摊平出来的，集合变了界面却没重建」）；② `ReviewExpandSelected()` 在起后台线程前加 `g_review_read_only` 守卫：页脚 `SetReviewHint(L"这颗已经到底了，文档图不能再拆")` + 日志「审阅：只读文档，叶子不请求拆层 <id>」；③ `ReviewCollapseSelected()`（VK_BACK）同样守卫，回「文档图是只读的，撤不了这一层」。草稿模式（`g_review_job` 在、`read_only=false`）行为不变。
+
+真机验证（仓库外假宿主 shim + 真伴随层，1600 DIP @150%，`DSH_HOME` 指到临时目录）：① 点概念叶子一次 → 选中环过去；② 再点一次 → 页脚亮「这颗已经到底了，文档图不能再拆」、无失败提示，shim 侧 `planHits:0 expandHits:0`；③ ↑+Enter 展开父节点 → 日志「审阅：本地展开 nd_a」、窗口 390→441、徽标 `+2`→`−2`；④ 展开态再点父节点一次 → 日志「审阅：本地收起 nd_a」、窗口回到 390、徽标回 `+2`——证明删掉就地擦集合后点收起真的会重建。原生日志全程没有「审阅再拆 失败」。
+
+`pnpm test` 130 绿、`pnpm typecheck` 干净（本轮只改原生）。
+
 ## 2026-10-24 · 修掉「打开节点图」永远置灰：插件改为跟随宿主工作区登记
 
 用户说的「在dsh界面装个打开的按钮 不然不知道怎么打开」——按钮早在 `e1f8191` 就有，真正的问题是它**永远是灰的**：插件拿 `process.cwd()` 当任务库根目录，而桌面 profile 的 cwd 是 profile 目录，于是绑到 291 B 的空库（0 颗节点），`graphEntry(0)` 按设计置灰；真库在 `D:\work\AI\work\.dsh-work\`（`seq=90`、7 颗节点）。

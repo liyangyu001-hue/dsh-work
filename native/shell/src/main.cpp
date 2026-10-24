@@ -2025,14 +2025,12 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
       }
       SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
-      // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键
-      if (again) {
-        const auto& row = g_review_model.rows[static_cast<size_t>(index)];
-        if (row.has_children && g_review_expanded.count(row.id) > 0) {
-          g_review_expanded.erase(row.id);
-        } else if (g_window != nullptr) {
-          PostMessageW(g_window, kMsgReview, 2, 0);
-        }
+      // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键。
+      // 一律交给 ReviewExpandSelected，因为行是 BuildReviewModel 摊平出来的：
+      // 早先这里就地擦 g_review_expanded 就收工，集合变了界面却没重建，
+      // 点了跟没点一样（踩过）。收起的出口只能有一个，否则两条路各错各的。
+      if (again && g_window != nullptr) {
+        PostMessageW(g_window, kMsgReview, 2, 0);
       }
       RepaintReview();
     }
@@ -2195,6 +2193,16 @@ void ReviewExpandSelected() {
     return;
   }
 
+  // 只读文档：整棵树已经在这份 doc 里，叶子就是真的到底了。
+  // 以前这里照样去 POST /api/plan/expand，可文档模式 g_review_job 是空的，
+  // 宿主只能回「缺少 jobId」——人看到的是一句「这一步没成，看看日志」，
+  // 而他什么也没做错。只读图不碰宿主的拆层接口。
+  if (g_review_read_only) {
+    SetReviewHint(L"这颗已经到底了，文档图不能再拆");
+    LogToFile("审阅：只读文档，叶子不请求拆层 " + row.id);
+    return;
+  }
+
   const std::string node_id = row.id;
   const std::wstring job = g_review_job;
   g_review_busy = true;
@@ -2226,6 +2234,12 @@ void ReviewCollapseSelected() {
   const int index = g_review_model.selected;
   if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) return;
   const dshwork::review::Row row = g_review_model.rows[static_cast<size_t>(index)];
+  // 只读文档没有「撤销这一层」这回事：宿主那边没有 job，请求必失败。
+  if (g_review_read_only) {
+    SetReviewHint(L"文档图是只读的，撤不了这一层");
+    LogToFile("审阅：只读文档，忽略撤销 " + row.id);
+    return;
+  }
   if (!row.has_children) {
     g_review_note = L"这颗还没拆过";
     RepaintReview();

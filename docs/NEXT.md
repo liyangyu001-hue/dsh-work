@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-24 · **只读文档节点图里再点已选中节点不再去请求宿主拆层；点收起也真的会收起**（接力板「等用户决定」第①条，板上原话「纯 bug、修法唯一、不动产品方向，建议先做」）。顺着源码找出两条错路：① 叶子节点走 `again` → `kMsgReview 2` → `ReviewExpandSelected()` **无条件** POST `/dsh-work/api/plan/expand`，而文档模式没有 jobId（`ShowReviewDoc()` 里 `g_review_job.clear()`）→ 宿主回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`、界面上只留「这一步没成，看看日志」；② 父节点在 `again` 分支里**就地** `g_review_expanded.erase(row.id)` 就完事，可行是 `BuildReviewModel` 摊平出来的——集合变了界面没重建，于是点「收起」既不收也不落日志（这条本轮才翻出来）。改 `native/shell/src/main.cpp` 三处：`again` 只留唯一出口 `PostMessageW(g_window, kMsgReview, 2, 0)`（删掉就地擦集合的旧分支并写明原因）；`ReviewExpandSelected()` 起后台线程前加 `g_review_read_only` 守卫 → 页脚「这颗已经到底了，文档图不能再拆」+ 日志「审阅：只读文档，叶子不请求拆层 <id>」；`ReviewCollapseSelected()`（VK_BACK）同样守卫 → 「文档图是只读的，撤不了这一层」。草稿模式（有 jobId、`read_only=false`）行为不变。**真机**（仓库外假宿主 shim + 真伴随层，1600 DIP @150%，`DSH_HOME` 指到临时目录）：点概念叶子一次选中环过去；再点一次 → 页脚亮那句、无失败提示，shim 侧 `planHits:0 expandHits:0`；↑+Enter 展开父节点 → 日志「本地展开 nd_a」、窗口 390→441、徽标 `+2`→`−2`；展开态再点父节点 → 日志「本地收起 nd_a」、窗口回 390、徽标回 `+2`。原生日志全程无「审阅再拆 失败」。`pnpm test` 130 绿、`pnpm typecheck` 干净。
 - 2026-10-24 · **「打开节点图」一直是灰的：根因是插件把宿主的 `process.cwd()` 当成任务库根目录，桌面 profile 下绑到了空库**（本轮修掉，队列第 1 条真正交付）。用户原话「在dsh界面装个打开的按钮 不然不知道怎么打开」——按钮 `e1f8191` 早就有了，但我去截**用户真正在看的桌面 GUI**（`desktop` profile、端口 52749）发现：玻璃条在、只是「打开节点图」**永远是置灰的**、连 `7/7` 计数都没有。追下去：`packages/plugin/src/index.ts:92` 旧代码 `const root = typeof cfg.root === 'string' && cfg.root.trim() !== '' ? cfg.root : process.cwd();`，而桌面宿主的 cwd 是 `C:\Users\25108\.dsh\profiles\desktop` → `WorkStore` 打开的是 291 B 的空库（`title:"未命名工作区", seq:0, roots:[], nodes:{}`），真库（7 颗节点、`seq:90`）在 `D:\work\AI\work\.dsh-work\`。`graphEntry(0)` 按设计就是「先在面板里拆一次任务」，所以灰着。① 新增纯逻辑 `packages/plugin/src/root.ts`（`pickRoot` / `pickWorkspaceRoot` / `listWorkspaces`，9 个单测）：配置优先 → 否则跟随 `ctx.get('workspaceRegistry').list()` 里**有会话的那个工作区**（`~/.dsh/storages/workspace.json` 全局唯一登记的就是 `D:\work\AI\work`）→ 否则回 cwd。**没有把 registry 写进 `inject`**：硬依赖只有 `tools` / `webServer`，加进去会让没这个服务的宿主整条装不起来。② registry 是异步引导的，第一版只读一次拿到的是「服务还没起」（实测日志 root=探针目录）→ `resolveRoot()` 里最多等 1.5s（15 × 100ms，只等 source 还是 cwd 的时候），并落一行「任务库根目录：… （来源：插件配置/宿主工作区登记/进程 cwd）」。**真机决定性验证**：故意从**错误 cwd** `D:\work\AI\work\dshwork-probe` 起 dev 宿主（就是桌面 profile 的失效形状）→ 日志 `任务库根目录：D:\work\AI\work（来源：宿主工作区登记）`、`/api/state` 回 `seq=90 nodes=7` 全是真任务；再截 dev 宿主（1440×900，仓库外 `dshwork-shots\devhost-bar.png`）：玻璃条 `● 全部已完成 7/7` + 「打开节点图」**可点**（对照桌面 GUI 那张：无计数、灰掉）。`pnpm test` 130 绿、`pnpm typecheck` 干净。**桌面版要重启一次才会加载新 bundle**（重启后重新读 `~/.dsh/dsh-work/token`，玻璃条就该亮起来）。
 - 2026-10-24 · **第三轮收到同一份四件老队列：四件仍全部已交付；这轮多查了一步「入口到底出现在哪个界面」**（零代码改动）。逐条复核：入口按钮 `packages/plugin/src/client/index.tsx:294-327`（`data-dsh-work-graph="1"`，`e1f8191`）、直角折线 `BuildEdge` 在 `native/shell/src/review.h:473`（`eba985a`）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`（`62a10bd`）、「讲讲它」pill + 讲解卡在 `review.h:75-330`（`8fb316f`）。用 `scripts/shot.mjs` 截了正在跑的 dev 宿主（1440×900，仓库外 `dshwork-shots\entry-check.png`）：玻璃条两枚按钮都在，右侧那枚就是「打开节点图」（`disabled=false`，无 console 错误）。**这轮唯一的新事实**：跟我对话的这个界面是 **desktop profile**（端口 53011），它的 `package.json` / `cordis.patch.yml` / `node_modules` 里都没有 `@dshwork/plugin`——所以那个界面上根本不会有玻璃条；能看到入口的只有 dev 宿主（`--profile dshwork-dev --port 64001`）。已把「要不要装进 desktop profile」写进「等用户决定」，按红线不擅自改用户正在用的 profile。`pnpm test` 121 绿、`pnpm typecheck` 干净。
 - 2026-10-24 · **自动化提示语的四件老队列已核实全部交付，本轮没动任何代码**（只取证 + 改文档）。这轮收到的提示语仍把「① 入口按钮 ② 直角折线 ③ 加宽 ④ 讲讲它」排成优先级，而板子「当前任务」早写明队列空、下一件必须先问用户——按「已知的坑」最后一条的办法逐条去源码里对了一遍：入口按钮 `data-dsh-work-graph="1"` +「打开节点图」在 `packages/plugin/src/client/index.tsx:297-326`（`packages/plugin/src/client/open-entry.ts` 在）、直角折线 `BuildEdge` 在 `native/shell/src/review.h:473`（连线块 `review.h:552-592`）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill + 讲解卡在 `review.h:75-330`、宿主 `POST /api/learn` 在 `packages/plugin/src/http.ts:307`；对应提交 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 都在 `git log` 里。**没重跑真机复核**：上一轮刚把「入口 / 悬停守卫 / 双击」真机验过、这轮零代码改动，按板子「别再重复本轮的复核」。开工时 HEAD `b5279bf`、工作区干净；`pnpm test` 121 绿、`pnpm typecheck` 干净。三选一已在本轮回复里重新抛给用户，等拍板。
@@ -102,9 +103,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- 阶段：**P2 · AI 在环**。上一件「『打开节点图』永远是灰的 → 插件绑错任务库根目录」**已交付**（见进度第一条：`packages/plugin/src/root.ts` + 9 单测，桌面 profile 从错误 cwd 起也认 `D:\work\AI\work`）。
-- **当前任务 = 等用户拍板下一件。** 队列第 1 条（用户说的「在dsh界面装个打开的按钮 不然不知道怎么打开」）这轮**找到了真原因并修掉**——按钮本身早在 `e1f8191` 就有，是根目录绑错导致它永远置灰；剩下三件仍卡在设计取舍上（doc 模式再点已选节点 / 审阅窗拖不动 / `kMinFitZoom`），按规矩不擅自改产品方向。
-- **下一轮开工第一件事：把「等用户决定」里那三条连建议一起抛给用户**（三选一或另指一件），拿到点头再动手；同时问一句「桌面版重启后玻璃条亮了吗」——入口修复要重启才生效，若仍灰就得看新日志里的「任务库根目录」是哪一行。
+- 阶段：**P2 · AI 在环**。上一件「『打开节点图』永远是灰的 → 插件绑错任务库根目录」**已交付**（见进度第二条：`packages/plugin/src/root.ts` + 9 单测，桌面 profile 从错误 cwd 起也认 `D:\work\AI\work`）。
+- **当前任务 = 等用户拍板下一件。** 这轮把「等用户决定」第①条（只读文档图里再点已选中节点会去请求宿主拆层）**修掉了**——叶子不再发注定失败的 `/plan/expand`，点父节点「收起」也真的会重建模型（见进度第一条）。剩下两件仍卡在设计取舍上（审阅窗「按住标题栏拖动」、恢复 `kMinFitZoom`），按规矩不擅自改产品方向。
+- **下一轮开工第一件事：把「等用户决定」里那两件连建议一起抛给用户**（二选一或另指一件），拿到点头再动手；同时问一句「桌面版重启后玻璃条亮了吗」——入口修复要重启才生效，若仍灰就得看新日志里的「任务库根目录」是哪一行。
 - 2026-10-24 第三轮那条「desktop profile 没装插件」已被**实测推翻**：`C:\Users\25108\.dsh\profiles\desktop\package.json` 里 `@dshwork/plugin` 在 dependencies 也在 `dsh.profile.bundles` 里（用户 08:44 自己装的），`node_modules\@dshwork` 也在。玻璃条确实渲染在那个界面里（截图 `dshwork-shots\desktop-gui.png`），别再拿「看错界面」解释。
 - 规矩不变：一件事做完就停。
 
@@ -273,19 +274,18 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - ✅ 节点图开着时跟着整份状态变（不只跟 `doc.pointer`）：签名覆盖树形状 + 每颗 status/kind/标题/交接，变了才重建且保住选中与视口（`9737aa5`，见进度第一条）
 - ✅ 徽标复核（N-4）：真机 1600 DIP、7 颗节点上复现不出，已关（见 N-4 段真机记录）
 - 审阅窗「拖不动」如果用户点头，加一条按住标题栏拖动的路（见「等用户决定」）
-- 节点图里点「已选中的节点」会去拆一层、doc 模式没有 jobId 被宿主回错（见「已知的坑」/「等用户决定」）——若要处理是独立一小轮
+- ✅ 节点图里点「已选中的节点」会去请求宿主拆层、doc 模式没有 jobId 被宿主回错 → 只读模式改成页脚一句人话、不发请求；顺手修掉「点收起不重建模型所以收不起来」（见进度第一条）
 - 已交付：悬停守卫补全（`2b95980`）、N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
 
 ---
 
 ## 等用户决定
 
-- **下一件做什么（三选一，本轮已把队列清空）**：① **只读文档图里再点「已选中」的节点别再请求宿主拆层、就地收起/展开**（纯 bug，界面上现在只留一行 `审阅再拆 失败：…`；修法唯一、不动产品方向，建议先做这个）；② 审阅窗「按住标题栏拖动」（新手势，顺带要定拖到屏边要不要吸附）；③ 恢复 `kMinFitZoom`（改的是窄窗口里的视觉行为，要权衡）。建议顺序 ①→②→③；用户没拍之前不改。
+- **下一件做什么（二选一，原第①条本轮已做掉）**：① 审阅窗「按住标题栏拖动」（新手势，顺带要定拖到屏边要不要吸附）；② 恢复 `kMinFitZoom`（改的是窄窗口里的视觉行为，要权衡）。建议顺序 ①→②；用户没拍之前不改。
 - **「设为当前任务」的手势现在是双击，要不要改成单击？** 单击更符合「点谁就是谁」的直觉，但代价有两层：① 单击本来用于选中，双击那一半就没了；② `node.focus` 会 `demoteOtherActive`（`state.ts:368-377`），也就是**光看图就会把当前任务一路挪走**——只想翻一眼图的人会把进度改掉。现在保住的是双击（要么明确点两次，要么选完按 Enter 的本地展开）；单击要等这张图能区分「浏览」与「操作」再说，例如单击选中、选中后再单击才生效。等你拍。
 - **`kMinFitZoom` 那句「自动适配也不缩小」目前是死的**（见「已知的坑」）。恢复它 = 窄窗口里字不再被缩小、内容超出就靠人拖/滚；不恢复 = 现在这样自动缩到装下。要不要恢复？先不动，N-2 加宽只是让它不那么常触发。
 - **「讲讲它」的讲解会覆盖节点原有的 `advice`**（宿主 `learn` 直接 `node.advise` 落库，这是它有意的设计：面板本来就渲染这个字段）。要不要给讲解单独一个字段、与「建议」并存？先不动，等你拍。
 - **审阅窗现在拖不动**（`WS_POPUP` 无标题栏、没有 `WM_NCHITTEST`）：多显示器上想把它放到另一块屏，目前只能靠系统（或等 N-5 的换屏重排在别处触发）。要不要支持「按住标题栏拖动」？先不动，等你拍；加的话是新增手势（顺便得决定拖到边上要不要吸附）。
-- **只读文档图里再点「已选中」的节点会去请求宿主再拆一层**：`ReviewProc` 的 `again` 分支发 `kMsgReview 2` → 宿主 `/api/plan/expand` 要 `jobId`，doc 没有 → 回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只留一行 `审阅再拆 失败：…` 日志。可选：doc 模式里 `again` 只做本地展开/收起（不请求宿主）；或保留请求、失败时浮一句人话。先不动，等你拍。
 - **多工作区时玻璃条该绑哪一个？**（2026-10-24 第四轮新增，暂按「有会话的那个」实现）你这台机器上 `~/.dsh/storages/workspace.json` 只登记了一个工作区（`D:\work\AI\work`），所以现在没有歧义。但只要注册了第二个工作区，「任务库根目录」就得挑一个：现在的规则是 **插件配置 `root` > 登记表里带 `sessionIds` 的那个（= 最常用的工作区）> 进程 cwd**。要不要改成「跟着当前会话所在的工作区走」（那样玻璃条会随对话切换而换库，更像 IDE 的「当前项目」）、或者干脆让用户在面板里选一次并记住？先按现在的规则，等你拍。
 
 ---
@@ -378,6 +378,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - **别拿 `process.cwd()` 当「用户的工作区」**：桌面宿主的 cwd 是 `C:\Users\25108\.dsh\profiles\desktop`，拿它 `WorkStore.open()` 打开的是 291 B 的空库，看起来「插件在跑、但一颗节点都没有」，`graphEntry(0)` 于是把「打开节点图」置灰——用户看到的就是「按钮灰着打不开」。正确来源是 `ctx.get('workspaceRegistry').list()`（`@deepseek-ai/dsh-workspace`，web/桌面 profile 里一定有；不在 `dsh-base` 里，所以别写进 `inject`，用可选 `ctx.get`）。**它是异步引导的**：`apply` 之后立刻读会读到空表（实测第一版就这样，日志里 root=探针目录），要重试到有值为止（现为最多 1.5s）。判据：日志出现 `[dsh-work] 任务库根目录：<root>（来源：宿主工作区登记）` 且 `/api/state` 的 `seq` 是真库那个数（本机 90）。
 - **抓「用户正在看的桌面 GUI」的窗口要按 title/class 找、不是按主进程 pid**：`DeepSeek Harness.exe` 主进程（18768）自己不持有可见窗口，真正那个 `Chrome_WidgetWin_1` / title `DeepSeek Harness` 属于子进程（本轮是 pid 32792）。`EnumWindows` + `IsWindowVisible` + `GetWindowThreadProcessId` 列出所有 >150×150 的可见窗口，比猜 pid 快。**桌面 GUI 的网页 token 拿不到**：`endpoint.json` 里那个是伴随层令牌，拿去当网页 token 只会得到 `dsh web authentication required`；只有自己起的 dev 宿主能从启动日志里取到带 token 的 URL。
 - **`dsh --no-open` 起的宿主也鉴权**：重启后直接 `node scripts/shot.mjs http://127.0.0.1:64001/` 会截到登录页（`dsh web authentication required; reopen the URL printed by dsh web.`，console 有 401）。token 在宿主 stdout 里，用 `Start-Process … -RedirectStandardOutput <log>` 落盘后 `Select-String 'https?://[^\s"]*64001[^\s"]*'` 取，每次重启都变；拿到的 `http://127.0.0.1:64001/?token=…` 直接喂 `shot.mjs` 就是登录态（`probe.hasBar:true, errors:[]`）。
+- **节点图的「行」是 `BuildReviewModel` 摊平出来的，只改 `g_review_expanded` 不会反映到界面**：2026-10-24 修的那处旧代码在「再点同一颗」分支里只做 `g_review_expanded.erase(row.id)`，行还是老样子——点「收起」既不收也不落日志（看着像没反应）。任何改折叠集合的地方都必须接着 `BuildReviewModel(g_review_root)` + `LayoutReview()` + 重画；点选分支现在只有一条出口：`kMsgReview 2` → `ReviewExpandSelected()`。
+- **只读文档图（`g_review_read_only`，`ShowReviewDoc()` 置 true）不能去请求宿主拆层/撤层**：文档模式开图时 `g_review_job.clear()`，`/dsh-work/api/plan/expand|collapse` 只会回 `{"ok":false,"error":"缺少 jobId 或 nodeId"}`，界面上只剩「这一步没成，看看日志」这句误导人的话。`ReviewExpandSelected()` / `ReviewCollapseSelected()` 都先看这个标志，用 `SetReviewHint` 回一句人话并落日志；草稿模式（有 jobId）行为不变。
 
 ---
 
