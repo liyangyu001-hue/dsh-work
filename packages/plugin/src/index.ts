@@ -22,10 +22,11 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView, StatsApi } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviceSignature, adviseNode, cachedAdvice } from './advise.ts';
+import { describeUsage, usageMeter } from './usage.ts';
 import { learnNode } from './learning.ts';
 import { askNode } from './chat.ts';
 import { planFromText } from './planning.ts';
@@ -406,6 +407,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
         const signature = adviceSignature(brief, selection.provider, selection.model);
         const cached = cachedAdvice(node.advice, signature);
         if (cached !== null) {
+          usageMeter.savedCall();
           return {
             ok: true,
             text: cached.text,
@@ -607,8 +609,15 @@ export function apply(ctx: any, config?: PluginConfig): void {
         return lines.map((line) => describeEntry(line, titleOf)).reverse();
       },
     };
-    const http = createHttpHandler({
-      runtime: {
+    // 会话用量：账本在 usage.ts，识别/建议/讲解/追问/拆解都在那儿记一笔。
+    // 这里只负责把快照和一句人话递出去，不重复计算。
+    const stats: StatsApi = {
+      async read() {
+        const usage = usageMeter.snapshot();
+        return { usage, line: describeUsage(usage) };
+      },
+    };
+    const http = createHttpHandler({      runtime: {
         version,
         getSnapshot: (): WorkDoc => store.snapshot,
         commit: (intent: Intent, by: Actor) => store.commit(intent, by),
@@ -629,6 +638,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       chat,
       planText,
       feed,
+      stats,
       ui,
     });
 

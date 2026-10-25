@@ -1,5 +1,12 @@
 # 变更日志
 
+## 2026-10-25 · 一次会话花了多少，现在能看见了（用量账本）
+
+- **账本**（`packages/plugin/src/usage.ts`）：`UsageMeter` 记「调用次数 / 输入 / 输出 / 缓存命中 / 失败次数 / 省下的调用」，`readUsage(chunk)` 只认 `type === 'usage'` 且字段是数字且非负的分片（宿主实测形状 `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens}`），形状不对返回 `null`——**猜不出来就不说**。`describeUsage()` 出一句人话（「2 次调用 · 1.1k tok · 其中缓存命中 0.1k · 省下 1 次」）。
+- **接线**（`packages/plugin/src/recognize.ts`）：`LlmChunk` 补 `usage?: unknown`，`collectText()` 每趟 `callStarted()`、读到 usage 分片 `addUsage()`、抛错 `callFailed()`。失败调用**不从 calls 里减**（它确实发生过），也不计入 token。
+- **接口与界面**：`http.ts` 新增 `GET /api/stats`（`StatsApi`，回 `{ ok, usage, line }`）；`index.ts` 注入并让建议缓存命中时 `savedCall()`；网页学习页头多一行 `data-dsh-work-stats`，取不到就整行不显示。
+- 验收：`pnpm test` **188 绿 / 0 失败**（新增 `usage.test.ts` 6 条）、`pnpm typecheck` 干净。真机（dev 64001）：冷启动「还没问过 AI」→ 追问一句后「1 次调用 · 0.4k tok · 其中缓存命中 0.1k」→ 同一颗连打两次 `/api/advise`（第二次命中缓存）后「2 次调用 · 1.1k tok · 其中缓存命中 0.1k · 省下 1 次」，Playwright 在学习页读到同一串（`study-stats.png`）。
+
 ## 2026-10-25 · 同一条建议不再重复计费（建议按节点缓存）
 
 - **建议带指纹**（`packages/plugin/src/advise.ts` 的 `adviceSignature()` + `packages/core/src/types.ts` 的 `Advice.sig?`）：把「用哪个模型 + 标题 + 目标 + 验收」各段带长度前缀拼成一串存在建议上。带长度前缀是因为纯分隔符会串味——`title='a␁b'` 和 `detail='b␁c'` 能拼出同一个指纹，测试当场抓到过。

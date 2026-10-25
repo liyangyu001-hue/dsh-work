@@ -29,6 +29,7 @@ import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/cor
 
 import { lessonFailure, lessonSuccess } from './lesson.ts';
 import { MAX_QUESTION_CHARS, type ChatTurn } from './chat.ts';
+import type { UsageSnapshot } from './usage.ts';
 import type { UiBridge, UiOpenTarget, UiRail } from './ui-open.ts';
 
 export const ROUTE_PREFIX = '/dsh-work';
@@ -53,6 +54,20 @@ export interface WorkRuntime {
 export interface FeedApi {
   read(limit: number): Promise<unknown[]>;
 }
+
+/**
+ * 这一趟会话花了多少：调用次数与 token。
+ *
+ * 数不出来就如实说数不出来——`known: false` 时界面只显示次数，
+ * 不要拿字符数硬折成 token。
+ */
+export interface StatsApi {
+  read(): Promise<{
+    usage: UsageSnapshot;
+    /** 一句话版本，界面直接显示，省得两边各写一套格式化。 */
+    line: string;
+  }>;
+}
 export interface HttpOptions {
   runtime: WorkRuntime;
   /** 返回 null 放行；返回数字则作为拒绝状态码。 */
@@ -69,6 +84,8 @@ export interface HttpOptions {
   planText?: PlanTextApi;
   /** 事件流：没注入就 503；纯展示，失败也不该拖垮面板。 */
   feed?: FeedApi;
+  /** 会话用量：没注入就 503。只读，不写任何东西。 */
+  stats?: StatsApi;
   /**
    * 打开桌面面板的桥：浏览器按钮 → 宿主 → 伴随层轮询。
    * 没注入时按钮回 503，其余路由不受影响。
@@ -225,6 +242,26 @@ export function createHttpHandler(options: HttpOptions) {
         sendJson(res, 200, { ok: true, items: await options.feed.read(limit) });
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error), items: [] });
+      }
+      return;
+    }
+    if (pathname === '/api/stats') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      if (options.stats === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供用量统计' });
+        return;
+      }
+      try {
+        const { usage, line } = await options.stats.read();
+        sendJson(res, 200, { ok: true, usage, line });
+      } catch (error) {
+        sendJson(res, 200, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       return;
     }

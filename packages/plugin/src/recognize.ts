@@ -15,6 +15,7 @@ import type { Intent, PlanSpec, WorkNode } from '@dshwork/core';
 import { materializePlan } from '@dshwork/core';
 
 import { normalizePlanSpecs, parsePlanInput } from './plan-text.ts';
+import { readUsage, usageMeter } from './usage.ts';
 
 /** 要求模型只输出这个形状；字段与 PlanSpec 同名，解析后可直接materialize。 */
 export const RECOGNIZE_PROMPT = [
@@ -43,6 +44,11 @@ export interface LlmChunk {
   readonly type?: string;
   readonly text?: string;
   readonly reason?: unknown;
+  /**
+   * 用量分片（`type === 'usage'`）。实测形状见 `usage.ts` 顶部的注释，
+   * 字段全可选——不同 provider 给的不一样，读的时候逐个数。
+   */
+  readonly usage?: unknown;
 }
 
 /** 只声明我们真正用到的宿主能力，多了就是会过期的假设。 */
@@ -267,6 +273,7 @@ export async function collectText(
   const signal = outer === undefined ? controller.signal : AbortSignal.any([outer, controller.signal]);
 
   let text = '';
+  usageMeter.callStarted();
   try {
     const stream = inputs.llm.stream({
       provider: inputs.provider,
@@ -279,11 +286,17 @@ export async function collectText(
         text += chunk.text;
         continue;
       }
+      const usage = readUsage(chunk);
+      if (usage !== null) {
+        usageMeter.addUsage(usage);
+        continue;
+      }
       const failure = failureOf(chunk?.reason);
       if (failure !== null) throw new Error(failure);
     }
     return text;
   } catch (error) {
+    usageMeter.callFailed();
     if (controller.signal.aborted && outer?.aborted !== true) {
       throw new Error(`识别超时（${Math.round(timeoutMs / 1000)} 秒）`, { cause: error });
     }

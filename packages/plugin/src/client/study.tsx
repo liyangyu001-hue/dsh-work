@@ -23,6 +23,7 @@ import {
 /** 追问最多带这么多轮上文：带太多会被旧话题拖走，和宿主那边 chat.ts 的取法保持一致。 */
 const CHAT_HISTORY_TURNS = 6;
 const CHAT_URL = "/dsh-work/api/chat";
+const STATS_URL = "/dsh-work/api/stats";
 
 interface ChatTurn {
   readonly question: string;
@@ -62,6 +63,26 @@ export function StudyPage(props: {
   const active = props.selected ?? first;
   const tips = studyTips(props.doc, active);
   const activeRow = rows.find((row) => row.id === active);
+
+  // 这一趟会话花了多少：宿主那边记账（usage.ts），这里只显示它给的一句话。
+  // 读不到就不显示 —— 别拿字符数瞎折成 token，那是编数字。
+  const [spent, setSpent] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(STATS_URL, { credentials: "same-origin" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { ok?: boolean; line?: string };
+        if (alive && body.ok === true && typeof body.line === "string") setSpent(body.line);
+      } catch {
+        // 用量只是参考信息，取不到就当没有，不要在页面上报错
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [active]);
 
   // 追问：模型在宿主那边，网页只发一句话过去（/dsh-work/api/chat）。
   // 问答不落库 —— 问一句就写一次 work.json 的话，任务库会被聊天记录灌满。
@@ -140,6 +161,15 @@ export function StudyPage(props: {
         <span style={{ fontSize: 12, opacity: 0.6 }}>
           {progress.total > 0 ? `已完成 ${progress.done}/${progress.total}` : "还没有任务树"}
         </span>
+        {spent === null ? null : (
+          <span
+            data-dsh-work-stats="1"
+            style={{ fontSize: 12, opacity: 0.45 }}
+            title="只算本插件自己发起的模型调用（识别 / 建议 / 讲解 / 追问 / 拆解）"
+          >
+            {spent}
+          </span>
+        )}
         <span style={{ flex: "1 1 auto" }} />
         <button
           type="button"

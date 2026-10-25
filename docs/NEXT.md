@@ -7,6 +7,13 @@
 ---
 
 ## 进度
+- 2026-10-25 · **一次会话花了多少，现在能看见了（复盘排序里的第 ② 件的后半）**：宿主流里**确实**带 usage，所以照实记，不估算。
+  - **账本**：新增 `packages/plugin/src/usage.ts` —— `UsageMeter`（`callStarted()` / `addUsage()` / `callFailed()` / `savedCall()` / `snapshot()` / `reset()`）+ `readUsage(chunk)` + `describeUsage(snapshot)`；`packages/plugin/src/recognize.ts` 的 `LlmChunk` 补 `usage?: unknown`，`collectText()` 里每趟 `callStarted()`、读到 `type === 'usage'` 的分片就 `addUsage()`、抛错时 `callFailed()`。**失败调用不从 calls 里减、也不进 token**——它们确实发生过了。
+  - **一条数据来源**：探针实测宿主分片是 `{"type":"usage","usage":{"inputTokens":144,"outputTokens":357,"cacheReadTokens":128,"cacheWriteTokens":0,"totalTokens":629}}`（`recognize.ts` 里那行 TEMP `console.log` 已删）。`readUsage()` 只认 `usage` 里是数字且非负的项，形状不对返回 `null`，**不猜**。
+  - **接口**：`http.ts` 新增 `StatsApi` 与 `GET /api/stats`（405 / 未注入 503 / 成功 `{ ok: true, usage, line }`），`index.ts` 注入 `stats`（`usageMeter.snapshot()` + `describeUsage()`），建议缓存命中处补 `usageMeter.savedCall()`，于是「省下的调用」也进账。
+  - **界面**：网页学习页头一行 `data-dsh-work-stats`（只在拿到 `ok` 时显示；取不到就整行不出现，不报错、不编数）。
+  - **真机证据**（dev 64001，`x-dsh-work-token`）：冷启动 `GET /api/stats` → `{"calls":0,…,"line":"还没问过 AI"}`；对 `nd_01m5fjfadd0hz5tznyk` 追问一句（真调模型，200）→ `{"calls":1,"inputTokens":147,"outputTokens":236,"cacheReadTokens":128,"line":"1 次调用 · 0.4k tok · 其中缓存命中 0.1k"}`；再对同一颗连打两次 `POST /api/advise`（第一次真调、第二次命中缓存）→ 账本 `calls: 2, savedCalls: 1`，`line` 变「2 次调用 · 1.1k tok · 其中缓存命中 0.1k · 省下 1 次」。Playwright 打开学习页读到同一串（`study-stats.png`），console 无错误。
+  - 绿门：`pnpm test` **188 绿 / 0 失败**（新增 `usage.test.ts` 6 条）、`pnpm typecheck` 干净、`lib/client.js` 48.7 kB。
 - 2026-10-25 · **同一条建议不再重复计费（复盘排序里的第 ② 件的前半）**：真库里 `node.advise` 20 次、同一颗节点被重复建议 4/3/2/2 次，每次都是一次模型调用和一次写库。
   - **指纹**：`packages/plugin/src/advise.ts` 新增 `adviceSignature(node, provider, model)` —— 把「哪个模型 + 标题 + 目标 + 验收」各段带长度前缀（`长度:内容`，空白折叠）拼成一串，段之间用 `\u0001`。带长度前缀是故意的：否则标题里出现分隔符时两段内容能拼出同一个指纹（有一条测试专盯这个）。
   - **复用**：`cachedAdvice(existing, signature)` 只认指纹完全一致；**缺 `sig` 的旧建议一律当过期**（多问一次模型是小事，拿旧建议糊弄人是大事）。`packages/core/src/types.ts:37-49` 的 `Advice` 新增可选 `sig?: string`，`validateDoc`（`state.ts:114-123`）顺带挡两种脏数据：建议没正文、指纹不是字符串。
@@ -157,18 +164,17 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- **2026-10-25 本轮交付：第 ② 件的前半，「建议按节点缓存」落地**——`adviceSignature()`（模型 + 标题 + 目标 + 验收，带长度前缀）+ `Advice.sig` + `advise.request` 命中即不调模型不写库；真机第二次 `POST /api/advise` **3 ms / `cached: true` / `seq` 不动 / journal 不增**（细节见进度第一条）。
-- **当前任务 = 第 ② 件剩下的后半：一次会话 token 可见。** 先做**探针**而不是先写功能：在 `packages/plugin/src/recognize.ts` 的 `collectText` 里临时把非 `text-delta` 的分片（`type` + 键名）记进日志，跑一次真实 `POST /api/advise`，确认宿主到底会不会给 usage。三种可能三条路：
-  - 给了 `usage`（或 `finish` 里带 token 数）→ 照实累计，`/dsh-work/api/stats` 返回「本会话 N 次调用 / 输入 x / 输出 y」，面板与图里页脚各显示一行；
-  - 只给字符数 → 老老实实报「N 次调用 · 约 X 字」，**不换算成 token**；
-  - 什么都不给 → 只报调用次数，并在板上写明宿主缺这条能力。
-  无论哪条，都要有一条单测把「计数不因失败调用而膨胀」钉住。
+- **2026-10-25 本轮交付：第 ② 件全部收口**——前半「建议按节点缓存」（`adviceSignature()` + `Advice.sig`，命中不调模型不写库）+ 后半「一次会话能看见花了多少」（`packages/plugin/src/usage.ts` 的 `UsageMeter` + `POST /dsh-work/api/stats` + 学习页头一行账本）。细节见进度前两条。
+- **当前任务 = 第 ③ 件：节点产物落盘 `nodes/<id>.md`，`done` 必须能指到产物。** 已在复盘里排第 ③，是「任务库能当档案用」的关键一步。落地思路（开工前先确认现状，别假设）：
+  - 现状：`packages/core/src/types.ts` 的 `WorkNode` 只有 `title/detail/acceptance/status/executor/handoff/advice`，**没有指向产物的字段**；真库 `work.json` 里 `evidence` 全空（复盘实测）。
+  - 要定的事：产物是**一份文件**（`nodes/<id>.md`，写入即产物）还是**一条引用**（`artifactPath` 字段指向用户自己的文件）。推荐前者（可写、可看、可 diff），并在 `node.complete` 时要求「已有产物或显式说明没有」。
+  - 验收标准：`done` 的节点能从节点图/学习页一键打开它的 `.md`；没有产物的 `done` 在分工页/学习页显示「没有产物」而不是假装齐活；`pnpm test` 覆盖「没产物不能标完成」这条（或做成可配的软提醒——这条要按用户口味定）。
 - 队列里其它候选（都已交付或已定案，别再重做）：
-  - ① ~~交接可撤回 + 常驻入口~~ —— **已交付（本轮）**。
-  - ③ 节点产物落盘 `nodes/<id>.md`，`done` 必须能指到产物（复盘排序第 ③）。
+  - ① ~~交接可撤回 + 常驻入口~~ —— **已交付**。
+  - ② ~~建议按节点缓存 + 一次会话 token 可见~~ —— **已交付（本轮）**。
   - ④ 截图留存策略（默认 7 天清理 + 面板明示路径；实测 `.dsh/dsh-work/captures` 已 63 个文件 / 2.9 MB）。
   - ⑤ Pulse 节拍时钟 + 状态矩阵（等用户定形态，见「等用户决定」）。
-  - ② ~~学习页搜索 / 追问~~、③ ~~节点加显式「执行者」~~、⑤ ~~恢复 `kMinFitZoom`~~、~~发不发 npm~~ —— **都已交付或已定案**。
+  - ③ ~~节点加显式「执行者」~~、⑤ ~~恢复 `kMinFitZoom`~~、~~发不发 npm~~ —— **都已交付或已定案**。
 - **新增的一小步（可选，等下轮）**：执行者字段目前只能通过 `POST /dsh-work/api/intent` 或拆解时的 `PlanSpec.executor` 写入，**界面里还没有「标归属」的按钮**（原生分工页是只读展示）。要做的话，最省的位置是原生节点图上加右键菜单第二项或面板行尾一枚小标签；等用户点头再动。
 - 阶段：**P2 · AI 在环**。**队列里的活真的空了**：2026-10-24 这轮又按「已知的坑」最后一条，把自动化提示语里的四件（入口 / 直角折线 / 加宽 / 讲讲它）逐条对过源码——入口 `packages/plugin/src/client/index.tsx:297`（`data-dsh-work-graph="1"`）+ `:326`（「打开节点图」）、直角折线 `native/shell/src/review.h:473`（`BuildEdge`，`:569` 调用）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill `review.h:723-748` + 页脚提示 `review.h:804`；`git log` 里 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 全在。`pnpm test` 130 绿、`pnpm typecheck` 干净、工作区干净、HEAD `e72a533`。**别再把这些重做一遍。**
 - 2026-10-25 本轮已把「2026-10-25 交接」的待办 1（面板底部事件流一行不显示）修好并真机验完：`DrawFeed` 改不透明暗色 + 删掉重复死代码（见进度第一条）。交接里另两条：待办 2（网页按钮压标题栏）已被 `f7d2c3e` 改成 `top:52` 解决；待办 3（Pulse 节拍时钟 + 状态矩阵）还没人接。
@@ -430,6 +436,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 - **`/dsh-work/api/*` 的令牌头是 `x-dsh-work-token`，不是 `Authorization: Bearer`**（`index.ts:704` 的 `hasCompanionToken` 只读这个头）。用 Bearer 送 `endpoint.json` 里的 token 会得到 401 `{"error":"forbidden"}`，看着像「令牌过期」，其实是头名不对——这一轮先踩了一次。另外伴随层 `/api/state` 轮询会把自己标成「在线」，探针别拿它当心跳去判断宿主状态。
 - **「没标」不等于「人做」**：`WorkNode.executor` 的 `undefined`（从来没标）和 `null`（显式撤掉）都要按「还没定」渲染；写成默认 `human` 会让用户以为自己被派了活。原生 `kBuckets` 里 AI 那摞还要把「已派出去但没标归属」的节点算进来（`handoff` 非空），否则历史数据会全部落进「还没定」。
+- **宿主的 usage 分片确实存在**（`{"type":"usage","usage":{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,totalTokens}}`）：要统计用量就读这个分片，**不要拿字符数折成 token**——那是编数字。`collectText()` 里 `type === 'text-delta'` 与 usage 是两个分支，先判文本再判 usage，否则 usage 分片会被当成空文本吞掉。
+- **`playwright-core` 的探针脚本用 `.mjs` 时不能 `require`**（`ReferenceError: require is not defined in ES module scope`）：要么写成 `.cjs`，要么 `import { createRequire } from "node:module"` 再 `createRequire("D:/work/AI/work/dsh-work/package.json")("playwright-core")`。
+- **`docs/NEXT.md` 里「## 进度」出现两次**（历史遗留）：用 `edit` 改它时 `old_string` 必须带上紧随其后的那一行做锚，否则「matched 2 times」直接失败。
 - **改 `Row` / `StudyRow` 这类行结构时，测试夹具会整片报错**（TS2741）：`study-model.test.ts` 里手写的 `StudyRow[]` 必须补 `executor`，要么给值要么显式 `executor: undefined`。
 - 小条上按钮一多就挤（用户原话「这块太拥挤了 做个切换的 不要都放一起」）：**二级入口按档位收进切换段**，常驻只留主入口；档位存 `localStorage`，刷新后保持。
 - **别用「先读文件再整体写回」的 PowerShell 脚本改源码**：这一轮 `[System.IO.File]::ReadAllText('packages/...')` 用了相对路径（`cd` 没生效、cwd 还是 `D:\work\AI\work`）→ 抛出后 `$t` 是 `$null`，脚本继续执行到 `WriteAllText(..., $null)`，**把 `packages/plugin/src/client/index.tsx` 写成了 0 字节**。补救是 `git checkout --` 然后改用 `edit` 工具逐处替换。要么全绝对路径 + `if (-not $t) { throw }`，要么直接用 edit 工具。
