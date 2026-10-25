@@ -1,5 +1,12 @@
 # 变更日志
 
+## 2026-10-25 · 节点有了显式「谁来做」；小条把它拆成一个「工作 / 学习」切换
+
+- **执行者字段**（`packages/core/src/types.ts`）：`WorkNode.executor?: 'human' | 'ai' | 'either' | null`。以前「哪部分 AI 做、哪部分人做」只能靠 `handoff` 在不在去推——那是过程痕迹不是意图，一颗没派的节点和一颗明确要人做的节点长得一模一样。现在三态 + 「还没标」，`null` 表示撤掉标记。新意图 `node.assign`（`state.ts`）只改这一个字段，不碰状态、不碰交接；`validateDoc` 在 load 时也挡脏值（拼错的执行者会指名报出来）。拆解时能定的归属走 `PlanSpec.executor` 直接落下。
+- **不把「没标」当成「人做」**：原生分工页（`review.h`）改成四摞——`AI 做`（AI 那摞里再缀 `· 正在做 / · 等你验收 / · 等开工 / · 退回来了`）、`人做`、`都可以`、`还没定谁做`；网页学习页每行右侧一枚小标签，右列状态行补一句「这一步：人做」。
+- **小条改成两档切换**（`packages/plugin/src/client/index.tsx` 的 `ModeSwitch`）：用户原话「这块太拥挤了 做个切换的 不要都放一起」。现在常驻只有「打开面板」，后面是一个「工作 / 学习」切换段——工作档给「节点图 / 分工」（蓝），学习档给「学习页 / 图里学」（绿）；档位记在 `localStorage`，刷新后还在。
+- 验收：`pnpm test` **174 绿 / 0 失败**（新增 `packages/core/src/executor.test.ts` 9 条 + 学习页执行者 2 条）、`pnpm typecheck` 干净、`lib/client.js` 44.1 kB、原生 615.0 KB；真机（dev 64001 + Playwright）：`node.assign` 传 `robot` → **409**「不认识的执行者 robot（只支持 human / ai / either，或 null 清空）」且 `seq` 不动；传 `human` → 200、学习页出现「人做」标签与「这一步：人做」；切档后动作按钮互换、刷新后仍是学习档（`bar-mode-work.png` / `bar-mode-study.png` / `study-executor.png`）；mock 宿主（真伴随层 + 复制库）开分工页四摞齐全（`office-executor2.png`）。
+
 ## 2026-10-25 · 顶部小条改成黑白自适应；工作按钮蓝色、学习按钮绿色
 
 - **黑白自适应**（新文件 `packages/plugin/src/client/theme.ts`）：自己判这一条背后的底色（body → html → 最外层容器 → `color-scheme` → 系统明暗），给两套**不透明**色板。以前用宿主的玻璃色，58% 的白压在深色会话底上合成只剩 ≈0.31 的亮度，配的却是近黑的字——不是「不好看」，是根本看不清。`watchSurfaceTone()` 盯 `body/html` 的 class/style/data-theme，切主题即时跟上。

@@ -7,6 +7,13 @@
 ---
 
 ## 进度
+- 2026-10-25 · **节点有了显式「谁来做」；小条把它拆成一个「工作 / 学习」切换**（用户 m04063 第 3 条「ok」+ 最新一句「这块太拥挤了 做个切换的 不要都放一起」）。两件：
+  - **执行者字段**：`packages/core/src/types.ts:32` 新增 `export type Executor = 'human' | 'ai' | 'either';`，`WorkNode.executor?: Executor | null`（`null` = 显式撤掉标记，`undefined` = 从来没标过，两者在 UI 上都是「还没定」，但语义不同所以都留着）；新意图 `{ type: 'node.assign'; nodeId; executor }`（`types.ts:120`）在 `state.ts:396-410` 实现，只改这一个字段、不碰 status/handoff；`state.ts:105-111` 的 `validateDoc` 在 load 时也挡脏值。`plan.ts` 的 `PlanSpec.executor` 让拆解时就分得清的归属直接落下。**没把「没标」当成「人做」**：`undefined` 一律按「还没定」处理。
+  - **原生分工页**（`review.h` 的 `kBuckets`）从「按 handoff 分五档」改成「按 executor 分四摞」——`AI 做`（里面再缀 `· 正在做 / · 等你验收 / · 等开工 / · 退回来了`）、`人做`、`都可以`、`还没定谁做`；`main.cpp:1740` 多读一个 `executor` 字段。
+  - **网页学习页**（`study-model.ts` + `study.tsx`）：`StudyRow.executor`、`executorLabel()`（没标返回空串——写成「人做」会让人以为自己被派了活），左列每行右侧一枚小标签（`data-dsh-work-executor`），右列状态行补「· 这一步：人做」。
+  - **小条改档**（`index.tsx` 新增 `ModeSwitch` + `readBarMode/writeBarMode`）：常驻只有「打开面板」，后面一个两段切换；工作档 = 「节点图 / 分工」（蓝），学习档 = 「学习页 / 图里学」（绿）；档位存 `localStorage['dsh-work.bar-mode']`，刷新后还在。
+  - 验证：`pnpm test` **174 绿 / 0 失败**（新增 `packages/core/src/executor.test.ts` 9 条 + `study-model.test.ts` 2 条）、`pnpm typecheck` 干净、`lib/client.js` 44.1 kB、原生 615.0 KB。真机（dev 64001，`x-dsh-work-token` 头）：`node.assign` 传 `robot` → **409**「不认识的执行者 robot（只支持 human / ai / either，或 null 清空）」且 `seq` 92 不动（拒绝=没发生）；传 `human` → `{"applied":true,"seq":93}`、学习页出现「人做」标签与「这一步：人做」（`study-executor.png`）；随后 `null` 还原（`seq` 94），真库净变化只有两条历史。切档探针 `executor-web.mjs` 实测 work/study 两档按钮互斥、`reload` 后仍是 study（`bar-mode-work.png` / `bar-mode-study.png`），无 console 错误。分工页四摞在 mock 宿主（真伴随层 + 复制的库）上验：`AI 做（2）· 正在做/· 等你验收、人做（1）、都可以（1）、还没定谁做（1）`（`office-executor2.png`）；真宿主那 7 颗全是 done、分工页按设计只列未收尾的，所以显示「（都收尾了，没有要派的）」。
+  - **注意**：`/dsh-work/api/*` 的令牌走 `x-dsh-work-token` 头（`index.ts:704` 的 `hasCompanionToken`），不是 `Authorization: Bearer`；用错会得到 401 `{"error":"forbidden"}`。
 - 2026-10-25 · **顶部小条改成黑白自适应，工作按钮蓝色、学习按钮绿色**（用户 m04280 原话「我希望把这个部分做一个黑白自适应 不然根本看不清 工作模式的icon可以是蓝色 但是学习 可以为绿色」）。做法不是换一套宿主变量，而是自己判底色：新增 `packages/plugin/src/client/theme.ts` 的 `detectSurfaceTone()`（body → html → body 第一个子元素 → `color-scheme` → `prefers-color-scheme` 五级兜底）与 `paletteFor(tone)` 两套**不透明**色板——半透明正是老问题的来源（`--dsw-menu-surface-fill` 实测 `rgba(248,249,250,0.58)`，压在深色会话底上合成亮度只有 ≈0.31，却配了近黑的字）。`watchSurfaceTone()` 用 MutationObserver 盯 `body/html` 的 class/style/data-theme，切主题即时跟上。颜色按用途给：`palette.work` 蓝（打开面板 / 打开节点图）、`palette.learn` 绿（学习 / 学习页，配了新画的翻书图标 `LearnIcon`）、`palette.office` 中性（分工，配两栏图标 `SplitIcon`）；禁用只是同色降透明度，语义不丢。条上加 `data-dsh-work-bar` / `data-dsh-work-tone` 方便探针断言。
   - 验证：Playwright 两态实测 `light {bg rgba(255,255,255,0.97), text rgb(27,27,31), work rgb(10,111,216), learn rgb(18,133,74)}` / `dark {bg rgba(24,24,27,0.96), text rgb(242,242,245), work rgb(74,163,255), learn rgb(61,220,132)}`；把 `body` 背景改成 `#131316` 后 600ms 内 tone 自动翻成 dark（截图 `bar-light.png` / `bar-dark.png`）。桌面版重启后实拍 `desktop-bar-tone.png`：深底、白字、蓝绿分明。
   - 绿门：`pnpm test` **163 绿 / 0 失败**（新增 `theme.test.ts` 5 条，含两套色板每个前景色对底色的 WCAG AA 4.5:1 断言）、`pnpm typecheck` 干净、`lib/client.js` 40.2 kB。
@@ -137,11 +144,14 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- **2026-10-25 这一轮把用户连环提的都做完了**：`L` 开/关学习栏、分工页细分五档、网页学习页、AI 接管的特斯拉彩虹边（含圆角 22→30）。**当前任务 = 等用户拍板下一件**，候选（按性价比）：
-  - ① ~~**发不发 npm 包**~~ —— **已定：不发（2026-10-25）**。市场条目走 GitHub Release 的 `tarball:`，与 npm 无关，PR #9411 合并即可被收录。
-  - ② ~~**学习页加搜索/输入框**~~ —— **已交付（2026-10-25）**：左列加了「按标题找…」，只匹配标题。
-  - ③ **节点加显式「执行者」字段**（人 / AI / 都可以）：分工页现在是按 `handoff.state` 反推的，这一条要改数据模型，先定再动。
-  - ④ **Pulse 节拍时钟 + 状态矩阵**（「2026-10-25 交接」待办 3）：只有一行、没有规格，属需要用户定形态的设计活，别自己拍。
+- **2026-10-25 本轮交付：节点「执行者」字段 + 小条改成一个「工作 / 学习」切换。** 用户 m04063 第 3 条（「ok」）和第二句「这块太拥挤了 做个切换的 不要都放一起」都落地了（细节见进度第一条）。
+- **当前任务 = 只剩 ④ Pulse 节拍时钟 + 状态矩阵**（用户 m04063 第 4 条「执行」）。它是 `docs/NEXT.md` 2026-10-25 交接里的待办 3，全仓只有一行、没有形态规格，属「要用户定形态」的设计活——按红线停在「等用户决定」。**开工前必须先问他两件事**：节拍指示长什么样（小条上跳动的点？图里一条呼吸光？），状态矩阵是「节点 × 状态」的网格还是按人/AI 分栏的看板。
+- 队列里其它候选（都已交付或已定案，别再重做）：
+  - ① ~~发不发 npm~~ —— **已定：不发**（市场走 Release `tarball:`）。
+  - ② ~~学习页搜索 / 追问~~ —— **已交付**。
+  - ③ ~~节点加显式「执行者」~~ —— **已交付（本轮）**。
+  - ⑤ ~~恢复 `kMinFitZoom`~~ —— **已交付**。
+- **新增的一小步（可选，等下轮）**：执行者字段目前只能通过 `POST /dsh-work/api/intent` 或拆解时的 `PlanSpec.executor` 写入，**界面里还没有「标归属」的按钮**（原生分工页是只读展示）。要做的话，最省的位置是原生节点图上加右键菜单第二项或面板行尾一枚小标签；等用户点头再动。
 - 阶段：**P2 · AI 在环**。**队列里的活真的空了**：2026-10-24 这轮又按「已知的坑」最后一条，把自动化提示语里的四件（入口 / 直角折线 / 加宽 / 讲讲它）逐条对过源码——入口 `packages/plugin/src/client/index.tsx:297`（`data-dsh-work-graph="1"`）+ `:326`（「打开节点图」）、直角折线 `native/shell/src/review.h:473`（`BuildEdge`，`:569` 调用）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill `review.h:723-748` + 页脚提示 `review.h:804`；`git log` 里 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 全在。`pnpm test` 130 绿、`pnpm typecheck` 干净、工作区干净、HEAD `e72a533`。**别再把这些重做一遍。**
 - 2026-10-25 本轮已把「2026-10-25 交接」的待办 1（面板底部事件流一行不显示）修好并真机验完：`DrawFeed` 改不透明暗色 + 删掉重复死代码（见进度第一条）。交接里另两条：待办 2（网页按钮压标题栏）已被 `f7d2c3e` 改成 `top:52` 解决；待办 3（Pulse 节拍时钟 + 状态矩阵）还没人接。
 - **当前任务 = 等用户拍板下一件。** 拖动这条线（第①）已经整条交付：拖动 → 松手记位置 → **跨重启记住**（本轮，`~/.dsh/dsh-work/review-placement.json`）→ 换屏按那块屏重排。只剩第②条卡在设计取舍（红线：不擅自改产品方向），落地位置已勘定，点头就能直接开工：
@@ -388,6 +398,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 已知的坑（踩过一次就别再踩）
 
+- **`/dsh-work/api/*` 的令牌头是 `x-dsh-work-token`，不是 `Authorization: Bearer`**（`index.ts:704` 的 `hasCompanionToken` 只读这个头）。用 Bearer 送 `endpoint.json` 里的 token 会得到 401 `{"error":"forbidden"}`，看着像「令牌过期」，其实是头名不对——这一轮先踩了一次。另外伴随层 `/api/state` 轮询会把自己标成「在线」，探针别拿它当心跳去判断宿主状态。
+- **「没标」不等于「人做」**：`WorkNode.executor` 的 `undefined`（从来没标）和 `null`（显式撤掉）都要按「还没定」渲染；写成默认 `human` 会让用户以为自己被派了活。原生 `kBuckets` 里 AI 那摞还要把「已派出去但没标归属」的节点算进来（`handoff` 非空），否则历史数据会全部落进「还没定」。
+- **改 `Row` / `StudyRow` 这类行结构时，测试夹具会整片报错**（TS2741）：`study-model.test.ts` 里手写的 `StudyRow[]` 必须补 `executor`，要么给值要么显式 `executor: undefined`。
+- 小条上按钮一多就挤（用户原话「这块太拥挤了 做个切换的 不要都放一起」）：**二级入口按档位收进切换段**，常驻只留主入口；档位存 `localStorage`，刷新后保持。
 - **别用「先读文件再整体写回」的 PowerShell 脚本改源码**：这一轮 `[System.IO.File]::ReadAllText('packages/...')` 用了相对路径（`cd` 没生效、cwd 还是 `D:\work\AI\work`）→ 抛出后 `$t` 是 `$null`，脚本继续执行到 `WriteAllText(..., $null)`，**把 `packages/plugin/src/client/index.tsx` 写成了 0 字节**。补救是 `git checkout --` 然后改用 `edit` 工具逐处替换。要么全绝对路径 + `if (-not $t) { throw }`，要么直接用 edit 工具。
 - 桌面窗口截图**不能把 pid 当 HWND**（`GetWindowRect((IntPtr)pid)` 会返回 `0,0 0x0`，`New-Object Bitmap 0,...` 直接抛「Parameter is not valid」）；用 `D:\work\AI\work\dshwork-probe\shot-window.ps1 -Pid2 <pid> -Out <png>`，它按 pid 枚举顶层窗再抓（本轮实测 `hwnd=132160 cls=Chrome_WidgetWin_1`）。
 - `dsh` 不在 `$PATH` 里（`Get-Command dsh` 为空、`Start-Process -FilePath 'dsh'` 报「系统找不到指定的文件」）：真身是 `C:\Users\25108\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`（`docs/GUIDE.md:185` 有记）。

@@ -101,6 +101,15 @@ export function validateDoc(doc: WorkDoc): string | null {
     const node = doc.nodes[id];
     if (!node) return `顺序表引用了不存在的节点 ${id}`;
     if (node.status === 'active') activeCount += 1;
+    if (
+      node.executor !== undefined &&
+      node.executor !== null &&
+      node.executor !== 'human' &&
+      node.executor !== 'ai' &&
+      node.executor !== 'either'
+    ) {
+      return `节点 ${id} 的执行者 ${String(node.executor)} 不认识（只支持 human / ai / either）`;
+    }
   }
   if (activeCount > 1) return `同时存在 ${activeCount} 个 active 节点`;
 
@@ -381,6 +390,19 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
       const target = requireNode(intent.nodeId);
       if (!target) return fail(`节点 ${intent.nodeId} 不存在`);
       withNode(draft, { ...target, advice: intent.advice, updatedAt: ctx.at });
+      break;
+    }
+
+    case 'node.assign': {
+      const target = requireNode(intent.nodeId);
+      if (!target) return fail(`节点 ${intent.nodeId} 不存在`);
+      // 从 HTTP / 工具参数进来的可能是任意字符串，落盘前先挡：
+      // 一个拼错的 executor 会一路传到原生和网页两侧的分组里。
+      const next = intent.executor;
+      if (next !== null && next !== 'human' && next !== 'ai' && next !== 'either') {
+        return fail(`不认识的执行者 ${String(next)}（只支持 human / ai / either，或 null 清空）`);
+      }
+      withNode(draft, { ...target, executor: next, updatedAt: ctx.at });
       break;
     }
 

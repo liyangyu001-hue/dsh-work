@@ -37,6 +37,8 @@ struct Row {
   // 交给 AI 的那条线走到哪了：offered / running / review / accepted / returned，
   // 空 = 没交。右侧「分工」栏靠它分「AI 在做」和「人来做」两摞。
   std::string handoff;
+  // 这一步该谁做：human / ai / either；空 = 还没定（三态之外还有"没想过"）。
+  std::string executor;
 
   // 排版结果（世界坐标，DIP）。父节点用它的孩子算垂直位置。
   float x = 0.0f;
@@ -527,29 +529,44 @@ inline void DrawRail(ID2D1RenderTarget* target, const Model& model, const PanelF
 
   // 分工：同一棵树按「谁来做、做到哪一步」重排。做完/跳过的先不算 —— 它们已经不在盘子里了。
   //
-  // 第一版只分「AI 来做 / 人来做」两摞，用户说要更细：AI 那边其实有四种光景
-  // （刚交出去等开工、正在做、做完等你验收、被退回来），人这边只有一种。
-  // 分开列，一眼能看出「现在卡在谁手上」。
+  // 第一版只分「AI 来做 / 人来做」两摞，靠 handoff 在不在来推测归属；那是过程痕迹不是意图：
+  // 一颗没派的节点和一颗明确要人做的节点长得一模一样。用户给了显式 executor 字段之后，
+  // 改成按归属分四摞，AI 那摞里再缀上这条线走到哪了（等开工 / 正在做 / 等你验收 / 退回来了）。
   struct Bucket {
-    const char* state;      // handoff.state 的取值；空串 = 没交接（人来做）
+    const char* executor;   // ai / human / either；空串 = 还没标
     const wchar_t* head;    // 小节标题（不含数量）
     bool accent;            // 标题用蓝色（AI 那头）
   };
   static const Bucket kBuckets[] = {
-      {"running", L"AI 正在做", true},
-      {"review", L"等你验收", true},
-      {"offered", L"已交给 AI，等开工", true},
-      {"returned", L"AI 退回来了", true},
-      {"", L"人来做", false},
+      {"ai", L"AI 做", true},
+      {"human", L"人做", false},
+      {"either", L"都可以", false},
+      {"", L"还没定谁做", false},
+  };
+
+  // AI 那摞里的小尾巴：handoff.state 翻成人话，空表示还没派出去。
+  const auto stateTag = [](const std::string& handoff) -> std::wstring {
+    if (handoff == "running") return L" · 正在做";
+    if (handoff == "review") return L" · 等你验收";
+    if (handoff == "offered") return L" · 等开工";
+    if (handoff == "returned") return L" · 退回来了";
+    return L"";
   };
 
   for (const Bucket& bucket : kBuckets) {
+    // 归属判定：标了谁就归谁；标了 AI 但还没派出去也归 AI 那摞；
+    // 没标的里面，凡是已经派给 AI 的（有 handoff）也算 AI，剩下的才是「还没定」。
+    const auto inBucket = [&bucket](const Row& row) -> bool {
+      if (bucket.executor[0] == '\0') return row.executor.empty() && row.handoff.empty();
+      if (row.executor == bucket.executor) return true;
+      return std::string(bucket.executor) == "ai" && !row.handoff.empty();
+    };
     int total = 0;
     for (const Row& row : model.rows) {
       if (row.status == "done" || row.status == "skipped") continue;
-      if (row.handoff == bucket.state) total += 1;
+      if (inBucket(row)) total += 1;
     }
-    if (total == 0) continue;  // 空的那摞不占地方：五摞全画出来，右栏会被撑爆
+    if (total == 0) continue;  // 空的那摞不占地方：四摞全画出来，右栏会被撑爆
     if (y + 16.0f > limit) break;
     const std::wstring head = std::wstring(bucket.head) + L"（" + std::to_wstring(total) + L"）";
     ui::Text(target, head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
@@ -557,9 +574,11 @@ inline void DrawRail(ID2D1RenderTarget* target, const Model& model, const PanelF
     y += 20.0f;
     for (const Row& row : model.rows) {
       if (row.status == "done" || row.status == "skipped") continue;
-      if (row.handoff != bucket.state) continue;
+      if (!inBucket(row)) continue;
       if (y + 16.0f > limit) break;
-      ui::Text(target, ui::FitText(L"· " + WidenNode(row.title), right - left, 11.0f), fmt.meta,
+      const std::wstring line =
+          L"· " + WidenNode(row.title) + (bucket.accent ? stateTag(row.handoff) : std::wstring());
+      ui::Text(target, ui::FitText(line, right - left, 11.0f), fmt.meta,
                D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kTextDim, alpha));
       y += 17.0f;
     }

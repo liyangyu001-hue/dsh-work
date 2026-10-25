@@ -21,6 +21,16 @@ export type NodeKind = 'task' | 'concept';
 /** 变更归因：这件事是人的决定、AI 的建议，还是系统巡检。 */
 export type Actor = 'human' | 'ai' | 'system';
 
+/**
+ * 这一步该谁做。
+ *
+ * 用户 m04063 第 3 条问的是「哪部分 AI 做、哪部分人做」——
+ * 原先只能靠 `handoff` 是否存在来**推测**，那是过程痕迹不是意图：
+ * 一颗还没派的节点和一颗明确要人做的节点看起来一模一样。
+ * 所以给它一个显式字段，`either` 表示「都行，谁有空谁上」。
+ */
+export type Executor = 'human' | 'ai' | 'either';
+
 export type HandoffState = 'offered' | 'running' | 'review' | 'accepted' | 'returned';
 
 /** AI 给出的建议 / 更优解。异步写入，不阻塞任务推进。 */
@@ -61,6 +71,8 @@ export interface WorkNode {
   acceptance?: string;
   kind: NodeKind;
   status: NodeStatus;
+  /** 这一步该谁做；没标 = 还没想清楚（读到 undefined 一律当「未定」，不要猜）。 */
+  executor?: Executor | null;
   advice?: Advice | null;
   handoff?: Handoff | null;
   evidence: Evidence[];
@@ -104,6 +116,8 @@ export type Intent =
   | { type: 'node.skip'; nodeId: NodeId }
   | { type: 'node.focus'; nodeId: NodeId }
   | { type: 'node.advise'; nodeId: NodeId; advice: Advice }
+  /** 标这一步该谁做；`null` = 清掉标记，回到「都行 / 还没定」。 */
+  | { type: 'node.assign'; nodeId: NodeId; executor: Executor | null }
   | { type: 'node.evidence'; nodeId: NodeId; evidence: Evidence }
   | { type: 'handoff.offer'; nodeId: NodeId }
   | { type: 'handoff.start'; nodeId: NodeId; agentSessionId: string }
@@ -121,6 +135,8 @@ export interface PlanSpec {
   detail?: string;
   acceptance?: string;
   kind?: NodeKind;
+  /** 拆解时就能判断归属的，直接标上；判断不了就留空。 */
+  executor?: Executor;
   children?: PlanSpec[];
 }
 

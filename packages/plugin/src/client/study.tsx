@@ -10,7 +10,15 @@
  */
 import { useEffect, useRef, useState } from "react";
 
-import { filterStudyRows, studyRows, studyProgress, studyTips, statusLabel, type StudyDocLike } from "./study-model.ts";
+import {
+  executorLabel,
+  filterStudyRows,
+  studyRows,
+  studyProgress,
+  studyTips,
+  statusLabel,
+  type StudyDocLike,
+} from "./study-model.ts";
 
 /** 追问最多带这么多轮上文：带太多会被旧话题拖走，和宿主那边 chat.ts 的取法保持一致。 */
 const CHAT_HISTORY_TURNS = 6;
@@ -53,6 +61,7 @@ export function StudyPage(props: {
   const first = props.doc.pointer ?? rows[0]?.id ?? null;
   const active = props.selected ?? first;
   const tips = studyTips(props.doc, active);
+  const activeRow = rows.find((row) => row.id === active);
 
   // 追问：模型在宿主那边，网页只发一句话过去（/dsh-work/api/chat）。
   // 问答不落库 —— 问一句就写一次 work.json 的话，任务库会被聊天记录灌满。
@@ -222,6 +231,24 @@ export function StudyPage(props: {
                     }}
                   />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>
+                  {executorLabel(row.executor) !== "" ? (
+                    <span
+                      data-dsh-work-executor={row.executor}
+                      style={{
+                        flex: "0 0 auto",
+                        marginLeft: "auto",
+                        padding: "1px 6px",
+                        borderRadius: 999,
+                        border: "1px solid color-mix(in srgb, currentColor 24%, transparent)",
+                        fontSize: 10.5,
+                        lineHeight: 1.5,
+                        opacity: 0.75,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {executorLabel(row.executor)}
+                    </span>
+                  ) : null}
                 </button>
               );
             })
@@ -235,7 +262,10 @@ export function StudyPage(props: {
           ) : (
             <>
               <h2 style={{ margin: "0 0 2px", font: `600 17px/1.35 ${FONT}` }}>{tips.title}</h2>
-              <p style={{ margin: "0 0 18px", fontSize: 12, opacity: 0.55 }}>{tips.state}</p>
+              <p style={{ margin: "0 0 18px", fontSize: 12, opacity: 0.55 }}>
+                {tips.state}
+                {executorLabel(activeRow?.executor) !== "" ? ` · 这一步：${executorLabel(activeRow?.executor)}` : ""}
+              </p>
 
               <h3 style={{ margin: "0 0 6px", font: `600 12px/1.4 ${FONT}`, color: "var(--dsw-accent, #0a84ff)" }}>
                 基础知识

@@ -1738,6 +1738,9 @@ void BuildReviewModel(const dshwork::JValue& root) {
     row.current = !model.current_id.empty() && id == model.current_id;
     // 概念节点靠它区分：读不到就当普通任务，绝不凭空标成「要学」。
     row.kind = node.GetString("kind", "task");
+    // 这一步该谁做（human / ai / either）。空 = 还没定，分工页单独列一摞，
+    // 不要猜成「human」——没标和标了「人做」是两件事。
+    row.executor = node.GetString("executor");
     // 运行中的交接：图里只要有一颗在跑，整扇窗就亮蓝边（见 review.h Draw）。
     if (const JValue* handoff = node.Get("handoff"); handoff != nullptr && handoff->IsObject()) {
       if (handoff->GetString("state") == "running") model.ai_running = true;

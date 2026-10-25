@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterStudyRows, statusLabel, studyProgress, studyRows, studyTips, type StudyDocLike, type StudyRow } from "./study-model.ts";
+import { executorLabel, filterStudyRows, statusLabel, studyProgress, studyRows, studyTips, type StudyDocLike, type StudyRow } from "./study-model.ts";
 
 const doc: StudyDocLike = {
   pointer: "b",
@@ -96,18 +96,49 @@ test("状态文案与原生面板一致", () => {
 
 test('按标题过滤：空查询原样返回', () => {
   const rows: StudyRow[] = [
-    { id: "a", title: "写出当前理解", status: "todo", kind: "task", depth: 0, childCount: 0 },
-    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", depth: 0, childCount: 0 },
+    { id: "a", title: "写出当前理解", status: "todo", kind: "task", executor: undefined, depth: 0, childCount: 0 },
+    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", executor: undefined, depth: 0, childCount: 0 },
   ];
   assert.deepEqual(filterStudyRows(rows, "   "), rows);
 });
 
 test('按标题过滤：忽略大小写、只匹配标题不搜正文', () => {
   const rows: StudyRow[] = [
-    { id: "a", title: "Write the Idempotency note", status: "todo", kind: "task", depth: 0, childCount: 0 },
-    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", depth: 0, childCount: 0 },
+    { id: "a", title: "Write the Idempotency note", status: "todo", kind: "task", executor: undefined, depth: 0, childCount: 0 },
+    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", executor: undefined, depth: 0, childCount: 0 },
   ];
   assert.equal(filterStudyRows(rows, "IDEMPOTENCY").length, 1);
   assert.equal(filterStudyRows(rows, "幂等").length, 1);
   assert.equal(filterStudyRows(rows, "没有这个").length, 0);
+});
+test('执行者：显式字段跟着行走，没标就是 undefined（不能当「人做」）', () => {
+  const withOwner: StudyDocLike = {
+    roots: ["a", "b", "c", "d"],
+    nodes: {
+      a: { id: "a", title: "人做那颗", status: "todo", executor: "human" },
+      b: { id: "b", title: "AI 做那颗", status: "todo", executor: "ai" },
+      c: { id: "c", title: "都可以那颗", status: "todo", executor: "either" },
+      // 旧文档没有这个字段：读出来必须是 undefined，不是 "human"
+      d: { id: "d", title: "还没标", status: "todo" },
+    },
+  };
+  const rows = studyRows(withOwner);
+  assert.deepEqual(
+    rows.map((row) => row.executor),
+    ["human", "ai", "either", undefined],
+  );
+  // 磁盘里可能显式写 null（node.assign 传 null = 取消标记），同样按「没标」处理
+  const cleared: StudyDocLike = {
+    roots: ["x"],
+    nodes: { x: { id: "x", title: "取消过标记", status: "todo", executor: null } },
+  };
+  assert.equal(studyRows(cleared)[0]?.executor, undefined);
+});
+
+test('执行者 → 人话：没标的给空串，让调用方什么都不画', () => {
+  assert.equal(executorLabel("human"), "人做");
+  assert.equal(executorLabel("ai"), "AI 做");
+  assert.equal(executorLabel("either"), "都可以");
+  assert.equal(executorLabel(undefined), "");
+  assert.equal(executorLabel(null), "");
 });

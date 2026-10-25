@@ -12,11 +12,15 @@
 
 export type StudyStatus = "todo" | "active" | "done" | "skipped";
 
+/** 这一步该谁做。缺省（undefined）= 还没定，不等于「人做」。 */
+export type StudyExecutor = "human" | "ai" | "either";
+
 export interface StudyNodeLike {
   readonly id: string;
   readonly title: string;
   readonly status: StudyStatus;
   readonly kind?: "task" | "concept";
+  readonly executor?: StudyExecutor | null;
   readonly children?: readonly string[];
   readonly detail?: string;
   readonly acceptance?: string;
@@ -34,6 +38,8 @@ export interface StudyRow {
   readonly title: string;
   readonly status: StudyStatus;
   readonly kind: StudyNodeLike["kind"];
+  /** 这一步该谁做：human / ai / either；undefined = 还没定。 */
+  readonly executor: StudyExecutor | undefined;
   /** 0 = 根节点；子节点 +1。列里靠它缩进。 */
   readonly depth: number;
   readonly childCount: number;
@@ -64,6 +70,25 @@ export function statusLabel(status: StudyStatus): string {
 }
 
 /**
+ * 执行者 → 人话。
+ *
+ * 没标的返回空串，调用方据此决定「什么都不画」：把「还没定」写成「人做」会让人
+ * 以为自己被派了活，是这个字段最容易犯的错。
+ */
+export function executorLabel(executor: StudyExecutor | undefined | null): string {
+  switch (executor) {
+    case "human":
+      return "人做";
+    case "ai":
+      return "AI 做";
+    case "either":
+      return "都可以";
+    default:
+      return "";
+  }
+}
+
+/**
  * 深度优先摊平整棵树。
  *
  * 为什么不用 `Object.values(nodes)`：那个顺序是 JSON 的键序，和「先看第一步、
@@ -84,6 +109,7 @@ export function studyRows(doc: StudyDocLike | undefined): StudyRow[] {
       title: node.title,
       status: node.status,
       kind: node.kind,
+      executor: node.executor ?? undefined,
       depth,
       childCount: node.children?.length ?? 0,
     });

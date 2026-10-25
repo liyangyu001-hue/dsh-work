@@ -33,6 +33,8 @@ export function materializePlan(specs: readonly PlanSpec[], opts: MaterializeOpt
     };
     if (spec.detail !== undefined) node.detail = spec.detail;
     if (spec.acceptance !== undefined) node.acceptance = spec.acceptance;
+    // 拆解时就分得清归属的直接落上；分不清留 undefined（读到一律当「未定」）。
+    if (spec.executor !== undefined) node.executor = spec.executor;
     nodes.push(node);
 
     for (const child of spec.children ?? []) {

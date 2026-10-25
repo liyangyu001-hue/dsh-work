@@ -199,10 +199,102 @@ function SplitIcon(): React.ReactElement {
     </svg>
   );
 }
+
+/**
+ * 小条的两种工作状态：工作（推进任务）与学习（读任务）。
+ *
+ * 用户原话「这块太拥挤了 做个切换的 不要都放一起」——四颗按钮摊在一起时，
+ * 找哪颗都要先读一遍字。现在只保留这一枚切换，档位变、后面的动作跟着变。
+ */
+type BarMode = "work" | "study";
+const BAR_MODE_KEY = "dsh-work.bar-mode";
+
+function readBarMode(): BarMode {
+  try {
+    return localStorage.getItem(BAR_MODE_KEY) === "study" ? "study" : "work";
+  } catch {
+    // 隐私模式 / 禁止存储：记不住就每回都从「工作」开始，不该因此白屏。
+    return "work";
+  }
+}
+
+function writeBarMode(mode: BarMode): void {
+  try {
+    localStorage.setItem(BAR_MODE_KEY, mode);
+  } catch {
+    /* 同上：存不上不影响这一档的使用 */
+  }
+}
+
+/** 两段式切换。当前档用这一档的用途色（工作蓝 / 学习绿），另一档只留描边。 */
+function ModeSwitch(props: {
+  mode: BarMode;
+  onChange: (mode: BarMode) => void;
+  palette: BarPalette;
+}): React.ReactElement {
+  const { mode, onChange, palette } = props;
+  const pill = (value: BarMode, label: string, accent: string, icon: React.ReactElement): React.ReactElement => {
+    const on = mode === value;
+    return (
+      <button
+        type="button"
+        role="tab"
+        aria-selected={on}
+        data-dsh-work-mode-option={value}
+        onClick={() => onChange(value)}
+        title={value === "work" ? "工作：推进任务（节点图 / 分工）" : "学习：读任务（学习页 / 图里学）"}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+          height: 24,
+          padding: "0 9px 0 7px",
+          borderRadius: 999,
+          border: "none",
+          background: on ? `color-mix(in srgb, ${accent} 16%, transparent)` : "transparent",
+          color: on ? accent : palette.textDim,
+          font: `${on ? 600 : 500} 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif`,
+          cursor: "pointer",
+          ...noDrag,
+        }}
+      >
+        {icon}
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label="小条模式"
+      data-dsh-work-mode={mode}
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 2,
+        height: 28,
+        padding: 2,
+        borderRadius: 999,
+        border: `0.5px solid ${palette.separator}`,
+        ...noDrag,
+      }}
+    >
+      {pill("work", "工作", palette.work, <GraphIcon />)}
+      {pill("study", "学习", palette.learn, <LearnIcon />)}
+    </div>
+  );
+}
+
 function Bar(): React.ReactElement {
   const { snapshot, online } = useWorkState();
   const [note, setNote] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
+  // 工作 / 学习两档：用户说按钮太挤，不要都摊开。档位记在本机，下次开门还是那一档。
+  const [mode, setMode] = useState<BarMode>(() => readBarMode());
+  useEffect(() => {
+    writeBarMode(mode);
+  }, [mode]);
   // 学习页是网页侧的一整页（不用伴随层）：只读、纯前端渲染，数据就是这份 doc。
   const [studyOpen, setStudyOpen] = useState(false);
   const [studySelected, setStudySelected] = useState<string | null>(null);
@@ -365,77 +457,71 @@ function Bar(): React.ReactElement {
             <PanelIcon />
             打开面板
           </button>
-          <button
-            type="button"
-            className="dshwork-open dshwork-ghost"
-            data-dsh-work-graph="1"
-            onClick={() => void openCompanion("graph")}
-            disabled={opening || !graph.enabled}
-            title={graph.hint}
-            aria-label={graph.enabled ? "打开节点图（整张任务地图，只读）" : graph.hint}
-            style={{
-              flex: "0 0 auto",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              height: 28,
-              padding: "0 11px 0 9px",
-              borderRadius: 999,
-              border: `0.5px solid ${graph.enabled ? palette.work : palette.separator}`,
-              background: "transparent",
-              color: graph.enabled ? palette.work : palette.textDim,
-              font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
-              cursor: graph.enabled && !opening ? "pointer" : "default",
-              opacity: graph.enabled ? (opening ? 0.65 : 1) : 0.55,
-              ...noDrag,
-            }}
-          >
-            <GraphIcon />
-            打开节点图
-          </button>
-          {/* 学习 / 分工：同一张图换一种读法。用户原话是「在基础面板的按钮上有个切换」，
-              所以入口放在这里，而不是让人先开图再找。 */}
-          <button
-            type="button"
-            className="dshwork-open dshwork-ghost"
-            data-dsh-work-learn="1"
-            onClick={() => void openCompanion("graph", "learn")}
-            disabled={opening || !graph.enabled}
-            title={graph.enabled ? "打开节点图并切到「学习」：右边给这颗的基础知识与详解流程" : graph.hint}
-            aria-label="打开节点图的学习页"
-            style={railButtonStyle(graph.enabled && !opening, palette.learn, palette)}
-          >
-            <LearnIcon />
-            学习
-          </button>
-          <button
-            type="button"
-            className="dshwork-open dshwork-ghost"
-            data-dsh-work-office="1"
-            onClick={() => void openCompanion("graph", "office")}
-            disabled={opening || !graph.enabled}
-            title={graph.enabled ? "打开节点图并切到「分工」：哪部分 AI 做、哪部分人做" : graph.hint}
-            aria-label="打开节点图的分工页"
-            style={railButtonStyle(graph.enabled && !opening, palette.office, palette)}
-          >
-            <SplitIcon />
-            分工
-          </button>
-          {/* 「学习页」和上面那颗「学习」不是一回事：那颗把原生节点图切到学习栏
-              （人站在图里），这颗在网页里直接铺开一页（人坐下来读），不需要伴随层。 */}
-          <button
-            type="button"
-            className="dshwork-open dshwork-ghost"
-            data-dsh-work-study-page="1"
-            onClick={() => setStudyOpen((open) => !open)}
-            disabled={!doc || nodes.length === 0}
-            title={graph.enabled ? "在网页里打开学习页：左边要学的，右边这一颗的基础知识与详解流程" : graph.hint}
-            aria-label="打开网页学习页"
-            style={railButtonStyle(Boolean(doc) && nodes.length > 0, palette.learn, palette)}
-          >
-            <LearnIcon />
-            学习页
-          </button>
+          {/* 工作 / 学习两档：用户原话「这块太拥挤了 做个切换的 不要都放一起」。
+              所以不再把四颗按钮摊开，只留「打开面板」常驻，后面换成一个切换段
+              和这一档的两个动作。颜色按用途给：工作蓝、学习绿。 */}
+          <ModeSwitch mode={mode} onChange={setMode} palette={palette} />
+          {mode === "work" ? (
+            <>
+              <button
+                type="button"
+                className="dshwork-open dshwork-ghost"
+                data-dsh-work-graph="1"
+                onClick={() => void openCompanion("graph")}
+                disabled={opening || !graph.enabled}
+                title={graph.hint}
+                aria-label={graph.enabled ? "打开节点图（整张任务地图，只读）" : graph.hint}
+                style={railButtonStyle(graph.enabled && !opening, palette.work, palette)}
+              >
+                <GraphIcon />
+                节点图
+              </button>
+              <button
+                type="button"
+                className="dshwork-open dshwork-ghost"
+                data-dsh-work-office="1"
+                onClick={() => void openCompanion("graph", "office")}
+                disabled={opening || !graph.enabled}
+                title={graph.enabled ? "打开节点图并切到「分工」：哪部分 AI 做、哪部分人做" : graph.hint}
+                aria-label="打开节点图的分工页"
+                style={railButtonStyle(graph.enabled && !opening, palette.work, palette)}
+              >
+                <SplitIcon />
+                分工
+              </button>
+            </>
+          ) : (
+            <>
+              {/* 「学习页」是网页里铺开的一页（人坐下来读，不需要伴随层）；
+                  「图里学」是开原生节点图并切到学习栏（人站在图里）。 */}
+              <button
+                type="button"
+                className="dshwork-open dshwork-ghost"
+                data-dsh-work-study-page="1"
+                onClick={() => setStudyOpen((open) => !open)}
+                disabled={!doc || nodes.length === 0}
+                title="在网页里打开学习页：左边要学的，右边这一颗的基础知识与详解流程"
+                aria-label="打开网页学习页"
+                style={railButtonStyle(Boolean(doc) && nodes.length > 0, palette.learn, palette)}
+              >
+                <LearnIcon />
+                学习页
+              </button>
+              <button
+                type="button"
+                className="dshwork-open dshwork-ghost"
+                data-dsh-work-learn="1"
+                onClick={() => void openCompanion("graph", "learn")}
+                disabled={opening || !graph.enabled}
+                title={graph.enabled ? "打开节点图并切到「学习」：右边给这颗的基础知识与详解流程" : graph.hint}
+                aria-label="打开节点图的学习页"
+                style={railButtonStyle(graph.enabled && !opening, palette.learn, palette)}
+              >
+                <GraphIcon />
+                图里学
+              </button>
+            </>
+          )}
         </span>
       </div>
       {studyOpen && doc ? (
