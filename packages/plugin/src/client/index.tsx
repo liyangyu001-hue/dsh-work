@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { StudyPage } from "./study.tsx";
 
 import { graphEntry, openFeedback, type OpenReply, type OpenTarget } from "./open-entry.ts";
 
@@ -35,6 +36,9 @@ interface NodeView {
   kind: "task" | "concept";
   parentId: string | null;
   children: string[];
+  /** 学习页用：写给人看的解释与验收标准（宿主那边叫 detail / acceptance）。 */
+  detail?: string;
+  acceptance?: string;
 }
 
 interface DocView {
@@ -165,6 +169,9 @@ function Bar(): React.ReactElement {
   const { snapshot, online } = useWorkState();
   const [note, setNote] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
+  // 学习页是网页侧的一整页（不用伴随层）：只读、纯前端渲染，数据就是这份 doc。
+  const [studyOpen, setStudyOpen] = useState(false);
+  const [studySelected, setStudySelected] = useState<string | null>(null);
   const doc = snapshot?.doc;
 
   // 统计口径：skipped 不计入分母 —— 它是"明确不做"，不该拖累进度
@@ -372,8 +379,30 @@ function Bar(): React.ReactElement {
           >
             分工
           </button>
+          {/* 「学习页」和上面那颗「学习」不是一回事：那颗把原生节点图切到学习栏
+              （人站在图里），这颗在网页里直接铺开一页（人坐下来读），不需要伴随层。 */}
+          <button
+            type="button"
+            className="dshwork-open dshwork-ghost"
+            data-dsh-work-study-page="1"
+            onClick={() => setStudyOpen((open) => !open)}
+            disabled={!doc || nodes.length === 0}
+            title={graph.enabled ? "在网页里打开学习页：左边要学的，右边这一颗的基础知识与详解流程" : graph.hint}
+            aria-label="打开网页学习页"
+            style={railButtonStyle(Boolean(doc) && nodes.length > 0)}
+          >
+            学习页
+          </button>
         </span>
       </div>
+      {studyOpen && doc ? (
+        <StudyPage
+          doc={doc}
+          selected={studySelected}
+          onSelect={setStudySelected}
+          onClose={() => setStudyOpen(false)}
+        />
+      ) : null}
       {note !== null ? (
         <div
           role="status"

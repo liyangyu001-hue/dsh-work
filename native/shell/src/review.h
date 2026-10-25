@@ -110,6 +110,9 @@ constexpr float kNodeH = 58.0f;   // 一行标题 + 一行副标题，压掉大�
 constexpr float kGapX = 48.0f;   // 列间距：够画连线就行，太宽一屏放不下几颗
 constexpr float kGapY = 20.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
+// 整扇窗的圆角。2026-10-25 用户看彩虹边说「边角更圆滑一点」，从 22 加到 30：
+// 窗面、描边、AI 彩虹边都用同一个值，三者才不会在拐角处错开。
+constexpr float kWindowRadius = 30.0f;
 
 constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定
 constexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
@@ -522,56 +525,59 @@ inline void DrawRail(ID2D1RenderTarget* target, const Model& model, const PanelF
     return;
   }
 
-  // 分工：同一棵树按"谁来做"重排成两摞。做完/跳过的先不算 —— 它们已经不在盘子里了。
-  int ai = 0;
-  int human = 0;
-  for (const Row& row : model.rows) {
-    if (row.status == "done" || row.status == "skipped") continue;
-    if (row.handoff.empty()) {
-      human += 1;
-    } else {
-      ai += 1;
-    }
-  }
-  const std::wstring ai_head = L"AI 来做（" + std::to_wstring(ai) + L"）";
-  ui::Text(target, ai_head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kAccent, alpha));
-  y += 20.0f;
-  int shown_ai = 0;
-  for (const Row& row : model.rows) {
-    if (row.status == "done" || row.status == "skipped" || row.handoff.empty()) continue;
-    if (y + 16.0f > limit) break;
-    const std::wstring line = WidenNode(row.title);
-    ui::Text(target, ui::FitText(L"· " + line, right - left, 11.0f), fmt.meta, D2D1::RectF(left, y, right, y + 16.0f),
-             fmt.brush, ui::Fade(ui::kTextDim, alpha));
-    y += 17.0f;
-    shown_ai += 1;
-  }
-  if (shown_ai == 0 && y + 16.0f <= limit) {
-    ui::Text(target, L"（还没有交给 AI 的）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
-             ui::Fade(ui::kTextDim, alpha));
-    y += 17.0f;
-  }
+  // 分工：同一棵树按「谁来做、做到哪一步」重排。做完/跳过的先不算 —— 它们已经不在盘子里了。
+  //
+  // 第一版只分「AI 来做 / 人来做」两摞，用户说要更细：AI 那边其实有四种光景
+  // （刚交出去等开工、正在做、做完等你验收、被退回来），人这边只有一种。
+  // 分开列，一眼能看出「现在卡在谁手上」。
+  struct Bucket {
+    const char* state;      // handoff.state 的取值；空串 = 没交接（人来做）
+    const wchar_t* head;    // 小节标题（不含数量）
+    bool accent;            // 标题用蓝色（AI 那头）
+  };
+  static const Bucket kBuckets[] = {
+      {"running", L"AI 正在做", true},
+      {"review", L"等你验收", true},
+      {"offered", L"已交给 AI，等开工", true},
+      {"returned", L"AI 退回来了", true},
+      {"", L"人来做", false},
+  };
 
-  y += 10.0f;
-  const std::wstring human_head = L"人来做（" + std::to_wstring(human) + L"）";
-  if (y + 16.0f <= limit) {
-    ui::Text(target, human_head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
-             ui::Fade(ui::kText, alpha));
-    y += 20.0f;
-  }
-  int shown_human = 0;
-  for (const Row& row : model.rows) {
-    if (row.status == "done" || row.status == "skipped" || !row.handoff.empty()) continue;
+  for (const Bucket& bucket : kBuckets) {
+    int total = 0;
+    for (const Row& row : model.rows) {
+      if (row.status == "done" || row.status == "skipped") continue;
+      if (row.handoff == bucket.state) total += 1;
+    }
+    if (total == 0) continue;  // 空的那摞不占地方：五摞全画出来，右栏会被撑爆
     if (y + 16.0f > limit) break;
-    ui::Text(target, ui::FitText(L"· " + WidenNode(row.title), right - left, 11.0f), fmt.meta,
-             D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kTextDim, alpha));
-    y += 17.0f;
-    shown_human += 1;
+    const std::wstring head = std::wstring(bucket.head) + L"（" + std::to_wstring(total) + L"）";
+    ui::Text(target, head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+             ui::Fade(bucket.accent ? ui::kAccent : ui::kText, alpha));
+    y += 20.0f;
+    for (const Row& row : model.rows) {
+      if (row.status == "done" || row.status == "skipped") continue;
+      if (row.handoff != bucket.state) continue;
+      if (y + 16.0f > limit) break;
+      ui::Text(target, ui::FitText(L"· " + WidenNode(row.title), right - left, 11.0f), fmt.meta,
+               D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kTextDim, alpha));
+      y += 17.0f;
+    }
+    y += 8.0f;
   }
-  if (shown_human == 0 && y + 16.0f <= limit) {
-    // 不能说死「都交给 AI 了」：人做那一摞空着的常见原因是剩下的都收尾了。
-    ui::Text(target, L"（没有要人做的）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
-             ui::Fade(ui::kTextDim, alpha));
+  if (y + 16.0f <= limit) {
+    // 五摞全空 = 盘子里只剩收尾的了；说清楚，别让人以为栏坏了。
+    bool any = false;
+    for (const Row& row : model.rows) {
+      if (row.status != "done" && row.status != "skipped") {
+        any = true;
+        break;
+      }
+    }
+    if (!any) {
+      ui::Text(target, L"（都收尾了，没有要派的）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+               ui::Fade(ui::kTextDim, alpha));
+    }
   }
 }
 
@@ -772,8 +778,8 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 
   const UINT32 bg = ui::Fade(0xFF14161C, a);
-  ui::FillRound(target, fmt.brush, D2D1::RectF(0.0f, 0.0f, width_dip, height_dip), 22.0f, bg);
-  ui::StrokeRound(target, fmt.brush, D2D1::RectF(0.5f, 0.5f, width_dip - 0.5f, height_dip - 0.5f), 22.0f,
+  ui::FillRound(target, fmt.brush, D2D1::RectF(0.0f, 0.0f, width_dip, height_dip), kWindowRadius, bg);
+  ui::StrokeRound(target, fmt.brush, D2D1::RectF(0.5f, 0.5f, width_dip - 0.5f, height_dip - 0.5f), kWindowRadius,
                   ui::Fade(0xFFFFFFFF, 0.08f * a), 0.5f);
 
   // ---- 标题栏 ----
@@ -1128,7 +1134,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   // AI 会话在跑：整扇窗的边缘亮一圈蓝边，流光沿边跑。只做余光提示，不挡任何内容；
   // 放在最后画，边框压在标题栏与页脚之上，窗口一开一合时跟着 a 一起淡。
   if (model.ai_running) {
-    ui::DrawAiFrame(target, fmt, width_dip, height_dip, 22.0f, anim.now, a);
+    ui::DrawAiFrame(target, fmt, width_dip, height_dip, kWindowRadius, anim.now, a);
   }
 
   target->SetTransform(D2D1::Matrix3x2F::Identity());

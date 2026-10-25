@@ -663,12 +663,16 @@ void TickReviewAnim() {
   // 这个窗口是从一个 WS_EX_NOACTIVATE 的面板点开的，系统经常不肯把前台权交过来，
   // 于是 WM_KEYDOWN 根本到不了这里（踩过两次）。但 RegisterHotKey 会真的把键吃掉，
   // 用户在任何输入框打字都会被吞——也不行。
-  // 折中：定时器里用 GetAsyncKeyState 观测按下沿，只处理我们自己关心的那五个键，
+  // 折中：定时器里用 GetAsyncKeyState 观测按下沿，只处理我们自己关心的那几个键，
   // 其它键概不干预，用户该打什么打什么。
+  //
+  // 最后一个 L 是「调出想学哪部分」的替代键：用户原话是 Tab，但 Tab 已被全局
+  // 截图热键占着（capture.h 的 RegisterHotKey），在图里按会把框选层打出来。
   struct Watch { UINT vk; int code; };
-  static const Watch kWatched[] = {{VK_UP, 0}, {VK_DOWN, 1}, {VK_RETURN, 2}, {VK_BACK, 3}, {VK_ESCAPE, 4}};
-  static bool was_down[5] = {};
-  for (int i = 0; i < 5; ++i) {
+  static const Watch kWatched[] = {{VK_UP, 0},  {VK_DOWN, 1}, {VK_RETURN, 2},
+                                   {VK_BACK, 3}, {VK_ESCAPE, 4}, {'L', 7}};
+  static bool was_down[6] = {};
+  for (int i = 0; i < 6; ++i) {
     const bool down = (GetAsyncKeyState(static_cast<int>(kWatched[i].vk)) & 0x8000) != 0;
     if (down && !was_down[i]) {
       const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -3005,8 +3009,17 @@ void ReviewKey(int which) {
     // 6 号原本想留给 Tab（用户原话：「tab 是调出想学哪部分」），但 Tab 是
     // 全局截图的注册热键（capture.h 的 RegisterHotKey(MOD_NOREPEAT, VK_TAB)）：
     // 2026-10-25 实测，在图里按一下 Tab 会跳出框选层，学习和截图打架。
-    // 所以这个键先不接，改让「学习」「分工」两颗按钮 + ↑↓ 承担；
-    // 等用户定一个不冲突的键（比如 L）再接。
+    // 于是改由 L 承担（见下面 which == 7）。
+    return;
+  }
+  if (which == 7) {
+    // L = Learn：没开学习栏就开，开着就收起。跟头带上那颗「学习」按钮同一个意思，
+    // 只不过手不用离开键盘 —— 用户要的「调出想学哪部分」就是这个动作。
+    const bool learn = g_review_model.rail == dshwork::review::Model::Rail::Learn;
+    g_review_model.rail = learn ? dshwork::review::Model::Rail::Off : dshwork::review::Model::Rail::Learn;
+    LogToFile(learn ? "审阅：L 收起学习栏" : "审阅：L 打开学习栏");
+    LayoutReview();
+    RepaintReview();
     return;
   }
   switch (which) {

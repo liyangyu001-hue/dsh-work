@@ -262,11 +262,51 @@ inline D2D1_POINT_2F FramePoint(const D2D1_RECT_F& box, float radius, float t) {
 }
 
 /**
- * 「AI 会话正在跑」的窗边：一圈随呼吸变亮的蓝边 + 一颗沿边顺时针跑的流光。
+ * 彩虹：色相 → RGB（Tesla 那个「彩虹」彩蛋的路子）。
  *
- * 只画边，不碰内容：用户要的是「这窗口里有东西在自动运行」的余光信号，
- * 不是再读一段说明。坐标是 DIP，调用方保证当前变换是 Scale(scale)。
- * alpha 跟着窗口的开合淡入淡出；没有运行中的会话时调用方根本不会调这里。
+ * 为什么不用 D2D 的渐变笔刷：彩虹要**沿着窗边绕一圈**（位置决定色相），
+ * 而线性渐变笔刷只能一路直着变，描边的圆角会把渐变切在四个角上。
+ * 索性按弧长取色、一段一段画，色相跟着位置和时间一起走。
+ */
+inline D2D1_COLOR_F Rainbow(float hue01, float alpha) {
+  float h = hue01 - std::floor(hue01);
+  h *= 6.0f;
+  const float x = 1.0f - std::fabs(std::fmod(h, 2.0f) - 1.0f);
+  float r = 0.0f;
+  float g = 0.0f;
+  float b = 0.0f;
+  if (h < 1.0f) {
+    r = 1.0f;
+    g = x;
+  } else if (h < 2.0f) {
+    r = x;
+    g = 1.0f;
+  } else if (h < 3.0f) {
+    g = 1.0f;
+    b = x;
+  } else if (h < 4.0f) {
+    g = x;
+    b = 1.0f;
+  } else if (h < 5.0f) {
+    r = x;
+    b = 1.0f;
+  } else {
+    r = 1.0f;
+    b = x;
+  }
+  return D2D1::ColorF(r, g, b, alpha);
+}
+
+/**
+ * 「AI 会话正在跑」的窗边：一圈呼吸的蓝光 + 一道绕着窗边走的彩虹。
+ *
+ * 2026-10-25 两改：先是用户说「最外面的那个框就不要有流转动画了，在 AI 执行的过程中
+ * 可以加类似特斯拉 AI 接管的那种动画」，于是撤掉原来那颗沿边跑的蓝色流光、换成自上而下
+ * 的扫描带；接着用户点名「特斯拉彩虹特效 知道不」——就是 Tesla 屏幕上那圈随接管亮起来的
+ * 彩虹。最终形态：**外晕仍是安静的呼吸蓝光，窗边本身是一圈缓慢旋转的彩虹**。
+ *
+ * 只画光，不碰内容。坐标是 DIP，调用方保证当前变换是 Scale(scale)；
+ * alpha 跟着窗口开合淡入淡出；没有运行中的会话时调用方根本不会调这里。
  */
 inline void DrawAiFrame(ID2D1RenderTarget* target, const PanelFormats& fmt, float width_dip, float height_dip,
                         float radius_dip, ULONGLONG now_ms, float alpha) {
@@ -277,31 +317,37 @@ inline void DrawAiFrame(ID2D1RenderTarget* target, const PanelFormats& fmt, floa
   float r = radius_dip - 1.0f;
   if (r < 0.0f) r = 0.0f;
 
-  // 外晕三圈：宽而淡，像蓝光从窗边后面漏出来；主边跟着呼吸变亮。
-  // 分层窗口会把画到窗外的部分裁掉，所以看起来正好是"从里面透出去"。
+  // 外晕三圈：宽而淡，像蓝光从窗边后面漏出来（这层不参与彩虹，留着当底光）。
   const float glow_w[3] = {10.0f, 5.0f, 2.2f};
-  const float glow_a[3] = {0.05f, 0.11f, 0.34f + 0.30f * breath};
+  const float glow_a[3] = {0.04f, 0.08f, 0.16f + 0.14f * breath};
   for (int i = 0; i < 3; ++i) {
     fmt.brush->SetColor(Color(Fade(kAccent, glow_a[i] * alpha)));
     target->DrawRoundedRectangle(D2D1::RoundedRect(edge, r, r), fmt.brush, glow_w[i]);
   }
 
-  // 流光：亮头在前，尾巴在后；6.4 秒一圈，和节点环同向（顺时针）。
-  // 点阵而不是折线：分层窗下 DrawLine 的平头会露出缺口，圆点叠起来才是连续锥形。
-  constexpr int kN = 480;
-  constexpr float kTail = 0.14f;
-  const float head = static_cast<float>(now_ms % 6400) / 6400.0f;
-  for (int s = 0; s <= kN; ++s) {
-    float d = head - static_cast<float>(s) / kN;
-    d -= std::floor(d);
-    if (d > kTail) continue;
-    const float k = 1.0f - d / kTail;
-    const float ease = k * k;
-    const D2D1_POINT_2F p = FramePoint(edge, r, static_cast<float>(s) / kN);
-    fmt.brush->SetColor(Color(Fade(kAccent, (0.02f + 0.20f * ease) * alpha)));
-    target->FillEllipse(D2D1::Ellipse(p, 4.2f + 2.6f * ease, 4.2f + 2.6f * ease), fmt.brush);
-    fmt.brush->SetColor(Color(Fade(0xFFFFFFFF, (0.06f + 0.82f * ease) * alpha)));
-    target->FillEllipse(D2D1::Ellipse(p, 1.0f + 1.5f * ease, 1.0f + 1.5f * ease), fmt.brush);
+  // 彩虹：沿窗边一圈一整道光谱（位置定色相），整体每 9 秒慢慢转一圈。
+  // 分段画直线而不是画一颗颗圆点：虹彩是连续的，点会看出来是一串珠子。
+  constexpr int kSegments = 320;
+  constexpr float kHueSpeed = 1.0f / 9.0f;  // 圈/秒
+  const float spin = seconds * kHueSpeed;
+  const float width_scale = 1.0f + 0.25f * breath;  // 呼吸时边略微变粗
+  for (int i = 0; i < kSegments; ++i) {
+    const float t0 = static_cast<float>(i) / static_cast<float>(kSegments);
+    const float t1 = static_cast<float>(i + 1) / static_cast<float>(kSegments);
+    const D2D1_POINT_2F p0 = FramePoint(edge, r, t0);
+    const D2D1_POINT_2F p1 = FramePoint(edge, r, t1);
+    // 色相 = 位置 + 时间；同一条边上每段都不一样，看上去就是流动的虹
+    fmt.brush->SetColor(Rainbow(t0 + spin, (0.55f + 0.25f * breath) * alpha));
+    target->DrawLine(p0, p1, fmt.brush, 2.2f * width_scale);
+  }
+  // 内侧再补一圈更淡的同色，让彩虹有厚度（分层窗口里宽度不够时像是"发光的边"）
+  for (int i = 0; i < kSegments; ++i) {
+    const float t0 = static_cast<float>(i) / static_cast<float>(kSegments);
+    const float t1 = static_cast<float>(i + 1) / static_cast<float>(kSegments);
+    const D2D1_POINT_2F p0 = FramePoint(edge, r, t0);
+    const D2D1_POINT_2F p1 = FramePoint(edge, r, t1);
+    fmt.brush->SetColor(Rainbow(t0 + spin, 0.10f * alpha));
+    target->DrawLine(p0, p1, fmt.brush, 6.0f);
   }
 }
 
