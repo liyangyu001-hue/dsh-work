@@ -7,6 +7,14 @@
 ---
 
 ## 进度
+- 2026-10-25 · **同一条建议不再重复计费（复盘排序里的第 ② 件的前半）**：真库里 `node.advise` 20 次、同一颗节点被重复建议 4/3/2/2 次，每次都是一次模型调用和一次写库。
+  - **指纹**：`packages/plugin/src/advise.ts` 新增 `adviceSignature(node, provider, model)` —— 把「哪个模型 + 标题 + 目标 + 验收」各段带长度前缀（`长度:内容`，空白折叠）拼成一串，段之间用 `\u0001`。带长度前缀是故意的：否则标题里出现分隔符时两段内容能拼出同一个指纹（有一条测试专盯这个）。
+  - **复用**：`cachedAdvice(existing, signature)` 只认指纹完全一致；**缺 `sig` 的旧建议一律当过期**（多问一次模型是小事，拿旧建议糊弄人是大事）。`packages/core/src/types.ts:37-49` 的 `Advice` 新增可选 `sig?: string`，`validateDoc`（`state.ts:114-123`）顺带挡两种脏数据：建议没正文、指纹不是字符串。
+  - **接线**：`packages/plugin/src/index.ts` 的 `advise.request` 先取指纹再进门——命中就**不调模型、不写库**，直接回 `{ ok: true, text, alt?, cached: true }`；`http.ts` 的 `AdviseApi` 与 `/api/advise` 把 `cached` 透出去（界面以后可以据此说一句「这条没变，没再问模型」）。
+  - **真机证据**（dev 64001，`x-dsh-work-token`，节点 `nd_01m5fjfadd6gs0msqzr`）：第一次 `POST /api/advise` → **2783 ms**、`seq` 103→104、journal 103→104 行、建议里带上 `sig`；第二次同样的请求 → **3 ms**、`cached: true`、`seq` 仍是 104、journal 仍是 104 行。**第二次没有产生任何调用与写入**，这就是「同节点不重复计费」的定义。
+  - 验完把这条节点的建议**还原成验证前的原文**并去掉 `sig`（`seq` 105，journal 多一条可追溯的 `node.advise`）——验证不该留下痕迹。
+  - 绿门：`pnpm test` **182 绿 / 0 失败**（新增 `advise.test.ts` 6 条）、`pnpm typecheck` 干净、`lib/index.js` 116.1 kB。
+  - **还没做的后半**：② 里的「一次会话 token 可见」——现在拿不到可靠用量：`recognize.ts` 的 `LlmChunk` 只声明了 `type/text/reason`，宿主没把 usage 往下传。下一步先做探针（把 stream 里非 `text-delta` 的分片逐条记下来跑一次真实建议），确认宿主到底会不会给 usage；给就照实累计，不给就只报「本会话 N 次调用 · 约 X 字」，**不编 token 数**。
 - 2026-10-25 · **交接能撤回了 + 小条上有了常驻的「交给 AI / 撤回」**（复盘排序里的第 ① 件，用户 m05084「对的 我们按预计推进」）。三件：
   - **`handoff.cancel`**：`types.ts:122-131` 新意图、`state.ts:444-461` 实现。以前 `offered` 是死胡同（`start` 只有 AI 能发、`return` 要求 `running|review`），真库里 `nd_01m5fjfadd4ht037a7e` 从 **10-22 22:28 挂到 10-25**。撤回只放行 `offered` / `returned`，`running` 给「AI 正在做，要停就等它交回、或者用打回」、`review` 给「AI 已经把活交回来了，要么验收要么打回」、其它给「已经验收过了，交接不用再撤」；放行只把 `handoff` 置 `null`，不动 `status` 与指针。
   - **迁移表 6×6**：`handoff.test.ts` 加 `'none'` 落点（放行且必须清空），30 格 → **36 格**；另加两条定向用例（撤完能重新 offer 且 `since` 刷新；running/review 撤回必须被拒且原文档 `deepEqual` 不变）。单跑 7 绿。
@@ -149,8 +157,12 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- **2026-10-25 本轮交付：交接可撤回（core + 迁移表 6×6）+ 原生 `H` 键 + 网页小条常驻「交给 AI / 撤回」。** 复盘排序第 ① 件，用户 m05084「对的 我们按预计推进」；顺带把真库里挂了三天的那颗 `offered` 清掉（细节见进度第一条）。
-- **当前任务 = 复盘排序的第 ② 件：建议按节点缓存 + 一次会话 token 可见**（P2 缺项）。实测依据：`.dsh-work/journal.ndjson` 里 `node.advise` **20 次全是 ai 触发**，同一节点被重复建议（`…add6gs0msqzr` 4 次、`…add0` 3 次、`…add2` / `…add4` 各 2 次），直接违反 `ROADMAP` P2「建议按节点缓存、同节点不重复计费」。做法建议：`advise` 落库前先比对 `node.advice.text`（相同就不发、只刷新 `updatedAt` 之外的东西都不动），再在网页/原生上把「本次会话花了多少 token」显出来（宿主已有 `tokens` 字段就复用，没有就加）。
+- **2026-10-25 本轮交付：第 ② 件的前半，「建议按节点缓存」落地**——`adviceSignature()`（模型 + 标题 + 目标 + 验收，带长度前缀）+ `Advice.sig` + `advise.request` 命中即不调模型不写库；真机第二次 `POST /api/advise` **3 ms / `cached: true` / `seq` 不动 / journal 不增**（细节见进度第一条）。
+- **当前任务 = 第 ② 件剩下的后半：一次会话 token 可见。** 先做**探针**而不是先写功能：在 `packages/plugin/src/recognize.ts` 的 `collectText` 里临时把非 `text-delta` 的分片（`type` + 键名）记进日志，跑一次真实 `POST /api/advise`，确认宿主到底会不会给 usage。三种可能三条路：
+  - 给了 `usage`（或 `finish` 里带 token 数）→ 照实累计，`/dsh-work/api/stats` 返回「本会话 N 次调用 / 输入 x / 输出 y」，面板与图里页脚各显示一行；
+  - 只给字符数 → 老老实实报「N 次调用 · 约 X 字」，**不换算成 token**；
+  - 什么都不给 → 只报调用次数，并在板上写明宿主缺这条能力。
+  无论哪条，都要有一条单测把「计数不因失败调用而膨胀」钉住。
 - 队列里其它候选（都已交付或已定案，别再重做）：
   - ① ~~交接可撤回 + 常驻入口~~ —— **已交付（本轮）**。
   - ③ 节点产物落盘 `nodes/<id>.md`，`done` 必须能指到产物（复盘排序第 ③）。
@@ -409,6 +421,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 已知的坑（踩过一次就别再踩）
 
+- **缓存指纹必须带长度前缀**：`adviceSignature()` 一开始直接用 `\u0001` 连接各段，结果 `title='a\u0001b'` 与 `detail='b\u0001c'` 能拼出同一个指纹（测试当场抓到）。改成每段 `${长度}:${内容}` 再连，分隔符就不再是「内容里的一等公民」。
+- **验证会写数据，验完要还原**：跑一次 `/api/advise` 就会覆盖节点上原有的建议（这是产品行为，不是 bug）。本轮验完把那条建议的原文用 `POST /api/intent` 写回去并去掉 `sig`（`seq` 105 留痕）。以后凡是「真库上验证写操作」的轮次，都要在板上写清「写了什么、怎么还原、还原后的 `seq`」。
 - **改了 `packages/core/**` 只跑 `build-client.mjs` 不够**：意图是在**插件宿主包**里编译的，必须 `node scripts/build-plugin.mjs` 再重启宿主，否则新意图会得到 `{"applied":false,"reason":"未知意图 handoff.cancel"}`（这一轮先踩了一次，看着像 core 没生效）。
 - **探针 `.ps1` 必须纯 ASCII**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8 按 ANSI 读，中文注释会截断字符串、整个脚本报 `The string is missing the terminator`。要么英文注释，要么用 `pwsh`。
 - **按键注入要注意 220ms 去重**：`ReviewKey()` 对同一个键 220ms 内只认一次（防 WM_KEYDOWN + 全局轮询双触发）；探针连按 ↓ 选行时每次间隔要 > 220ms，否则只走一格。

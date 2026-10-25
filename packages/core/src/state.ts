@@ -110,6 +110,14 @@ export function validateDoc(doc: WorkDoc): string | null {
     ) {
       return `节点 ${id} 的执行者 ${String(node.executor)} 不认识（只支持 human / ai / either）`;
     }
+    if (node.advice !== undefined && node.advice !== null) {
+      if (typeof node.advice.text !== 'string' || node.advice.text.trim() === '') {
+        return `节点 ${id} 的建议没有正文`;
+      }
+      if (node.advice.sig !== undefined && typeof node.advice.sig !== 'string') {
+        return `节点 ${id} 的建议指纹不是字符串`;
+      }
+    }
   }
   if (activeCount > 1) return `同时存在 ${activeCount} 个 active 节点`;
 

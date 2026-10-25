@@ -77,6 +77,40 @@ export async function adviseNode(
   return parsed;
 }
 
+/**
+ * 一条建议的「问题指纹」：节点内容 + 用哪个模型。
+ *
+ * 内容没变、模型没换，再问一次只会得到另一句话和一张账单。把这三个字段
+ * 拼成指纹存在建议上，下次进门先比指纹，比中了就不调模型（见 cachedAdvice）。
+ * 每段前面带长度（`长度:内容`），这样标题里就算有分隔符也拼不出同一个指纹。
+ */
+export function adviceSignature(node: NodeBrief, provider: string, model: string): string {
+  const part = (value: string): string => {
+    const flat = value.replace(/\s+/gu, ' ').trim();
+    return `${flat.length}:${flat}`;
+  };
+  return [provider, model, node.title, node.detail, node.acceptance].map(part).join('\u0001');
+}
+
+/**
+ * 节点上那条旧建议还能不能用。能用就直接返回，调用方不要再调模型。
+ *
+ * 只认指纹完全一致：缺 sig 的旧建议（这个字段之前没有过）一律当过期——
+ * 多问一次模型是小事，拿旧建议糊弄人是大事。
+ */
+export function cachedAdvice(
+  existing: { text?: unknown; alt?: unknown; sig?: unknown } | null | undefined,
+  signature: string,
+): Advice | null {
+  if (existing === null || existing === undefined) return null;
+  if (typeof existing.sig !== 'string' || existing.sig === '') return null;
+  if (existing.sig !== signature) return null;
+  if (typeof existing.text !== 'string' || existing.text.trim() === '') return null;
+  const text = existing.text.trim();
+  const alt = typeof existing.alt === 'string' ? existing.alt.trim() : '';
+  return alt === '' ? { text } : { text, alt };
+}
+
 /** 从模型输出里挖出 {text, alt}。挖不到返回 null。 */
 export function parseAdvice(raw: string): Advice | null {
   const text = typeof raw === 'string' ? raw.trim() : '';

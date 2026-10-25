@@ -1,5 +1,11 @@
 # 变更日志
 
+## 2026-10-25 · 同一条建议不再重复计费（建议按节点缓存）
+
+- **建议带指纹**（`packages/plugin/src/advise.ts` 的 `adviceSignature()` + `packages/core/src/types.ts` 的 `Advice.sig?`）：把「用哪个模型 + 标题 + 目标 + 验收」各段带长度前缀拼成一串存在建议上。带长度前缀是因为纯分隔符会串味——`title='a␁b'` 和 `detail='b␁c'` 能拼出同一个指纹，测试当场抓到过。
+- **命中就不问模型**（`packages/plugin/src/index.ts` 的 `advise.request`）：进门先比指纹，一致就**不调模型、不写库**，直接回 `{ ok: true, text, alt?, cached: true }`（`http.ts` 的 `AdviseApi` 与 `/api/advise` 透出 `cached`）。缺 `sig` 的旧建议一律当过期——多问一次是小事，拿旧建议糊弄人是大事。`validateDoc` 顺带挡「建议没正文」「指纹不是字符串」两种脏数据。
+- 验收：`pnpm test` **182 绿 / 0 失败**（新增 `advise.test.ts` 6 条）、`pnpm typecheck` 干净。真机（dev 64001，节点 `nd_01m5fjfadd6gs0msqzr`）：第一次 `POST /api/advise` **2783 ms**、`seq` 103→104、journal +1 行、建议带上 `sig`；第二次同样请求 **3 ms**、`cached: true`、`seq` 仍是 104、journal 不增——**没有再产生一次调用或一次写入**。验完把那条建议的原文写回并去掉 `sig`（`seq` 105）。
+
 ## 2026-10-25 · 交接能撤回了，小条上多了常驻的「交给 AI / 撤回」
 
 - **`handoff.cancel`**（`packages/core/src/types.ts` + `state.ts`）：以前 `offered` 是个死胡同 —— `start` 只有 AI 能发、`return` 又要求 `running|review`，人手一抖点了「交给 AI」，这颗节点就永远挂着（真库里那颗 `nd_01m5fjfadd4ht037a7e` 从 10-22 挂了三天）。新意图只放行 `offered` / `returned` 两档：`running` 要打回、`review` 要验收或打回，撤回不能把 AI 正在做或刚交回的活抹掉。撤回只清交接，不动 `status` 与指针。

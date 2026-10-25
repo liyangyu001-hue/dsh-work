@@ -114,7 +114,13 @@ export interface PlanTextApi {
 }
 
 export interface AdviseApi {
-  request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
+  /**
+   * `cached: true` 表示这条建议是复用节点上已有的，没有真的调模型。
+   * 界面据此可以说一句「这条没变，没再问模型」。
+   */
+  request(
+    nodeId: string | undefined,
+  ): Promise<{ ok: true; text: string; alt?: string; cached?: boolean } | { ok: false; status: number; reason: string }>;
 }
 export interface LearnApi {
   request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
@@ -328,7 +334,12 @@ export function createHttpHandler(options: HttpOptions) {
         sendJson(res, result.status, { ok: false, error: result.reason });
         return;
       }
-      sendJson(res, 200, { ok: true, text: result.text, ...(result.alt === undefined ? {} : { alt: result.alt }) });
+      sendJson(res, 200, {
+        ok: true,
+        text: result.text,
+        ...(result.alt === undefined ? {} : { alt: result.alt }),
+        ...(result.cached === true ? { cached: true } : {}),
+      });
       return;
     }
     if (pathname === '/api/learn') {

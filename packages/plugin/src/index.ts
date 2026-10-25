@@ -25,7 +25,7 @@ import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
 import type { AdviseApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
-import { adviseNode } from './advise.ts';
+import { adviceSignature, adviseNode, cachedAdvice } from './advise.ts';
 import { learnNode } from './learning.ts';
 import { askNode } from './chat.ts';
 import { planFromText } from './planning.ts';
@@ -396,6 +396,23 @@ export function apply(ctx: any, config?: PluginConfig): void {
           return { ok: false, status: 404, reason: '没有这个节点' };
         }
         const selection = resolveLlmSelection(ctx, cfg);
+        // 同一个节点、内容没变、模型没换 → 直接还回去，不调模型。
+        // 真库里同一颗节点被重复建议过 4 次，每次都是一次计费。
+        const brief = {
+          title: node.title,
+          detail: node.detail ?? '',
+          acceptance: node.acceptance ?? '',
+        };
+        const signature = adviceSignature(brief, selection.provider, selection.model);
+        const cached = cachedAdvice(node.advice, signature);
+        if (cached !== null) {
+          return {
+            ok: true,
+            text: cached.text,
+            ...(cached.alt === undefined ? {} : { alt: cached.alt }),
+            cached: true,
+          };
+        }
         try {
           const advice = await adviseNode(
             {
@@ -404,11 +421,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
               model: selection.model,
               ...(cfg.llm?.timeoutMs === undefined ? {} : { timeoutMs: cfg.llm.timeoutMs }),
             },
-            {
-              title: node.title,
-              detail: node.detail ?? '',
-              acceptance: node.acceptance ?? '',
-            },
+            brief,
             unload.signal,
           );
           const intent: Intent = {
@@ -419,6 +432,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
               ...(advice.alt === undefined ? {} : { alt: advice.alt }),
               at: Date.now(),
               model: selection.model,
+              sig: signature,
             },
           };
           const result = await store.commit(intent, 'ai');
