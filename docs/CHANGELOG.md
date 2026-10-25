@@ -1,5 +1,14 @@
 # 变更日志
 
+## 2026-10-25 · 交接五态补了迁移表，堵住「已收尾的节点还能交给 AI」
+
+`ROADMAP` P2 那条「交接五态迁移有单测，非法迁移被拒绝」之前只有三条零散断言。现在是一张规格表。
+
+- 新增 `packages/core/src/handoff.test.ts`：6 个起点（没有交接 + `offered`/`running`/`review`/`accepted`/`returned`）× 5 个意图 = 30 格逐格对账。放行要求落点状态一致且结果能过 `validateDoc`；拒绝要求理由是人话，**且原文档一个字节都不变**（拿 `structuredClone` 快照做 `deepEqual`，否则「改了再改回来」这种假拒绝测不出来）。
+- 写表时暴露真问题：`handoff.offer` 只挡 `running`/`review`，而 `handoff.accept` 会把节点标成 `done` —— 已验收（或已跳过）的节点还能再提议交接，`start → submit → accept` 走一圈等于把做完的活重开。修法：`handoff.offer` 先按 `status` 挡，`done`/`skipped` 回「已经收尾（已完成/已跳过），不能再交给 AI」。
+- 真机复核（dev 宿主 64001，插件重编后重启）：对一颗 `done` 节点 `POST /dsh-work/api/intent` 发 `handoff.offer` → **HTTP 409**，`{"applied":false,"seq":92,"reason":"节点 … 已经收尾（已完成），不能再交给 AI"}`，`seq` 与 `handoff` 都没变。
+- `pnpm test` 135 绿（新增 5 条）、`pnpm typecheck` 干净。
+
 ## 2026-10-25 · 包名换成 `@ka-studio/dsh-work`
 
 原来叫 `@dshwork/plugin`，但那个 npm 作用域不是发布者自己的（用户 npm 昵称是 `ka-studio`），`npm publish` 会 403。改成他自己的作用域，上架用的预构建包与清单条目一并换掉。

@@ -400,6 +400,13 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
     case 'handoff.offer': {
       const target = requireNode(intent.nodeId);
       if (!target) return fail(`节点 ${intent.nodeId} 不存在`);
+      // 已收尾的节点不能再交给 AI：验收（accepted）会把节点标成 done，
+      // 若这时还允许提议，就会在「已完成」的节点上挂一个 offered，
+      // 后面 start/submit 一路走下来等于把做完的活重开一遍。
+      if (target.status === 'done' || target.status === 'skipped') {
+        const what = target.status === 'done' ? '已完成' : '已跳过';
+        return fail(`节点 ${intent.nodeId} 已经收尾（${what}），不能再交给 AI`);
+      }
       const state = target.handoff?.state;
       if (state === 'running' || state === 'review') {
         return fail(`节点 ${intent.nodeId} 正在被 AI 执行，不能重复提议`);
