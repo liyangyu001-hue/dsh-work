@@ -556,7 +556,31 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   // 父→子，所以光是朝思路前进的方向流的，扫一眼就知道下一步在哪。
   static ID2D1Factory* factory = nullptr;
   if (factory == nullptr) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &factory);
-  const float flow_phase = static_cast<float>((anim.now % 100000) * 0.00022);
+
+  // ---- 轮动：一次只亮一条边，从第一颗轮到最后一颗 ----
+  //
+  // 用户原话是「轮动展示」（追问后选的正是「节点图里节点间的流光线节奏」）。
+  // 原来是每条边各自错相位（phase = flow_phase + i * 0.11），所有边同时在流，
+  // 看上去像一条并行流水线，反而看不出"现在走到哪一步"。
+  // 现在整张图共用一个时间槽：每条边占「走完 0.9s + 空档 0.1s」，轮完最后一条回第一条。
+  constexpr double kEdgeTravelMs = 900.0;  // 一条边从头走到尾
+  constexpr double kEdgeGapMs = 100.0;     // 交接空档：整张图暗一下，眼睛才分得清换了条边
+  constexpr double kEdgeSlotMs = kEdgeTravelMs + kEdgeGapMs;
+  constexpr float kTailLen = 0.18f;        // 亮弧占整条边的比例
+  const size_t edge_count = model.rows.size() > 1 ? model.rows.size() - 1 : 0;
+  size_t active_edge = 0;
+  float flow_head = -1.0f;  // < 0 表示此刻不画流光（空档期）
+  if (edge_count > 0) {
+    const double clock = static_cast<double>(anim.now);
+    const double slot = std::floor(clock / kEdgeSlotMs);
+    active_edge = static_cast<size_t>(slot) % edge_count;
+    const double in_slot = clock - slot * kEdgeSlotMs;
+    if (in_slot < kEdgeTravelMs) {
+      // 出发前先让尾巴探出来、到达后让尾巴走完：t 0→1 映射到 head −尾巴→1。
+      const float t = static_cast<float>(in_slot / kEdgeTravelMs);
+      flow_head = t * (1.0f + kTailLen) - kTailLen;
+    }
+  }
   // 连线按「深度优先的先后」串起来：每颗接下一颗，而不是只连父子。
   // 这样一屏就是一条从头走到尾的流水线，而不是几段互不相连的树枝。
   for (size_t i = 0; i + 1 < model.rows.size(); ++i) {
@@ -575,18 +599,33 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
       target->DrawLine(edge.points[s], edge.points[s + 1], fmt.brush, 1.6f);
     }
 
-    // 流光：一段 18% 弧长的亮弧，每条边错开相位，整体朝前流。
+    // 流光：只画当前轮到的这条边，其余边保持底线、静止。
     // 位置按累计弧长算，拐角只是折线上的普通一点，所以不会重来一段、也不掉速。
-    const float phase = flow_phase + static_cast<float>(i) * 0.11f;
-    const float head = phase - std::floor(phase);
-    constexpr float kTailLen = 0.18f;
-    for (int s = 0; s + 1 < edge.count; ++s) {
-      float d = head - (edge.lengths[s] / edge.total);  // 当前段相对光头的距离（负=在光头之后）
-      d -= std::floor(d);
-      if (d > 1.0f - kTailLen) {
-        const float k = (d - (1.0f - kTailLen)) / kTailLen;  // 0..1，越接近光头越亮
-        fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.10f + 0.55f * k) * a)));
-        target->DrawLine(edge.points[s], edge.points[s + 1], fmt.brush, 1.9f);
+    if (flow_head >= 0.0f && active_edge == i) {
+      for (int s = 0; s + 1 < edge.count; ++s) {
+        const float behind = flow_head - (edge.lengths[s] / edge.total);  // >0 = 这段在光头后面
+        if (behind >= 0.0f && behind <= kTailLen) {
+          const float k = 1.0f - behind / kTailLen;  // 0..1，越接近光头越亮
+          fmt.brush->SetColor(ui::Color(ui::Fade(ui::kAccent, (0.10f + 0.55f * k) * a)));
+          target->DrawLine(edge.points[s], edge.points[s + 1], fmt.brush, 1.9f);
+        }
+      }
+      // 光头再点一颗小圆点：18% 的尾巴在长边上只是一小段，轮动时不够扎眼。
+      if (flow_head <= 1.0f) {
+        for (int s = 0; s + 1 < edge.count; ++s) {
+          const float a0 = edge.lengths[s] / edge.total;
+          const float a1 = edge.lengths[s + 1] / edge.total;
+          if (flow_head >= a0 && flow_head <= a1) {
+            const float span = a1 - a0;
+            const float t = span > 0.0001f ? (flow_head - a0) / span : 0.0f;
+            const D2D1_POINT_2F p = D2D1::Point2F(
+                edge.points[s].x + (edge.points[s + 1].x - edge.points[s].x) * t,
+                edge.points[s].y + (edge.points[s + 1].y - edge.points[s].y) * t);
+            fmt.brush->SetColor(ui::Color(ui::Fade(0xFFFFFFFF, 0.80f * a)));
+            target->FillEllipse(D2D1::Ellipse(p, 2.2f, 2.2f), fmt.brush);
+            break;
+          }
+        }
       }
     }
     // 方向标：一颗很小的 ">"，落在 BuildEdge 选好的位置（同行是中段，
