@@ -7,6 +7,11 @@
 ---
 
 ## 进度
+- 2026-10-25 · **交接能撤回了 + 小条上有了常驻的「交给 AI / 撤回」**（复盘排序里的第 ① 件，用户 m05084「对的 我们按预计推进」）。三件：
+  - **`handoff.cancel`**：`types.ts:122-131` 新意图、`state.ts:444-461` 实现。以前 `offered` 是死胡同（`start` 只有 AI 能发、`return` 要求 `running|review`），真库里 `nd_01m5fjfadd4ht037a7e` 从 **10-22 22:28 挂到 10-25**。撤回只放行 `offered` / `returned`，`running` 给「AI 正在做，要停就等它交回、或者用打回」、`review` 给「AI 已经把活交回来了，要么验收要么打回」、其它给「已经验收过了，交接不用再撤」；放行只把 `handoff` 置 `null`，不动 `status` 与指针。
+  - **迁移表 6×6**：`handoff.test.ts` 加 `'none'` 落点（放行且必须清空），30 格 → **36 格**；另加两条定向用例（撤完能重新 offer 且 `since` 刷新；running/review 撤回必须被拒且原文档 `deepEqual` 不变）。单跑 7 绿。
+  - **两个入口**：原生图里 `H`（`ToggleHandoffForSelected()`；`kWatched` 加 `{'H', 8}`、`was_down[7]`、循环 `< 7`、`WM_KEYDOWN` 补 `case 'H'`、`WM_HOTKEY` 范围 `+9`，页脚两处提示补「H = 交给 AI/撤回」）；网页小条工作档加 `data-dsh-work-handoff` 按钮（看 `doc.pointer` 那颗的 `handoff.state` 换 `交给 AI`/`撤回` 文案，`POST /dsh-work/api/intent`，被拒显示宿主理由）。
+  - 验证：`pnpm test` **176 绿 / 0 失败**、`pnpm typecheck` 干净、原生 619.5 KB、`lib/client.js` 47.7 kB。真机（dev 64001，`x-dsh-work-token`）：①卡了三天的 `offered` 用 `handoff.cancel` 清掉（`seq` 94→95，`status` 仍是 `done`）；②Playwright 点小条「撤回」→ 文案变「交给 AI」（`bar-handoff-before.png` / `bar-handoff-after.png`），journal `{"seq":98,…"handoff.cancel"}`；③节点图连按两下 H → offer(101)/cancel(102)，页脚两种回话（`h-offer.png` / `h-cancel.png`），日志「审阅：交给 AI …」「审阅：撤回交给 AI …」；④对 done 节点按 H 被挡（页脚「这颗已经收尾了，不用再交给 AI」）。为验按键盘借了一颗**临时节点** `nd_probe_handoff`，验完 `plan.remove` 删掉，doc 回到 7 颗、`pointer` 仍是 null（journal 96→103 是这一段）。
 - 2026-10-25 · **节点有了显式「谁来做」；小条把它拆成一个「工作 / 学习」切换**（用户 m04063 第 3 条「ok」+ 最新一句「这块太拥挤了 做个切换的 不要都放一起」）。两件：
   - **执行者字段**：`packages/core/src/types.ts:32` 新增 `export type Executor = 'human' | 'ai' | 'either';`，`WorkNode.executor?: Executor | null`（`null` = 显式撤掉标记，`undefined` = 从来没标过，两者在 UI 上都是「还没定」，但语义不同所以都留着）；新意图 `{ type: 'node.assign'; nodeId; executor }`（`types.ts:120`）在 `state.ts:396-410` 实现，只改这一个字段、不碰 status/handoff；`state.ts:105-111` 的 `validateDoc` 在 load 时也挡脏值。`plan.ts` 的 `PlanSpec.executor` 让拆解时就分得清的归属直接落下。**没把「没标」当成「人做」**：`undefined` 一律按「还没定」处理。
   - **原生分工页**（`review.h` 的 `kBuckets`）从「按 handoff 分五档」改成「按 executor 分四摞」——`AI 做`（里面再缀 `· 正在做 / · 等你验收 / · 等开工 / · 退回来了`）、`人做`、`都可以`、`还没定谁做`；`main.cpp:1740` 多读一个 `executor` 字段。
@@ -144,13 +149,14 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- **2026-10-25 本轮交付：节点「执行者」字段 + 小条改成一个「工作 / 学习」切换。** 用户 m04063 第 3 条（「ok」）和第二句「这块太拥挤了 做个切换的 不要都放一起」都落地了（细节见进度第一条）。
-- **当前任务 = 只剩 ④ Pulse 节拍时钟 + 状态矩阵**（用户 m04063 第 4 条「执行」）。它是 `docs/NEXT.md` 2026-10-25 交接里的待办 3，全仓只有一行、没有形态规格，属「要用户定形态」的设计活——按红线停在「等用户决定」。**开工前必须先问他两件事**：节拍指示长什么样（小条上跳动的点？图里一条呼吸光？），状态矩阵是「节点 × 状态」的网格还是按人/AI 分栏的看板。
+- **2026-10-25 本轮交付：交接可撤回（core + 迁移表 6×6）+ 原生 `H` 键 + 网页小条常驻「交给 AI / 撤回」。** 复盘排序第 ① 件，用户 m05084「对的 我们按预计推进」；顺带把真库里挂了三天的那颗 `offered` 清掉（细节见进度第一条）。
+- **当前任务 = 复盘排序的第 ② 件：建议按节点缓存 + 一次会话 token 可见**（P2 缺项）。实测依据：`.dsh-work/journal.ndjson` 里 `node.advise` **20 次全是 ai 触发**，同一节点被重复建议（`…add6gs0msqzr` 4 次、`…add0` 3 次、`…add2` / `…add4` 各 2 次），直接违反 `ROADMAP` P2「建议按节点缓存、同节点不重复计费」。做法建议：`advise` 落库前先比对 `node.advice.text`（相同就不发、只刷新 `updatedAt` 之外的东西都不动），再在网页/原生上把「本次会话花了多少 token」显出来（宿主已有 `tokens` 字段就复用，没有就加）。
 - 队列里其它候选（都已交付或已定案，别再重做）：
-  - ① ~~发不发 npm~~ —— **已定：不发**（市场走 Release `tarball:`）。
-  - ② ~~学习页搜索 / 追问~~ —— **已交付**。
-  - ③ ~~节点加显式「执行者」~~ —— **已交付（本轮）**。
-  - ⑤ ~~恢复 `kMinFitZoom`~~ —— **已交付**。
+  - ① ~~交接可撤回 + 常驻入口~~ —— **已交付（本轮）**。
+  - ③ 节点产物落盘 `nodes/<id>.md`，`done` 必须能指到产物（复盘排序第 ③）。
+  - ④ 截图留存策略（默认 7 天清理 + 面板明示路径；实测 `.dsh/dsh-work/captures` 已 63 个文件 / 2.9 MB）。
+  - ⑤ Pulse 节拍时钟 + 状态矩阵（等用户定形态，见「等用户决定」）。
+  - ② ~~学习页搜索 / 追问~~、③ ~~节点加显式「执行者」~~、⑤ ~~恢复 `kMinFitZoom`~~、~~发不发 npm~~ —— **都已交付或已定案**。
 - **新增的一小步（可选，等下轮）**：执行者字段目前只能通过 `POST /dsh-work/api/intent` 或拆解时的 `PlanSpec.executor` 写入，**界面里还没有「标归属」的按钮**（原生分工页是只读展示）。要做的话，最省的位置是原生节点图上加右键菜单第二项或面板行尾一枚小标签；等用户点头再动。
 - 阶段：**P2 · AI 在环**。**队列里的活真的空了**：2026-10-24 这轮又按「已知的坑」最后一条，把自动化提示语里的四件（入口 / 直角折线 / 加宽 / 讲讲它）逐条对过源码——入口 `packages/plugin/src/client/index.tsx:297`（`data-dsh-work-graph="1"`）+ `:326`（「打开节点图」）、直角折线 `native/shell/src/review.h:473`（`BuildEdge`，`:569` 调用）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill `review.h:723-748` + 页脚提示 `review.h:804`；`git log` 里 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 全在。`pnpm test` 130 绿、`pnpm typecheck` 干净、工作区干净、HEAD `e72a533`。**别再把这些重做一遍。**
 - 2026-10-25 本轮已把「2026-10-25 交接」的待办 1（面板底部事件流一行不显示）修好并真机验完：`DrawFeed` 改不透明暗色 + 删掉重复死代码（见进度第一条）。交接里另两条：待办 2（网页按钮压标题栏）已被 `f7d2c3e` 改成 `top:52` 解决；待办 3（Pulse 节拍时钟 + 状态矩阵）还没人接。
@@ -328,6 +334,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 队列（做完一个换一个，不要并行）
 
+- ✅ 交接可撤回（2026-10-25，复盘第 ① 件）：`handoff.cancel` + 迁移表 6×6 + 原生 `H` 键 + 网页小条常驻「交给 AI / 撤回」；真机把挂了三天的那颗 `offered` 清掉（见进度第一条）
 - ✅ 交接五态迁移表（2026-10-25，`ROADMAP` P2 那条）：`packages/core/src/handoff.test.ts` 6×5 全称表；顺手堵掉「已 done/skipped 的节点还能被提议交接」的洞（`state.ts` 的 `handoff.offer` 先按 status 挡），真机 409 复核（见进度第一条）
 
 - ✅ 面板底部「事件流」一行从来不显示：根因是分层窗口（`UpdateLayeredWindow` + `ULW_ALPHA`）把 D2D 的预乘 alpha 又乘了一次，那行用的是 0.4 的半透明灰 → 改成不透明暗色 `Fade(kTextDim, alpha)`，真机左下角可见（见进度第一条）
@@ -401,6 +408,11 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 ---
 
 ## 已知的坑（踩过一次就别再踩）
+
+- **改了 `packages/core/**` 只跑 `build-client.mjs` 不够**：意图是在**插件宿主包**里编译的，必须 `node scripts/build-plugin.mjs` 再重启宿主，否则新意图会得到 `{"applied":false,"reason":"未知意图 handoff.cancel"}`（这一轮先踩了一次，看着像 core 没生效）。
+- **探针 `.ps1` 必须纯 ASCII**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8 按 ANSI 读，中文注释会截断字符串、整个脚本报 `The string is missing the terminator`。要么英文注释，要么用 `pwsh`。
+- **按键注入要注意 220ms 去重**：`ReviewKey()` 对同一个键 220ms 内只认一次（防 WM_KEYDOWN + 全局轮询双触发）；探针连按 ↓ 选行时每次间隔要 > 220ms，否则只走一格。
+- **`node.focus` 拒绝 done/skipped**（「节点 … 已收尾，不能成为当前节点」）：想在小条上验「交给 AI / 撤回」得先有一颗未收尾的当前任务；实在没有就临时 `plan.add` 一颗探针节点、验完 `plan.remove`，别留在用户库里。
 
 - **`/dsh-work/api/*` 的令牌头是 `x-dsh-work-token`，不是 `Authorization: Bearer`**（`index.ts:704` 的 `hasCompanionToken` 只读这个头）。用 Bearer 送 `endpoint.json` 里的 token 会得到 401 `{"error":"forbidden"}`，看着像「令牌过期」，其实是头名不对——这一轮先踩了一次。另外伴随层 `/api/state` 轮询会把自己标成「在线」，探针别拿它当心跳去判断宿主状态。
 - **「没标」不等于「人做」**：`WorkNode.executor` 的 `undefined`（从来没标）和 `null`（显式撤掉）都要按「还没定」渲染；写成默认 `human` 会让用户以为自己被派了活。原生 `kBuckets` 里 AI 那摞还要把「已派出去但没标归属」的节点算进来（`handoff` 非空），否则历史数据会全部落进「还没定」。

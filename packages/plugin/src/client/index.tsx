@@ -33,8 +33,10 @@ const POLL_MS = 3000;
  *  两者都用相对路径解析到插件自注册的 /dsh-work 前缀，不硬编码端口。 */
 const STATE_URL = "/dsh-work/api/state";
 const OPEN_URL = "/dsh-work/api/ui/open";
+const INTENT_URL = "/dsh-work/api/intent";
 
 type NodeStatus = "todo" | "active" | "done" | "skipped";
+type HandoffState = "offered" | "running" | "review" | "accepted" | "returned";
 
 interface NodeView {
   id: string;
@@ -46,6 +48,11 @@ interface NodeView {
   /** 学习页用：写给人看的解释与验收标准（宿主那边叫 detail / acceptance）。 */
   detail?: string;
   acceptance?: string;
+  /**
+   * 交接状态。`/api/state` 直接把宿主那份 doc 原样吐出来，所以这里能读到；
+   * 缺省 = 从没交给过 AI（不是 "人做"——谁来做是 `executor` 那件事）。
+   */
+  handoff?: { state: HandoffState } | null;
 }
 
 interface DocView {
@@ -199,6 +206,16 @@ function SplitIcon(): React.ReactElement {
     </svg>
   );
 }
+/** 交给 AI：一个小人把箭头递出去（撤回时同一个图标，靠文案区分方向）。 */
+function HandoffIcon(): React.ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="4.2" cy="4.6" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M1.6 13.4c0-1.9 1.2-3.2 2.6-3.2s2.6 1.3 2.6 3.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M8.6 8h5.2M11.4 5.6 14 8l-2.6 2.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 /**
  * 小条的两种工作状态：工作（推进任务）与学习（读任务）。
@@ -309,6 +326,26 @@ function Bar(): React.ReactElement {
   const counted = nodes.filter((n) => n.status !== "skipped");
   const done = counted.filter((n) => n.status === "done").length;
   const current = doc?.pointer ? doc.nodes[doc.pointer] : undefined;
+  // 「交给 AI」是常驻入口：用户原话是「插件里没地方点『交给 AI』」。
+  // 只落在这一颗上（指针那颗），四档文案跟着交接状态走；running / review 不给点，
+  // 因为那两档停下来要走打回或验收，撤回会把 AI 正在做/刚交回的活抹掉。
+  const handoff = current?.handoff?.state;
+  const handoffAvailable =
+    current !== undefined &&
+    (handoff === undefined || handoff === null || handoff === "offered" || handoff === "returned");
+  const cancelling = handoff === "offered";
+  const handoffLabel = cancelling ? "撤回" : "交给 AI";
+  const handoffHint =
+    handoff === "offered"
+      ? "撤回：把这颗从「等 AI 接手」退回来，还是人做"
+      : handoff === "returned"
+        ? "再交一次给 AI（上一轮它退回来了）"
+        : handoff === "running"
+          ? "AI 正在做：要停就去节点图里打回"
+          : handoff === "review"
+            ? "AI 已经交回了：去节点图验收或打回"
+            : "交给 AI：挂上「等它接手」，不影响你继续看";
+  const [handing, setHanding] = useState(false);
   // doc 还没到手时 nodeCount 用 null：置灰但不说成「没有任务」
   const graph = graphEntry(doc ? nodes.length : null);
 
@@ -342,10 +379,38 @@ function Bar(): React.ReactElement {
     }
   };
 
+  /**
+   * 交给 AI / 撤回。只发意图，不本地改状态——和节点图里的 H 键同一条路：
+   * 交接的权威在宿主，改完下一轮轮询就自己变过来了。
+   */
+  const toggleHandoff = async (): Promise<void> => {
+    if (!current || handing) return;
+    const nodeId = current.id;
+    const type = cancelling ? "handoff.cancel" : "handoff.offer";
+    setHanding(true);
+    try {
+      const res = await fetch(INTENT_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ intent: { type, nodeId }, by: "human" }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { applied?: boolean; reason?: string };
+      if (data.applied === true) {
+        setNote(cancelling ? "已撤回 · 这颗又归人做了" : "已交给 AI · 等它接手（再点一次可撤回）");
+      } else {
+        setNote(data.reason ?? `没交出去（HTTP ${res.status}）`);
+      }
+    } catch {
+      setNote("宿主没应答：这颗还在人这边");
+    } finally {
+      setHanding(false);
+    }
+  };
+
   return (
     <>
-      <style>{`
-        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1), background-color 120ms cubic-bezier(.16,1,.3,1); }
+      <style>{`        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1), background-color 120ms cubic-bezier(.16,1,.3,1); }
         .dshwork-open:hover:not(:disabled) { filter: brightness(1.07); }
         .dshwork-open:active:not(:disabled) { transform: scale(.97); }
         .dshwork-open:focus-visible { outline: 2px solid ${palette.work}; outline-offset: 2px; }
@@ -489,6 +554,21 @@ function Bar(): React.ReactElement {
                 <SplitIcon />
                 分工
               </button>
+              {current !== undefined ? (
+                <button
+                  type="button"
+                  className="dshwork-open dshwork-ghost"
+                  data-dsh-work-handoff={cancelling ? "cancel" : "offer"}
+                  onClick={() => void toggleHandoff()}
+                  disabled={handing || !handoffAvailable}
+                  title={handoffHint}
+                  aria-label={handoffHint}
+                  style={railButtonStyle(handoffAvailable && !handing, palette.work, palette)}
+                >
+                  <HandoffIcon />
+                  {handoffLabel}
+                </button>
+              ) : null}
             </>
           ) : (
             <>

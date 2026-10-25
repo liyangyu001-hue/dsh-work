@@ -441,6 +441,24 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
       break;
     }
 
+    case 'handoff.cancel': {
+      const target = requireNode(intent.nodeId);
+      if (!target) return fail(`节点 ${intent.nodeId} 不存在`);
+      const state = target.handoff?.state;
+      // 没有交接、或已经走到「有人在搞」的档位，都不能靠撤回脱身 ——
+      // 那样会把 AI 正在做 / 刚交回的活直接抹掉，人就没得验收也没得打回。
+      if (state === undefined) return fail(`节点 ${intent.nodeId} 还没交给 AI，没有可撤的`);
+      if (state !== 'offered' && state !== 'returned') {
+        const why =
+          state === 'running' ? 'AI 正在做，要停就等它交回、或者用打回'
+          : state === 'review' ? 'AI 已经把活交回来了，要么验收要么打回'
+          : '已经验收过了，交接不用再撤';
+        return fail(`节点 ${intent.nodeId} ${why}（现在是 ${state}）`);
+      }
+      withNode(draft, { ...target, handoff: null, updatedAt: ctx.at });
+      break;
+    }
+
     case 'handoff.start': {
       const target = requireNode(intent.nodeId);
       if (!target) return fail(`节点 ${intent.nodeId} 不存在`);

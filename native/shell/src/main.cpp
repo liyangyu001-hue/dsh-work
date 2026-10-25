@@ -282,6 +282,12 @@ void SetReviewHint(const std::wstring& text, ULONGLONG ms = 2600);
 void TryFocusRow(int index);
 /** 右键：把第 index 行标记完成（定义在 ShowReviewDoc 之后）。 */
 void CompleteRow(int index);
+/**
+ * H：把选中那颗交给 AI / 撤回交给 AI（定义在 ShowReviewDoc 之后）。
+ *
+ * offered 曾经是死胡同 —— 真库里那颗点错了的节点在「等 AI 接手」上挂了三天。
+ */
+void ToggleHandoffForSelected();
 /** 左键：把第 index 行的验收/详情就地铺成讲解卡（不请求模型，定义同处）。 */
 void ShowNodeDetail(int index);
 /** 本地详解开着时按最新行内容刷一遍卡片（定义在 ShowNodeDetail 之后）。 */
@@ -670,9 +676,9 @@ void TickReviewAnim() {
   // 截图热键占着（capture.h 的 RegisterHotKey），在图里按会把框选层打出来。
   struct Watch { UINT vk; int code; };
   static const Watch kWatched[] = {{VK_UP, 0},  {VK_DOWN, 1}, {VK_RETURN, 2},
-                                   {VK_BACK, 3}, {VK_ESCAPE, 4}, {'L', 7}};
-  static bool was_down[6] = {};
-  for (int i = 0; i < 6; ++i) {
+                                   {VK_BACK, 3}, {VK_ESCAPE, 4}, {'L', 7}, {'H', 8}};
+  static bool was_down[7] = {};
+  for (int i = 0; i < 7; ++i) {
     const bool down = (GetAsyncKeyState(static_cast<int>(kWatched[i].vk)) & 0x8000) != 0;
     if (down && !was_down[i]) {
       const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1236,7 +1242,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       return 0;
     case WM_HOTKEY:
       // 审阅窗自己的一组键，先认掉，别落到下面的全局分支里
-      if (wparam >= static_cast<WPARAM>(kReviewKeyBase) && wparam < static_cast<WPARAM>(kReviewKeyBase + 8)) {
+      if (wparam >= static_cast<WPARAM>(kReviewKeyBase) && wparam < static_cast<WPARAM>(kReviewKeyBase + 9)) {
         ReviewKey(static_cast<int>(wparam) - kReviewKeyBase);
         return 0;
       }
@@ -2027,6 +2033,9 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
       case VK_ESCAPE:
         ReviewKey(4);
+        return 0;
+      case 'H':
+        ReviewKey(8);
         return 0;
       default:
         break;
@@ -2861,6 +2870,48 @@ void CompleteRow(int index) {
 }
 
 /**
+ * H = 把这颗交给 AI，或撤回交给 AI。
+ *
+ * 为什么不放在面板上：面板只有 132 DIP 高，右列已经被交接状态那一行占着；
+ * 图上按一下 H 是最省的动作，也刚好和 L（学习栏）配成一组。
+ * 交接只落「意愿」，不启动执行 —— 真正动手的是宿主那一侧，和右键标完成同一条路：
+ * 只发意图，圆点与右列怎么变交给下一次轮询。
+ */
+void ToggleHandoffForSelected() {
+  if (!g_review_read_only) {
+    // 草稿里的节点还没落库，宿主认不出这些 id（同 CompleteRow 的理由）。
+    SetReviewHint(L"草稿里的节点还没落库，先收下再交给 AI");
+    return;
+  }
+  const int index = g_review_model.selected;
+  if (index < 0 || static_cast<size_t>(index) >= g_review_model.rows.size()) {
+    SetReviewHint(L"先选中一颗再按 H");
+    return;
+  }
+  const dshwork::review::Row& row = g_review_model.rows[static_cast<size_t>(index)];
+  if (row.status == "done" || row.status == "skipped") {
+    SetReviewHint(L"这颗已经收尾了，不用再交给 AI");
+    return;
+  }
+  const std::string id = row.id;
+  if (row.handoff.empty() || row.handoff == "returned") {
+    LogToFile("审阅：交给 AI " + id);
+    SetReviewHint(L"已交给 AI · 等它接手（再按 H 可撤回）");
+    std::thread([id]() { PostIntent("handoff.offer", id); }).detach();
+    return;
+  }
+  if (row.handoff == "offered") {
+    LogToFile("审阅：撤回交给 AI " + id);
+    SetReviewHint(L"已撤回 · 这颗又归人做了");
+    std::thread([id]() { PostIntent("handoff.cancel", id); }).detach();
+    return;
+  }
+  // running / review：停不下来是设计如此，只能打回或验收。
+  SetReviewHint(row.handoff == "running" ? L"AI 正在做：要停就用打回，不能凭空撤"
+                                         : L"AI 已经交回：要么验收，要么打回");
+}
+
+/**
  * 把一颗节点的「验收 + 详情」灌进卡片（纯字段，不排版、不重画）。
  *
  * 抽出来是因为两处都要用：左键点开时灌一次；轮询发现这颗状态变了（比如刚被
@@ -2994,7 +3045,7 @@ void EnsureReviewWindow() {
   SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
 }
 
-/** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc */
+/** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc · 7 L（学习栏）· 8 H（交给 AI / 撤回） */
 void ReviewKey(int which) {
   if (!g_review_open) return;
   // 一次按下可能被投递两遍：窗口有焦点时 WM_KEYDOWN 来一次，动画定时器里的
@@ -3013,6 +3064,12 @@ void ReviewKey(int which) {
     // 全局截图的注册热键（capture.h 的 RegisterHotKey(MOD_NOREPEAT, VK_TAB)）：
     // 2026-10-25 实测，在图里按一下 Tab 会跳出框选层，学习和截图打架。
     // 于是改由 L 承担（见下面 which == 7）。
+    return;
+  }
+  if (which == 8) {
+    // H = Handoff：把这颗交给 AI；已经交出去（还没人接）就撤回。
+    // 这一条是补死胡同用的：以前只能交、不能撤，人手一抖这颗就永远挂着。
+    ToggleHandoffForSelected();
     return;
   }
   if (which == 7) {

@@ -1,5 +1,13 @@
 # 变更日志
 
+## 2026-10-25 · 交接能撤回了，小条上多了常驻的「交给 AI / 撤回」
+
+- **`handoff.cancel`**（`packages/core/src/types.ts` + `state.ts`）：以前 `offered` 是个死胡同 —— `start` 只有 AI 能发、`return` 又要求 `running|review`，人手一抖点了「交给 AI」，这颗节点就永远挂着（真库里那颗 `nd_01m5fjfadd4ht037a7e` 从 10-22 挂了三天）。新意图只放行 `offered` / `returned` 两档：`running` 要打回、`review` 要验收或打回，撤回不能把 AI 正在做或刚交回的活抹掉。撤回只清交接，不动 `status` 与指针。
+- **迁移表扩成 6×6**（`packages/core/src/handoff.test.ts`）：新增 `'none'` 落点（= 放行且交接必须被清空），`offered.cancel` / `returned.cancel` 必须落到 `none`，其余四档必须拒绝。另加两条定向用例：「撤回是 offered 的出口：撤完能重新交出去，且不用绕别的状态」「AI 真在做的活不能靠撤回抹掉」。
+- **原生节点图 `H` 键**（`native/shell/src/main.cpp` 的 `ToggleHandoffForSelected()`）：没交接或被退回 → `handoff.offer`；`offered` → `handoff.cancel`；`running`/`review` 给一句人话让人去打回或验收；草稿态与已收尾的节点直接挡。`kWatched` 加 `{'H', 8}`、`WM_KEYDOWN` 补 `case 'H'`、`WM_HOTKEY` 范围放宽到 `+ 9`，页脚提示补「H = 交给 AI/撤回」。
+- **网页小条常驻按钮**（`packages/plugin/src/client/index.tsx`）：工作档在「分工」右边多一颗 `data-dsh-work-handoff` 的按钮，看当前任务那颗的交接状态换文案（`交给 AI` ↔ `撤回`），动作走 `POST /dsh-work/api/intent`，被拒时把宿主那句理由原样显示。
+- 验收：`pnpm test` **176 绿 / 0 失败**、`pnpm typecheck` 干净、原生 619.5 KB、`lib/client.js` 47.7 kB。真机（dev 64001）：卡了三天的 `offered` 用 `handoff.cancel` 清掉（`seq` 94→95，`status` 仍是 `done`）；Playwright 点小条「撤回」→ 文案变回「交给 AI」（`bar-handoff-before.png` / `bar-handoff-after.png`），journal 记 `{"seq":98,"intent":{"type":"handoff.cancel"}}`；节点图里连按两下 H → `handoff.offer`(101) 再 `handoff.cancel`(102)，页脚「已交给 AI · 等它接手（再按 H 可撤回）」→「已撤回 · 这颗又归人做了」（`h-offer.png` / `h-cancel.png`）；对已收尾的节点按 H 被挡，页脚「这颗已经收尾了，不用再交给 AI」。
+
 ## 2026-10-25 · 节点有了显式「谁来做」；小条把它拆成一个「工作 / 学习」切换
 
 - **执行者字段**（`packages/core/src/types.ts`）：`WorkNode.executor?: 'human' | 'ai' | 'either' | null`。以前「哪部分 AI 做、哪部分人做」只能靠 `handoff` 在不在去推——那是过程痕迹不是意图，一颗没派的节点和一颗明确要人做的节点长得一模一样。现在三态 + 「还没标」，`null` 表示撤掉标记。新意图 `node.assign`（`state.ts`）只改这一个字段，不碰状态、不碰交接；`validateDoc` 在 load 时也挡脏值（拼错的执行者会指名报出来）。拆解时能定的归属走 `PlanSpec.executor` 直接落下。

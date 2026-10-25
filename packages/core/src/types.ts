@@ -120,6 +120,14 @@ export type Intent =
   | { type: 'node.assign'; nodeId: NodeId; executor: Executor | null }
   | { type: 'node.evidence'; nodeId: NodeId; evidence: Evidence }
   | { type: 'handoff.offer'; nodeId: NodeId }
+  /**
+   * 撤回：把「已经交给 AI 但还没人接」的节点收回来，交接清空。
+   *
+   * 没有这一条时 `offered` 是个死胡同 —— `start` 只有 AI 能发、`return` 又要求
+   * `running|review`，人手一抖点了「交给 AI」，这颗节点就永远挂着（真库里挂过三天）。
+   * 只允许从 `offered` / `returned` 撤回；`running` 要走打回、`review` 要验收或打回。
+   */
+  | { type: 'handoff.cancel'; nodeId: NodeId }
   | { type: 'handoff.start'; nodeId: NodeId; agentSessionId: string }
   | { type: 'handoff.submit'; nodeId: NodeId; note?: string }
   | { type: 'handoff.accept'; nodeId: NodeId }

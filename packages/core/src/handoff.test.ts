@@ -54,6 +54,7 @@ const start = (): Intent => ({ type: 'handoff.start', nodeId: NODE, agentSession
 const submit = (): Intent => ({ type: 'handoff.submit', nodeId: NODE, note: '写完了' });
 const accept = (): Intent => ({ type: 'handoff.accept', nodeId: NODE });
 const back = (): Intent => ({ type: 'handoff.return', nodeId: NODE, reason: '方向不对' });
+const cancel = (): Intent => ({ type: 'handoff.cancel', nodeId: NODE });
 
 /** 把种子推进到指定起点状态。 */
 const toStage: Record<Stage, (doc: WorkDoc) => WorkDoc> = {
@@ -66,22 +67,24 @@ const toStage: Record<Stage, (doc: WorkDoc) => WorkDoc> = {
 };
 
 /**
- * 设计表：每个起点状态下，五个意图各自的落点。
- * `null` = 必须被拒绝；字符串 = 必须成功且落到该状态。
+ * 设计表：每个起点状态下，六个意图各自的落点。
+ * `null` = 必须被拒绝；字符串 = 必须成功且落到该状态；`'none'` = 必须成功且交接被清空。
  */
-const TABLE: Record<Stage, Record<'offer' | 'start' | 'submit' | 'accept' | 'return', HandoffState | null>> = {
-  none: { offer: 'offered', start: null, submit: null, accept: null, return: null },
-  offered: { offer: 'offered', start: 'running', submit: null, accept: null, return: null },
-  running: { offer: null, start: null, submit: 'review', accept: null, return: 'returned' },
-  review: { offer: null, start: null, submit: null, accept: 'accepted', return: 'returned' },
-  accepted: { offer: null, start: null, submit: null, accept: null, return: null },
-  returned: { offer: 'offered', start: null, submit: null, accept: null, return: null },
+type Landing = HandoffState | 'none' | null;
+
+const TABLE: Record<Stage, Record<'offer' | 'start' | 'submit' | 'accept' | 'return' | 'cancel', Landing>> = {
+  none: { offer: 'offered', start: null, submit: null, accept: null, return: null, cancel: null },
+  offered: { offer: 'offered', start: 'running', submit: null, accept: null, return: null, cancel: 'none' },
+  running: { offer: null, start: null, submit: 'review', accept: null, return: 'returned', cancel: null },
+  review: { offer: null, start: null, submit: null, accept: 'accepted', return: 'returned', cancel: null },
+  accepted: { offer: null, start: null, submit: null, accept: null, return: null, cancel: null },
+  returned: { offer: 'offered', start: null, submit: null, accept: null, return: null, cancel: 'none' },
 };
 
 // `return` 是关键字，只能写成「键名: 引用」，不能简写。
-const INTENTS = { offer, start, submit, accept, return: back } as const;
+const INTENTS = { offer, start, submit, accept, return: back, cancel } as const;
 
-test('交接迁移表：6 个起点 × 5 个意图逐格对账', () => {
+test('交接迁移表：6 个起点 × 6 个意图逐格对账', () => {
   for (const stage of Object.keys(TABLE) as Stage[]) {
     for (const name of Object.keys(INTENTS) as (keyof typeof INTENTS)[]) {
       const before = toStage[stage](seed());
@@ -99,7 +102,11 @@ test('交接迁移表：6 个起点 × 5 个意图逐格对账', () => {
       }
 
       assert.ok(result.ok, `${label} 应该放行：${result.ok ? '' : result.reason}`);
-      assert.equal(result.doc.nodes[NODE]?.handoff?.state, expected, `${label} 落点状态不对`);
+      if (expected === 'none') {
+        assert.equal(result.doc.nodes[NODE]?.handoff, null, `${label} 撤回后交接必须清空`);
+      } else {
+        assert.equal(result.doc.nodes[NODE]?.handoff?.state, expected, `${label} 落点状态不对`);
+      }
       assert.equal(validateDoc(result.doc), null, `${label} 之后文档不合法`);
     }
   }
@@ -146,4 +153,28 @@ test('验收之后交接状态停在 accepted，不会被下一次提议悄悄�
   assert.equal(doc.nodes[NODE]?.handoff?.state, 'accepted');
   const result = apply(doc, offer(), ctx);
   assert.equal(result.ok, false, '已验收（节点已完成）的交接不能再提议');
+});
+
+test('撤回是 offered 的出口：撤完能重新交出去，且不用绕别的状态', () => {
+  // 真库里那颗从 10-22 起挂在 offered 的节点，就是因为没有这条路。
+  const offered = toStage.offered(seed());
+  const cleared = must(offered, cancel());
+  assert.equal(cleared.nodes[NODE]?.handoff, null, '撤回后交接应当清空，而不是留在某个状态');
+  assert.equal(cleared.nodes[NODE]?.status, offered.nodes[NODE]?.status, '撤回只动交接，不动节点状态');
+
+  const again = must(cleared, offer(), NOW + 2_000);
+  assert.equal(again.nodes[NODE]?.handoff?.state, 'offered', '撤回之后应该能重新提议');
+  assert.equal(again.nodes[NODE]?.handoff?.since, NOW + 2_000, '重新提议要记新的 since');
+});
+
+test('AI 真在做的活不能靠撤回抹掉', () => {
+  // running 要打回、review 要验收或打回 —— 撤回只负责「还没人接」的那一档。
+  for (const stage of ['running', 'review'] as const) {
+    const doc = toStage[stage](seed());
+    const snapshot = structuredClone(doc);
+    const result = apply(doc, cancel(), ctx);
+    assert.equal(result.ok, false, `${stage} 不能撤回`);
+    assert.match(result.ok ? '' : result.reason, /打回|验收/);
+    assert.deepEqual(doc, snapshot, `${stage} 撤回被拒后原文档必须原样`);
+  }
 });
