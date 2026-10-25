@@ -66,6 +66,8 @@ export interface StatsApi {
     usage: UsageSnapshot;
     /** 一句话版本，界面直接显示，省得两边各写一套格式化。 */
     line: string;
+    /** 截图放在哪、保留几天。界面拿它说一句人话。 */
+    captures?: { dir: string; keepDays: number; line: string };
   }>;
 }
 
@@ -312,8 +314,9 @@ export function createHttpHandler(options: HttpOptions) {
         return;
       }
       try {
-        const { usage, line } = await options.stats.read();
-        sendJson(res, 200, { ok: true, usage, line });
+        const { usage, line, captures } = await options.stats.read();
+        // captures 只带「放哪、留几天」的一句话，不带文件列表——界面不需要，也不该到处爬目录。
+        sendJson(res, 200, captures === undefined ? { ok: true, usage, line } : { ok: true, usage, line, captures });
       } catch (error) {
         sendJson(res, 200, {
           ok: false,

@@ -1,5 +1,12 @@
 # 变更日志
 
+## 2026-10-26 · 截图按 7 天清、并且告诉你放在哪
+
+- **问题**：`%USERPROFILE%\.dsh\dsh-work\captures` 累计 64 个文件 / 2.89 MB，`docs/GUIDE.md` 的风险台账写着「默认 7 天清理」，代码里没有。
+- **清理**（新增 `packages/plugin/src/captures.ts`）：`captureDir()`（与原生 `capture.h:186` 同一条路径，`DSH_WORK_CAPTURES_DIR` 可覆盖）、`sweepCaptures(dir, keepDays, now)`、`describeCaptures()`。规则写死在代码里：**只删本插件命名的文件**（`yyyyMMdd-HHmmss-mmm.png` 与 `.tmp-…-N.png`）、按 **mtime** 判断（不解析文件名）、`keepDays <= 0` 永不删、删不掉就跳过不抛错。
+- **接线**：`index.ts` 在任务库打开后跑一次清扫并打日志；`PluginConfig.captureKeepDays` 默认 7；`/api/stats` 多带 `captures: { dir, keepDays, line }`；学习页「档案」区块多一行 `data-dsh-work-captures`（截图放哪、保留几天、现在几张）。
+- 验收：`pnpm test` **205 绿 / 0 失败**（新增 `captures.test.ts` 6 条）、`pnpm typecheck` 干净。真机（dev 64001 + `DSH_WORK_CAPTURES_DIR` 指向夹具目录，**没动真图**）：放 4 个文件（两张 30 天前的编号图、一张今天的、一张别人的 `my-notes.png`）→ 宿主启动后日志「截图存在 …（保留 7 天，现在 1 张 / 2 KB，这次清掉 2 张）」，目录里只剩今天那张与别人的那张；`GET /api/stats` 的 `captures.line` 与学习页那一行一致（`study-captures.png`），console 无错误。
+
 ## 2026-10-25 · 做完的事现在能点开看到了（节点产物 `nodes/<id>.md`）
 
 - **问题**：真库 7 颗节点全是 `done`，`evidence` 全空——「做完了」在库里没有任何可点开的东西，任务库当不了档案用。

@@ -27,6 +27,7 @@ import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviceSignature, adviseNode, cachedAdvice } from './advise.ts';
 import { describeUsage, usageMeter } from './usage.ts';
+import { DEFAULT_CAPTURE_KEEP_DAYS, captureDir, describeCaptures, sweepCaptures } from './captures.ts';
 import { learnNode } from './learning.ts';
 import { askNode } from './chat.ts';
 import { artifactRelPath, ensureArtifactAt, readArtifact } from './artifact.ts';
@@ -57,6 +58,13 @@ const DEFAULT_MODEL = 'deepseek-v4-flash';
 export interface PluginConfig {
   /** 工作区根目录。缺省用宿主进程的 cwd（即 DSH 当前工作区）。 */
   root?: string;
+  /**
+   * 截图保留天数，默认 7；`0` = 永不自动删。
+   *
+   * 截图存在 `%USERPROFILE%\.dsh\dsh-work\captures`，一整屏 PNG 约 45 KB，忙起来
+   * 一天几十张——宿主启动时清一次比让用户自己去翻目录强。
+   */
+  captureKeepDays?: number;
   /** 是否把发现文件写给伴随层。默认 true。 */
   publishEndpoint?: boolean;
   /**
@@ -135,6 +143,21 @@ export function apply(ctx: any, config?: PluginConfig): void {
       }）`,
     );
     const store = await WorkStore.open({ root });
+    // 截图留存：截图是整屏 PNG，一天几张到几十张；宿主每次启动清一次 7 天前的。
+    // 只删本插件命名的文件、只按 mtime 判断、删不掉就算了——清理失败不能影响启动。
+    const captureKeepDays =
+      typeof cfg.captureKeepDays === "number" && Number.isFinite(cfg.captureKeepDays) && cfg.captureKeepDays >= 0
+        ? Math.floor(cfg.captureKeepDays)
+        : DEFAULT_CAPTURE_KEEP_DAYS;
+    const capturesDir = captureDir();
+    let capturesLine = "";
+    try {
+      const swept = await sweepCaptures(capturesDir, captureKeepDays);
+      capturesLine = describeCaptures(capturesDir, captureKeepDays, swept);
+      console.log(`[dsh-work] ${capturesLine}`);
+    } catch (error) {
+      console.log(`[dsh-work] 截图清理没跑成（不影响使用）：${String(error).slice(0, 160)}`);
+    }
     const version = await readVersion();
     // 一次性把宿主实际提供的服务名打进日志。cordis 的 ctx 是代理，
     // 读一个没 inject 的服务会直接抛，所以只能一个个 try。
@@ -615,7 +638,11 @@ export function apply(ctx: any, config?: PluginConfig): void {
     const stats: StatsApi = {
       async read() {
         const usage = usageMeter.snapshot();
-        return { usage, line: describeUsage(usage) };
+        return {
+          usage,
+          line: describeUsage(usage),
+          captures: { dir: capturesDir, keepDays: captureKeepDays, line: capturesLine },
+        };
       },
     };
     // 节点档案：文件在 `.dsh-work/nodes/<id>.md`，指针写进文档的 `artifact`。

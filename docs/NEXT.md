@@ -7,6 +7,12 @@
 ---
 
 ## 进度
+- 2026-10-26 · **截图按 7 天清、而且界面会告诉你它放在哪（复盘排序第 ④ 件）**。实测 `%USERPROFILE%\.dsh\dsh-work\captures` 已 64 个文件 / 2.89 MB，`docs/GUIDE.md` 的风险台账写着「默认 7 天清理」却没实现。
+  - **规则**（`packages/plugin/src/captures.ts`）：只删**本插件命名**的文件（`yyyyMMdd-HHmmss-mmm.png` 与 `.tmp-…-N.png`）、按 **mtime** 判断（不解析文件名，免得把拷进来的旧图当今天）、`keepDays <= 0` 永不删、删不掉就跳过不抛错（清理失败不能让宿主起不来）。目录用 `captureDir()`，与原生 `capture.h:186` 同一条路径；`DSH_WORK_CAPTURES_DIR` 可覆盖（探针/测试靠它不碰真图）。
+  - **接线**：`index.ts` 在任务库打开后跑一次清扫并打一行日志；`PluginConfig.captureKeepDays` 默认 7；`/api/stats` 多带 `captures: { dir, keepDays, line }`；学习页「档案」区块多一行 `data-dsh-work-captures`（「截图存在 …（保留 7 天，现在 N 张 / X KB）」）。
+  - **真机证据**（dev 64001，`DSH_WORK_CAPTURES_DIR` 指向夹具目录，**没碰真图**）：4 个文件（两张 30 天前的编号图、一张今天的、一张别人的 `my-notes.png`）→ 启动日志「截图存在 …（保留 7 天，现在 1 张 / 2 KB，这次清掉 2 张）」，目录里只剩今天那张与别人的那张；`GET /api/stats` 的 `captures.line` 与学习页那一行一致（`study-captures.png`），console 无错误。
+  - 绿门：`pnpm test` **205 绿 / 0 失败**（新增 `captures.test.ts` 6 条）、`pnpm typecheck` 干净、`lib/client.js` 54.9 kB。
+  - **没做的**：真图还没清（真目录仍 64 张）——按新策略下次正常启动会自动删掉 7 天前的那些；要不要现在就手工清一次，等用户一句话。
 - 2026-10-25 · **做完了这件事，现在能点开看到东西了（复盘排序第 ③ 件：节点产物落盘）**。真库 7 颗 `done`、`evidence` 全空——「做完了」在库里没有任何可点开的东西，这是复盘里最刺眼的一条。
   - **数据**：`packages/core/src/types.ts` 新增 `export interface Artifact { path: string; at: number }`（`path` 相对任务库根目录，不写绝对路径），`WorkNode.artifact?: Artifact | null`；`state.ts` 的 `validateDoc` 挡两种脏数据（`path` 空串、`at` 不是数字）。
   - **文件层**：`packages/plugin/src/artifact.ts` —— `nodesDir(root)` / `artifactRelPath(id)`（**校验 id 只允许 `[A-Za-z0-9_-]`**，防 `../` 逃出目录）/ `readArtifact()`（>512 KB 不读正文，只回 `tooLarge`）/ `ensureArtifact()`（不存在才写骨架：标题 + 建档时间 + 要做什么 + 什么算做完 + 过程，**已存在原样返回、绝不覆盖用户手改**）/ `detachArtifact()`。
@@ -173,7 +179,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 ## 当前任务（只做一个，做完就停）
 
 - **2026-10-25 本轮交付：第 ③ 件（节点产物落盘 → 学习页能点开档案）**。细节见进度第一条。
-- **当前任务 = 第 ④ 件：截图留存策略（默认 7 天清理 + 面板明示路径）。** 实测 `%USERPROFILE%\.dsh\dsh-work\captures` 已 63 个文件 / 2.9 MB，而 `docs/GUIDE.md` 的风险台账写着「默认 7 天清理」，代码里没有。
+- **2026-10-26 本轮交付：第 ④ 件（截图 7 天清理 + 界面明示路径）**。细节见进度第一条。
+- **当前任务 = 第 ⑤ 件：Pulse 节拍时钟 + 状态矩阵 —— 卡在「形态要用户定」**（见「等用户决定」里那两条问题：节拍指示画在哪、状态矩阵是网格还是看板）。红线：不擅自拍板。
   - 现状：`%USERPROFILE%\.dsh\dsh-work\captures` 里 63 个文件 / 2.9 MB（最早 10-19、最新 10-24），另有一批 `.tmp-2026…`；没有任何清理代码，也没在任何界面上告诉用户「图存在哪」。
   - 要定的事：清理在**宿主启动时**跑（简单、可预期）还是每次截图后（及时、但多一次 IO）；默认 7 天是否做成配置项（`cfg.captureKeepDays`，0 = 永不删）。
   - 验收标准：跑一次后 7 天前的图真的没了、当天的一张不少；面板/学习页能看到「截图放在哪、保留几天」；单测覆盖「按 mtime 判断、不删今天的、不删不是本插件命名的文件」。
@@ -181,7 +188,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
   - ① ~~交接可撤回 + 常驻入口~~ —— **已交付**。
   - ② ~~建议按节点缓存 + 一次会话 token 可见~~ —— **已交付**。
   - ③ ~~节点产物落盘 `nodes/<id>.md`~~ —— **已交付（本轮）**，原生节点图入口还没做。
-  - ④ 截图留存策略（默认 7 天清理 + 面板明示路径；实测 `.dsh/dsh-work/captures` 已 63 个文件 / 2.9 MB）。
+  - ④ ~~截图留存策略~~ —— **已交付（本轮）**，真目录等你下次正常启动会按 7 天自动清。
   - ⑤ Pulse 节拍时钟 + 状态矩阵（等用户定形态，见「等用户决定」）。
   - ③ ~~节点加显式「执行者」~~、⑤ ~~恢复 `kMinFitZoom`~~、~~发不发 npm~~ —— **都已交付或已定案**。
 - **新增的一小步（可选，等下轮）**：执行者字段目前只能通过 `POST /dsh-work/api/intent` 或拆解时的 `PlanSpec.executor` 写入，**界面里还没有「标归属」的按钮**（原生分工页是只读展示）。要做的话，最省的位置是原生节点图上加右键菜单第二项或面板行尾一枚小标签；等用户点头再动。
@@ -436,6 +443,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 ---
 
 ## 已知的坑（踩过一次就别再踩）
+- **新字段写进了 API 的返回值，却忘了在路由里带出去**：`/api/stats` 第一版只 `sendJson({ ok, usage, line })`，我明明在 `StatsApi.read()` 里加了 `captures`，真机一看客户端拿到的是 `null`。凡是在 `read()`/`handle()` 里新增字段，**顺手改那行 `sendJson(...)`**，再真机请求一次。
 
 - **新接口忘了在 `createHttpHandler({...})` 的 options 里传一句，症状是 503「宿主没有提供 X」**：`/api/artifact` 第一版就这样——路由、handler、注入对象都写了，但 `index.ts` 的 options 漏了 `artifact,`，真机 GET/POST 全是 503。写完新接口**先跑一次真机请求**，别等界面调不通再回头找。
 - **Playwright 探针点不到列表行，往往是那行根本没有 `data-*`**：学习页左列原本是裸 `<button>`，探针一直超时；补 `data-dsh-work-study-row={row.id}` 才稳定。凡是要被探针（或以后的 UI 测试）点到的元素，一律挂 `data-dsh-work-*`。

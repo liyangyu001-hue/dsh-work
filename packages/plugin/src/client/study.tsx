@@ -88,14 +88,19 @@ export function StudyPage(props: {
   // 这一趟会话花了多少：宿主那边记账（usage.ts），这里只显示它给的一句话。
   // 读不到就不显示 —— 别拿字符数瞎折成 token，那是编数字。
   const [spent, setSpent] = useState<string | null>(null);
+  const [capturesNote, setCapturesNote] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
         const res = await fetch(STATS_URL, { credentials: "same-origin" });
         if (!res.ok) return;
-        const body = (await res.json()) as { ok?: boolean; line?: string };
-        if (alive && body.ok === true && typeof body.line === "string") setSpent(body.line);
+        const body = (await res.json()) as { ok?: boolean; line?: string; captures?: { line?: string } };
+        if (alive && body.ok === true && typeof body.line === "string") {
+          setSpent(body.line);
+          const note = body.captures?.line;
+          if (typeof note === "string" && note !== "") setCapturesNote(note);
+        }
       } catch {
         // 用量只是参考信息，取不到就当没有，不要在页面上报错
       }
@@ -403,6 +408,15 @@ export function StudyPage(props: {
 
               <div style={{ marginTop: 22, paddingTop: 14, borderTop: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.08))" }}>
                 <h3 style={{ margin: "0 0 8px", font: `600 12px/1.4 ${FONT}`, color: "var(--dsw-accent, #0a84ff)" }}>档案</h3>
+                {capturesNote === null ? null : (
+                  <p
+                    data-dsh-work-captures="1"
+                    title="这些是伴随层截的整屏图：识别任务树、看图讲解都会用到。宿主每次启动按这个期限清一次。"
+                    style={{ margin: "0 0 10px", fontSize: 11.5, opacity: 0.5, wordBreak: "break-all" }}
+                  >
+                    {capturesNote}
+                  </p>
+                )}
                 <p data-dsh-work-artifact="1" style={{ margin: "0 0 8px", fontSize: 12.5, opacity: 0.7 }}>
                   {artifact === null
                     ? "还没看过这一颗的档案。"
