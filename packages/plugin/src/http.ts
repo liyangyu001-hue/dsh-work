@@ -28,6 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 
 import { lessonFailure, lessonSuccess } from './lesson.ts';
+import { MAX_QUESTION_CHARS, type ChatTurn } from './chat.ts';
 import type { UiBridge, UiOpenTarget, UiRail } from './ui-open.ts';
 
 export const ROUTE_PREFIX = '/dsh-work';
@@ -62,6 +63,8 @@ export interface HttpOptions {
   advise?: AdviseApi;
   /** 学习模式：讲一个概念。没有就 503，不影响其它路由。 */
   learn?: LearnApi;
+  /** 追问：讲解之后接着问一句。没有就 503。 */
+  chat?: ChatApi;
   /** 一句话生成计划：同样可选，没注入就 503。 */
   planText?: PlanTextApi;
   /** 事件流：没注入就 503；纯展示，失败也不该拖垮面板。 */
@@ -115,6 +118,19 @@ export interface AdviseApi {
 }
 export interface LearnApi {
   request(nodeId: string | undefined): Promise<{ ok: true; text: string; alt?: string } | { ok: false; status: number; reason: string }>;
+}
+/**
+ * 节点上的「追问」：人在讲解之后接着问一句。
+ *
+ * 与 LearnApi 的区别在于**不落库**——问答只活在界面上，不写进 work.json；
+ * 所以它的返回值里没有 text/alt 那套卡片字段，只有一段话。
+ */
+export interface ChatApi {
+  request(input: {
+    nodeId: string | undefined;
+    question: string;
+    history: readonly ChatTurn[];
+  }): Promise<{ ok: true; answer: string } | { ok: false; status: number; reason: string }>;
 }
 
 export function createHttpHandler(options: HttpOptions) {
@@ -361,6 +377,50 @@ export function createHttpHandler(options: HttpOptions) {
         ...(result.alt === undefined ? {} : { alt: result.alt }),
         view: lessonSuccess(result.text, result.alt),
       });
+      return;
+    }
+    if (pathname === '/api/chat') {
+      // 追问：讲解之后接着问一句。和 /api/learn 不同，这条路**不落库**——
+      // 问一句就写一次 work.json 的话，任务库会被问答灌满，而问答本来就不是任务状态。
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      if (options.chat === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供追问能力' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { nodeId?: unknown; question?: unknown; history?: unknown };
+      const question = typeof payload.question === 'string' ? payload.question.trim() : '';
+      if (question === '') {
+        sendJson(res, 400, { ok: false, error: '缺少要问的问题' });
+        return;
+      }
+      if (question.length > MAX_QUESTION_CHARS) {
+        sendJson(res, 400, { ok: false, error: `问题太长了（最多 ${MAX_QUESTION_CHARS} 字）` });
+        return;
+      }
+      const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
+      const history: ChatTurn[] = Array.isArray(payload.history)
+        ? payload.history
+            .filter((turn): turn is { question: string; answer: string } => {
+              if (typeof turn !== 'object' || turn === null) return false;
+              const item = turn as { question?: unknown; answer?: unknown };
+              return typeof item.question === 'string' && typeof item.answer === 'string';
+            })
+            .map((turn) => ({ question: turn.question, answer: turn.answer }))
+        : [];
+      const asked = await options.chat.request({ nodeId, question, history });
+      if (!asked.ok) {
+        sendJson(res, asked.status, { ok: false, error: asked.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true, answer: asked.answer });
       return;
     }
     if (pathname === '/api/plan-text') {

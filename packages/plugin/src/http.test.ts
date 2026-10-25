@@ -14,7 +14,7 @@ import test from 'node:test';
 import type { ApplyResult, WorkDoc } from '@dshwork/core';
 
 import { createHttpHandler } from './http.ts';
-import type { LearnApi, RecognizeApi, RecognizeJobView, WorkRuntime } from './http.ts';
+import type { ChatApi, LearnApi, RecognizeApi, RecognizeJobView, WorkRuntime } from './http.ts';
 import { createUiBridge } from './ui-open.ts';
 import type { UiBridge } from './ui-open.ts';
 
@@ -46,6 +46,7 @@ async function start(options: {
   authorize?: () => number | null;
   ui?: UiBridge;
   learn?: LearnApi;
+  chat?: ChatApi;
 }): Promise<Harness> {
   const runtime: WorkRuntime = {
     version: '0.0.0-test',
@@ -60,6 +61,7 @@ async function start(options: {
     ...(options.recognize === undefined ? {} : { recognize: options.recognize }),
     ...(options.ui === undefined ? {} : { ui: options.ui }),
     ...(options.learn === undefined ? {} : { learn: options.learn }),
+    ...(options.chat === undefined ? {} : { chat: options.chat }),
   });
 
   const server: Server = createServer(created.handler);
@@ -316,6 +318,60 @@ test('打开面板：没注入桥时 503，GET 405，state 的 ui 为 null', asy
     await withUi.close();
   }
 });
+test('追问：POST 把问题与历史原样交给宿主，回一段话', async () => {
+  const seen: Array<{ nodeId: string | undefined; question: string; history: readonly { question: string; answer: string }[] }> = [];
+  const chat: ChatApi = {
+    async request(input) {
+      seen.push({ nodeId: input.nodeId, question: input.question, history: input.history });
+      return { ok: true, answer: '先看第二步的判据。' };
+    },
+  };
+  const h = await start({ chat });
+  try {
+    const res = await fetch(`${h.base}/api/chat`, {
+      method: 'POST',
+      body: JSON.stringify({
+        nodeId: 'n1',
+        question: '  第二步呢？  ',
+        history: [{ question: '什么是幂等', answer: '重发一次也不变' }, { bogus: 1 }],
+      }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, answer: '先看第二步的判据。' });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.nodeId, 'n1');
+    assert.equal(seen[0]?.question, '第二步呢？');
+    // 坏形状那条丢掉，好的那条留着
+    assert.deepEqual(seen[0]?.history, [{ question: '什么是幂等', answer: '重发一次也不变' }]);
+  } finally {
+    await h.close();
+  }
+});
+
+test('追问：空问题 400、超长 400、没注入能力 503、非 POST 405', async () => {
+  const bare = await start({});
+  try {
+    const noCapability = await fetch(`${bare.base}/api/chat`, { method: 'POST', body: JSON.stringify({ question: '在吗' }) });
+    assert.equal(noCapability.status, 503);
+    const wrongMethod = await fetch(`${bare.base}/api/chat`);
+    assert.equal(wrongMethod.status, 405);
+  } finally {
+    await bare.close();
+  }
+
+  const chat: ChatApi = { async request() { return { ok: true, answer: '不该被调到' }; } };
+  const h = await start({ chat });
+  try {
+    const blank = await fetch(`${h.base}/api/chat`, { method: 'POST', body: JSON.stringify({ question: '   ' }) });
+    assert.equal(blank.status, 400);
+    assert.equal(((await blank.json()) as { error: string }).error, '缺少要问的问题');
+    const tooLong = await fetch(`${h.base}/api/chat`, { method: 'POST', body: JSON.stringify({ question: '字'.repeat(401) }) });
+    assert.equal(tooLong.status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
 test('讲解：200 时同时给 text/alt 和卡片要的 view', async () => {
   const learn: LearnApi = {
     async request(nodeId) {

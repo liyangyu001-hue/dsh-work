@@ -117,3 +117,15 @@ export function studyProgress(rows: readonly StudyRow[]): { done: number; total:
   const counted = rows.filter((row) => row.status !== "skipped");
   return { done: counted.filter((row) => row.status === "done").length, total: counted.length };
 }
+
+/**
+ * 左列按标题过滤。
+ *
+ * 只按标题匹配（不搜正文）：这一列是目录，用户按名字找；搜正文会把「哪颗提到过 X」
+ * 和「哪颗叫 X」混在一起，反而更难选。空查询原样返回，调用方不用特判。
+ */
+export function filterStudyRows(rows: readonly StudyRow[], query: string): readonly StudyRow[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return rows;
+  return rows.filter((row) => row.title.toLowerCase().includes(needle));
+}

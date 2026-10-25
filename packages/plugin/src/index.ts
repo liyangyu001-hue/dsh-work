@@ -22,11 +22,12 @@ import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
+import type { AdviseApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviseNode } from './advise.ts';
 import { learnNode } from './learning.ts';
+import { askNode } from './chat.ts';
 import { planFromText } from './planning.ts';
 import { describeEntry, titleLookup } from './feed.ts';
 import { createUiBridge, resolveCompanionExecutable, spawnCompanion } from './ui-open.ts';
@@ -475,6 +476,45 @@ export function apply(ctx: any, config?: PluginConfig): void {
       }
     },
   };
+  /**
+   * 追问：讲解之后接着问一句。
+   *
+   * 与 learn 的差别只有两点：**不落库**、返回一段话。
+   * 上下文（标题 / 目标 / 验收 / 上次讲解 / 最近几轮问答）都在 chat.ts 里拼，
+   * 这里只负责从任务库里把那一颗捞出来、把模型选好。
+   */
+  const chat: ChatApi = {
+    async request({ nodeId, question, history }) {
+      const llm = readService(ctx, 'llm');
+      if (llm === null) return { ok: false, status: 503, reason: '宿主没有提供 llm 服务' };
+      const doc = store.snapshot;
+      const target = nodeId ?? doc.pointer;
+      if (target === null || target === undefined) {
+        return { ok: false, status: 409, reason: '没有指定要问哪一颗' };
+      }
+      const node = doc.nodes[target];
+      if (node === undefined) return { ok: false, status: 404, reason: '没有这个节点' };
+      const selection = resolveLlmSelection(ctx, cfg);
+      const advice = node.advice;
+      try {
+        const answer = await askNode(
+          { llm, provider: selection.provider, model: selection.model },
+          {
+            title: node.title,
+            detail: node.detail ?? '',
+            acceptance: node.acceptance ?? '',
+            ...(advice === undefined || advice === null || advice.text === '' ? {} : { advice: advice.text }),
+          },
+          question,
+          history,
+          unload.signal,
+        );
+        return { ok: true, answer };
+      } catch (error) {
+        return { ok: false, status: 500, reason: describe(error) };
+      }
+    },
+  };
     // 插件卸载时把在跑的识别真正叫停：否则宿主退出后还会有一个请求挂在模型上。
     disposers.push(() => unload.abort());
 
@@ -572,6 +612,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       recognize,
       advise,
       learn,
+      chat,
       planText,
       feed,
       ui,

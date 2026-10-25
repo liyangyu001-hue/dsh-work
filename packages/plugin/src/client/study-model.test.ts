@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { studyProgress, studyRows, studyTips, statusLabel, type StudyDocLike } from "./study-model.ts";
+import { filterStudyRows, statusLabel, studyProgress, studyRows, studyTips, type StudyDocLike, type StudyRow } from "./study-model.ts";
 
 const doc: StudyDocLike = {
   pointer: "b",
@@ -92,4 +92,22 @@ test("状态文案与原生面板一致", () => {
   assert.equal(statusLabel("done"), "已完成");
   assert.equal(statusLabel("skipped"), "已跳过");
   assert.equal(statusLabel("todo"), "待办");
+});
+
+test('按标题过滤：空查询原样返回', () => {
+  const rows: StudyRow[] = [
+    { id: "a", title: "写出当前理解", status: "todo", kind: "task", depth: 0, childCount: 0 },
+    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", depth: 0, childCount: 0 },
+  ];
+  assert.deepEqual(filterStudyRows(rows, "   "), rows);
+});
+
+test('按标题过滤：忽略大小写、只匹配标题不搜正文', () => {
+  const rows: StudyRow[] = [
+    { id: "a", title: "Write the Idempotency note", status: "todo", kind: "task", depth: 0, childCount: 0 },
+    { id: "b", title: "区分幂等与重试安全", status: "done", kind: "task", depth: 0, childCount: 0 },
+  ];
+  assert.equal(filterStudyRows(rows, "IDEMPOTENCY").length, 1);
+  assert.equal(filterStudyRows(rows, "幂等").length, 1);
+  assert.equal(filterStudyRows(rows, "没有这个").length, 0);
 });

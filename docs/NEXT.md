@@ -7,6 +7,12 @@
 ---
 
 ## 进度
+- 2026-10-25 · **学习页能追问了（真调模型）、左列能按标题找、npm 这条路按用户意思不走了；顺手核了「令牌是不是每人自己的」**（用户 m04063 五点回复：①npm 不影响商店就不发 ②加可对话功能在子节点解释那部分 ⑤注意插件别绑作者的 token）。四件：
+  - **追问（chat）**：新增 `packages/plugin/src/chat.ts`（`CHAT_PROMPT` 不寒暄、`MAX_QUESTION_CHARS = 400`、`MAX_HISTORY_TURNS = 6`、`MAX_ANSWER_CHARS = 600`、`clipText`、`buildChatPrompt`（带标题/目标/验收/上次讲解 + 最近 6 轮）、`tidyAnswer`（去围栏、去整段引号、折空行、截断）、`askNode`）；`http.ts` 新增 `POST /api/chat`（405 / 503 / 空问题 400 / 超 400 字 400 / history 逐条校验）；`index.ts` 里 `const chat: ChatApi` 复用 `resolveLlmSelection`，**不落库**（问答不该灌进 work.json）。网页学习页右列新增「追问」区块（`data-dsh-work-chat-*`，回车发送、Shift+回车换行，换节点自动清空）。真机（dev 64001 + Playwright）：问「用一句话说清：为什么重试前要先想幂等？」→ `POST /api/chat` **200**，答「重试会把同一笔请求再送一遍，先确认重复执行不会多扣款或多下单…」（`study-chat.png`）。
+  - **学习页搜索**：`study-model.ts` 新增 `filterStudyRows(rows, query)`（只按标题、忽略大小写、空查询原样返回），`study.tsx` 左列加「按标题找…」输入框。真机：7 颗 → 输「幂等」剩 2 颗、输不存在的词显示「没有标题匹配的节点」（`study-search.png`）。
+  - **npm 不发了**：市场条目走 GitHub Release 的 `tarball:`（PR #9411），与 npm 无关；按用户「不影响就不发」定案，`@ka-studio/dsh-work` 不发 npm。
+  - **令牌审计（`packages/plugin/src/endpoint.ts:52` `ensureToken()`）**：每台机器首启用 `randomBytes(24).toString('base64url')` 自己生成，写 `~/.dsh/dsh-work/token`（`mode 0o600`）；`index.ts:581` `ctx.__dshWorkToken = await ensureToken()`，`hasCompanionToken()` 只比对本机这份。仓库里没有任何作者令牌（`git grep gh-token` 只命中文档与 `scripts/push-via-api.mjs`，后者运行时读用户自己的 home，且 `scripts/` 不进包）。
+  - 绿门：`pnpm test` **158 绿 / 0 失败**（新增 `chat.test.ts` 9 条 + `http.test.ts` 追问 2 条 + `study-model.test.ts` 过滤 2 条）、`pnpm typecheck` 干净、`lib/client.js` 34.1 kB。
 - 2026-10-25 · **用户连环三问收口：`L` 键开学习栏、分工页细分五档、网页学习页做出来；「AI 接管」边框从「沿边流光」改成特斯拉那圈彩虹，拐角也圆了**（用户 m03710「要的」、m03775「最外面的那个框 就不要有流转动画了 在ai执行的过程中 可以加类似特斯拉ai接管的那种动画」、m03868「特斯拉彩虹特效 知道不」、m03910「对的 但是边角更圆滑一点」）。四件事：
   - **`L` 开/关学习栏**（`native/shell/src/main.cpp`）：`kWatched` 扩成 6 项、`ReviewKey` 新增 `which == 7`（`L`），开着就收起、没开就打开，日志「审阅：L 打开学习栏」/「审阅：L 收起学习栏」。`Tab` 那条仍只 `return` 并留注释：`Tab` 被 `capture.h` 的全局截图热键占着，按下去会跳出框选层（实测窗口秒变 `DSHWorkNativeCapture 3840x2160`）。
   - **分工页细分五档**（`review.h` 的 `DrawRail`）：`running`「AI 正在做」/`review`「等你验收」/`offered`「已交给 AI，等开工」/`returned`「AI 退回来了」/无交接「人来做」，空档不占地方、全空给人话「（都收尾了，没有要派的）」。模拟数据下四档同时列齐（`office-buckets2.png`）。
@@ -129,8 +135,8 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 ## 当前任务（只做一个，做完就停）
 
 - **2026-10-25 这一轮把用户连环提的都做完了**：`L` 开/关学习栏、分工页细分五档、网页学习页、AI 接管的特斯拉彩虹边（含圆角 22→30）。**当前任务 = 等用户拍板下一件**，候选（按性价比）：
-  - ① **发不发 npm 包**：`npm login` 之后 `npm publish --access public` 就能 `dsh plugin add @ka-studio/dsh-work` 直装；不发现在这条「Release 资产 + 清单 tarball」也行（PR #9411 等合并）。
-  - ② **学习页加搜索/输入框**：任务树再大下去，左列翻列表会累。
+  - ① ~~**发不发 npm 包**~~ —— **已定：不发（2026-10-25）**。市场条目走 GitHub Release 的 `tarball:`，与 npm 无关，PR #9411 合并即可被收录。
+  - ② ~~**学习页加搜索/输入框**~~ —— **已交付（2026-10-25）**：左列加了「按标题找…」，只匹配标题。
   - ③ **节点加显式「执行者」字段**（人 / AI / 都可以）：分工页现在是按 `handoff.state` 反推的，这一条要改数据模型，先定再动。
   - ④ **Pulse 节拍时钟 + 状态矩阵**（「2026-10-25 交接」待办 3）：只有一行、没有规格，属需要用户定形态的设计活，别自己拍。
 - 阶段：**P2 · AI 在环**。**队列里的活真的空了**：2026-10-24 这轮又按「已知的坑」最后一条，把自动化提示语里的四件（入口 / 直角折线 / 加宽 / 讲讲它）逐条对过源码——入口 `packages/plugin/src/client/index.tsx:297`（`data-dsh-work-graph="1"`）+ `:326`（「打开节点图」）、直角折线 `native/shell/src/review.h:473`（`BuildEdge`，`:569` 调用）、`constexpr float kWindowW = 1600.0f` 在 `review.h:111`、讲讲它 pill `review.h:723-748` + 页脚提示 `review.h:804`；`git log` 里 `e1f8191` / `eba985a` / `62a10bd` / `8fb316f` 全在。`pnpm test` 130 绿、`pnpm typecheck` 干净、工作区干净、HEAD `e72a533`。**别再把这些重做一遍。**
@@ -332,6 +338,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - ✅ 办公界面第一版（2026-10-25 交付）：同一张图的「分工」页，按 `node.handoff.state` 把节点分成「AI 来做 / 人来做」两摞（见进度第一条）
 - ✅ 恢复 `kMinFitZoom`（2026-10-25 交付）：两处被字面 `\n` 吞掉的声明/clamp 拆回独立行；代价是窄窗口内容被裁，靠新补的「空白处左键拖动」平移看
 - ✅ 审阅窗拖到屏幕边缘吸附（2026-10-25 交付）：`SnapReviewToEdge()`，松手那一刻 16 DIP 内贴齐工作区（见进度第一条）
+- ✅ 学习页追问（2026-10-25 交付，用户 m04063 ②）：网页学习页右列「追问」直连模型（`POST /api/chat`，不落库），真机问到真答案（见进度第一条）
+- ✅ 学习页按标题搜索（2026-10-25 交付）：`filterStudyRows` + 左列输入框，7 颗 → 「幂等」剩 2 颗
+- ✅ npm 包按用户意思不发（2026-10-25 定案）：市场只走 Release tarball
 - ✅ 「Tab = 调出想学哪部分」的替代键（2026-10-25 交付）：Tab 与全局截图热键冲突（图里按会跳出框选层），改用 `L` 开/关学习栏；`Tab` 分支保留但只 return，注释写明原因
 - ✅ 节点图里点「已选中的节点」会去请求宿主拆层、doc 模式没有 jobId 被宿主回错 → 只读模式改成页脚一句人话、不发请求；顺手修掉「点收起不重建模型所以收不起来」（见进度第一条）
 - 已交付：悬停守卫补全（`2b95980`）、N-8 跨 DPI 按窗口取缩放（见进度第一条）、N-7 蓝边 + 流光（见 N-7 段）、N-6 托盘与退出、N-5 换屏跟宽（见 N-5 段）、N-4（`a687996`）、N-1 直角折线（`eba985a`）、N-2 加宽（`62a10bd`）、N-3 讲讲它（`8fb316f`）、插入任务「打开节点图」（`e1f8191`）；入口按钮（`eed4aed`）——复核结论见各自「留下的」
@@ -340,7 +349,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 等用户决定
 
-- **上架到插件市场：只剩「要不要也发 npm」**（2026-10-25）——**包名已定 `@ka-studio/dsh-work`**（用户 m02760 给的 npm 昵称是 `ka-studio`，npm 作用域必须等于用户名或自建组织，已问清并改完仓库 4 处 + 两个 profile，真机验证宿主能加载）。现在上架走的是「GitHub Release 预构建包 + 清单条目里的 `tarball:`」，PR **#9411** 已开、CI 除全站 Build 外全绿，**不需要 npm 账号就能被市场收录**。剩下：要不要再发一次 npm（好处是免 `allowBuilds` 构建授权、可 `dsh plugin add @ka-studio/dsh-work` 直装）；发的话需要用户在本机 `npm login`（现在 `npm whoami` 是 `ENEEDAUTH`）。
+- ~~**上架到插件市场：要不要也发 npm**~~ —— **已定：不发（2026-10-25，用户「不影响就不发」）**。市场条目走 GitHub Release 的 `tarball:`，`npm login` 与此无关（原始背景留档：——**包名已定 `@ka-studio/dsh-work`**（用户 m02760 给的 npm 昵称是 `ka-studio`，npm 作用域必须等于用户名或自建组织，已问清并改完仓库 4 处 + 两个 profile，真机验证宿主能加载）。现在上架走的是「GitHub Release 预构建包 + 清单条目里的 `tarball:`」，PR **#9411** 已开、CI 除全站 Build 外全绿，**不需要 npm 账号就能被市场收录**。剩下：要不要再发一次 npm（好处是免 `allowBuilds` 构建授权、可 `dsh plugin add @ka-studio/dsh-work` 直装）；发的话需要用户在本机 `npm login`（现在 `npm whoami` 是 `ENEEDAUTH`）。
 - ~~**「Tab = 调出想学哪部分」用什么键**~~ —— **已定并交付（2026-10-25）**：用 `L`（learn）开/关学习栏。`Tab` 被 `capture.h` 的全局截图热键占着（`RegisterHotKey(MOD_NOREPEAT, VK_TAB)`），图里按会把框选层打出来，那条分支保留但只 `return`。
 - ~~**学习页要不要做网页侧**~~ —— **已做（2026-10-25，用户「要的」）**：玻璃条多了「学习页」按钮，打开一整页只读学习视图（左列按树序、右列基础知识与详解流程）。**剩下的小问**：「想学哪部分」现在只能点左列，要不要再加一个搜索/输入框（任务树大了以后按标题找会比翻列表快）；等你拍。
 - ~~**分工页的口径要不要更细**~~ —— **已细分（2026-10-25）**：按 `node.handoff.state` 分五档（AI 正在做 / 等你验收 / 已交给 AI 等开工 / AI 退回来了 / 人来做）。**还剩下的**：要不要给节点加一个显式的「执行者」字段（人 / AI / 都可以），那是数据模型改动，得先定。

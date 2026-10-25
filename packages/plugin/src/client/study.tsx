@@ -5,10 +5,21 @@
  * - 站在图里（原生）：右栏跟着选中的节点走，边看图边读；
  * - 坐在网页前（这里）：左边一列要学的东西，右边这一颗的基础知识与详解流程。
  *
- * 数据全走已有的 `/dsh-work/api/state` 轮询（父组件传 doc 进来），
- * 不另开接口：这一页是「读」，不需要跟随伴层，也不需要宿主额外配合。
+ * 数据全走已有的 `/dsh-work/api/state` 轮询（父组件传 doc 进来）；
+ * 只有「追问」这一件事会打到宿主的 `/dsh-work/api/chat`（模型在宿主那边，网页不直连模型）。
  */
-import { studyRows, studyProgress, studyTips, statusLabel, type StudyDocLike } from "./study-model.ts";
+import { useEffect, useRef, useState } from "react";
+
+import { filterStudyRows, studyRows, studyProgress, studyTips, statusLabel, type StudyDocLike } from "./study-model.ts";
+
+/** 追问最多带这么多轮上文：带太多会被旧话题拖走，和宿主那边 chat.ts 的取法保持一致。 */
+const CHAT_HISTORY_TURNS = 6;
+const CHAT_URL = "/dsh-work/api/chat";
+
+interface ChatTurn {
+  readonly question: string;
+  readonly answer: string;
+}
 
 const SURFACE: React.CSSProperties = {
     // 宿主那套玻璃色是半透明的（实测 rgba(248,249,250,0.58)），一页正文摆上去会透出底下的会话列表。
@@ -34,11 +45,60 @@ export function StudyPage(props: {
   readonly onClose: () => void;
 }): React.ReactElement {
   const rows = studyRows(props.doc);
+  // 目录太长时按标题找：只匹配标题，不搜正文（那一列是目录，不是搜索框）。
+  const [query, setQuery] = useState("");
+  const shown = filterStudyRows(rows, query);
   const progress = studyProgress(rows);
   // 没选中过就落到当前任务，再不行落到第一步 —— 打开就有内容，不摆空壳
   const first = props.doc.pointer ?? rows[0]?.id ?? null;
   const active = props.selected ?? first;
   const tips = studyTips(props.doc, active);
+
+  // 追问：模型在宿主那边，网页只发一句话过去（/dsh-work/api/chat）。
+  // 问答不落库 —— 问一句就写一次 work.json 的话，任务库会被聊天记录灌满。
+  const [turns, setTurns] = useState<readonly ChatTurn[]>([]);
+  const [draft, setDraft] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // 换一颗节点就把对话清掉：上面问的是上一颗的事，接在这里会答非所问。
+  useEffect(() => {
+    setTurns([]);
+    setDraft("");
+    setFailure(null);
+  }, [active]);
+
+  const send = async (): Promise<void> => {
+    const question = draft.trim();
+    if (question === "" || asking) return;
+    setAsking(true);
+    setFailure(null);
+    try {
+      const res = await fetch(CHAT_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nodeId: active, question, history: turns.slice(-CHAT_HISTORY_TURNS) }),
+      });
+      const body = (await res.json()) as { ok?: boolean; answer?: string; error?: string };
+      if (body.ok !== true || typeof body.answer !== "string") {
+        setFailure(typeof body.error === "string" ? body.error : `追问失败（HTTP ${res.status}）`);
+        return;
+      }
+      const answer = body.answer;
+      setTurns((prev) => [...prev, { question, answer }]);
+      setDraft("");
+      requestAnimationFrame(() => {
+        const el = listRef.current;
+        if (el !== null) el.scrollTop = el.scrollHeight;
+      });
+    } catch (error) {
+      setFailure(`追问没发出去：${String(error).slice(0, 120)}`);
+    } finally {
+      setAsking(false);
+    }
+  };
 
   return (
     <div
@@ -103,12 +163,30 @@ export function StudyPage(props: {
             borderRight: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.08))",
           }}
         >
+          <input
+            data-dsh-work-study-search="1"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="按标题找…"
+            style={{
+              width: "calc(100% - 20px)",
+              margin: "0 10px 8px",
+              padding: "6px 10px",
+              borderRadius: 8,
+              border: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.12))",
+              background: "transparent",
+              color: "inherit",
+              font: `500 12.5px/1.4 ${FONT}`,
+            }}
+          />
           {rows.length === 0 ? (
             <p style={{ margin: "12px 10px", fontSize: 12, opacity: 0.6 }}>
               还没有任务树：先在面板里拆一次任务，这里就会长出要学的东西。
             </p>
+          ) : shown.length === 0 ? (
+            <p style={{ margin: "12px 10px", fontSize: 12, opacity: 0.6 }}>没有标题匹配的节点。</p>
           ) : (
-            rows.map((row) => {
+            shown.map((row) => {
               const on = row.id === active;
               return (
                 <button
@@ -178,6 +256,71 @@ export function StudyPage(props: {
                   ))}
                 </ol>
               )}
+
+              <div style={{ marginTop: 26, paddingTop: 14, borderTop: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.08))" }}>
+                <h3 style={{ margin: "0 0 8px", font: `600 12px/1.4 ${FONT}`, color: "var(--dsw-accent, #0a84ff)" }}>追问</h3>
+                <div ref={listRef} data-dsh-work-chat-log="1" style={{ maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
+                  {turns.length === 0 ? (
+                    <p style={{ margin: 0, fontSize: 12.5, opacity: 0.6 }}>
+                      这一颗还有哪儿没讲明白？直接问，答话只在这一页（不写进任务库）。
+                    </p>
+                  ) : (
+                    turns.map((turn, index) => (
+                      <div key={index} style={{ marginBottom: 12 }}>
+                        <p style={{ margin: 0, fontSize: 12.5, opacity: 0.7 }}>你问：{turn.question}</p>
+                        <p style={{ margin: "4px 0 0", fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{turn.answer}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                {failure === null ? null : (
+                  <p style={{ margin: "0 0 8px", fontSize: 12, color: "#c0392b" }}>{failure}</p>
+                )}
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <textarea
+                    data-dsh-work-chat-input="1"
+                    value={draft}
+                    rows={2}
+                    placeholder="问一句这颗节点的事；回车发送，Shift+回车换行"
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void send();
+                      }
+                    }}
+                    style={{
+                      flex: "1 1 auto",
+                      resize: "none",
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.12))",
+                      background: "transparent",
+                      color: "inherit",
+                      font: `500 13px/1.5 ${FONT}`,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    data-dsh-work-chat-send="1"
+                    disabled={asking || draft.trim() === ""}
+                    onClick={() => void send()}
+                    style={{
+                      height: 34,
+                      padding: "0 16px",
+                      borderRadius: 999,
+                      border: "none",
+                      background: asking || draft.trim() === "" ? "var(--dsw-separator, rgba(0, 0, 0, 0.12))" : "var(--dsw-accent, #0a84ff)",
+                      color: "#fff",
+                      font: `600 12.5px/1 ${FONT}`,
+                      textDecoration: "none",
+                      cursor: asking || draft.trim() === "" ? "default" : "pointer",
+                    }}
+                  >
+                    {asking ? "问着呢…" : "发送"}
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </section>
