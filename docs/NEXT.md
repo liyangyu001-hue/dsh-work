@@ -7,6 +7,7 @@
 ---
 
 ## 进度
+- 2026-10-26 · **每 5 轮对账（第 8 轮）：`docs/ROADMAP.md` 勾掉本轮真正做完的 4 条**——「截图清理策略生效」「建议按节点缓存，同节点不重复计费」「AI 产出写入节点档案 `nodes/*.md`（注明原生入口未做）」「一次会话的 token 消耗可见」。P0 仍 6/6；P1 现在 8/11（真缺的只剩「卡片左右滑动」这条已被节点图取代的过时条目与两条未验项）；P2 现在 4/5；P3 仍 0/5。**剩余可做的活只剩 ⑤（要用户定形态）与 ③ 的两个小口子（也要用户点头）**——没有一件是能自作主张动的。
 - 2026-10-26 · **截图按 7 天清、而且界面会告诉你它放在哪（复盘排序第 ④ 件）**。实测 `%USERPROFILE%\.dsh\dsh-work\captures` 已 64 个文件 / 2.89 MB，`docs/GUIDE.md` 的风险台账写着「默认 7 天清理」却没实现。
   - **规则**（`packages/plugin/src/captures.ts`）：只删**本插件命名**的文件（`yyyyMMdd-HHmmss-mmm.png` 与 `.tmp-…-N.png`）、按 **mtime** 判断（不解析文件名，免得把拷进来的旧图当今天）、`keepDays <= 0` 永不删、删不掉就跳过不抛错（清理失败不能让宿主起不来）。目录用 `captureDir()`，与原生 `capture.h:186` 同一条路径；`DSH_WORK_CAPTURES_DIR` 可覆盖（探针/测试靠它不碰真图）。
   - **接线**：`index.ts` 在任务库打开后跑一次清扫并打一行日志；`PluginConfig.captureKeepDays` 默认 7；`/api/stats` 多带 `captures: { dir, keepDays, line }`；学习页「档案」区块多一行 `data-dsh-work-captures`（「截图存在 …（保留 7 天，现在 N 张 / X KB）」）。
