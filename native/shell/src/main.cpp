@@ -250,13 +250,10 @@ constexpr float kReviewCloseMs = 190.0f;
 // 动画帧间隔：固定 60fps。跟屏幕刷新率绑定过一版，240Hz 下等于 4ms 一帧，
 // 画不完就堆积，反而卡。动画本身是按时间算的，帧率低也不会变慢。
 constexpr UINT kReviewFrameMs = 16;
-// 悬停多久自动展开。太短会误触，太长又像没反应。
-constexpr ULONGLONG kHoverExpandMs = 260;
 int g_review_hover_row = -1;
 // 双击判定：同一颗节点两次点击的间隔。
 int g_review_last_click_row = -1;
 ULONGLONG g_review_last_click_at = 0;
-ULONGLONG g_review_hover_at = 0;
 // 右键点在谁身上。右键本身不碰窗口（窗口归 UI 线程），只把行号记在这儿，
 // 再 PostMessage 回主循环去做（和「再拆一层」「讲讲它」同一条路）。
 int g_review_menu_row = -1;
@@ -634,21 +631,6 @@ void TickReviewAnim() {
   const float k = static_cast<float>(now - g_review_anim_at) / 200.0f;
   g_review_anim_open = k >= 1.0f ? 1.0f : (k <= 0.0f ? 0.0f : EaseOutCubic(k));
   RepaintReview();
-  // 悬停自动展开：指针在某一颗上停够 kHoverExpandMs、它有子节点且还没展开，就展开。
-  // 放在定时器里而不是鼠标消息里，是因为"停够久"需要一个时钟 —— 一次扫过整排
-  // 不该连着开好几颗。
-  if (!g_review_closing && !g_review_panning && g_review_hover_row >= 0 &&
-      g_review_hover_row < static_cast<int>(g_review_model.rows.size())) {
-    const dshwork::review::Row& hovered =
-        g_review_model.rows[static_cast<size_t>(g_review_hover_row)];
-    if (hovered.has_children && !hovered.expanded && now - g_review_hover_at >= kHoverExpandMs) {
-      g_review_model.selected = g_review_hover_row;
-      g_review_hover_row = -1;  // 先清掉：展开后行会被重建，索引立刻失效
-      g_review_hover_at = now;
-      ReviewExpandSelected();
-      return;
-    }
-  }
 
   // 打开动画收尾后不立刻停表：连线上的流光还在走，只要窗口开着就按刷新率跑。
   // 这是唯一一个"长期运行"的动画，代价是几颗方框 + 几条折线，可接受；
@@ -2046,7 +2028,8 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     const float x = static_cast<float>(pt.x) / k;
     const float y = static_cast<float>(pt.y) / k;
     const bool hand =
-        dshwork::review::LessonChipAt(g_review_model, x, y) >= 0 || dshwork::review::CommitHit(g_review_model, x, y);
+        dshwork::review::LessonChipAt(g_review_model, x, y) >= 0 || dshwork::review::CommitHit(g_review_model, x, y) ||
+        dshwork::review::ExpandBadgeAt(g_review_model, x, y) >= 0;
     SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
     return TRUE;
   }
@@ -2109,12 +2092,13 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       RepaintReview();
       return 0;
     }
-    // 记住指针停在哪一颗上；"停够久了没有"由动画定时器判断，
-    // 而不是在这里直接展开 —— 一次扫过整排会连开好几颗。
+    // 记住指针停在哪一颗上：悬停高亮和页脚提示都靠它。
+    // 早先这里还会「停够 260ms 自动展开」，撤掉了 —— 它会把用户刚点掉的展开
+    // 立刻又打开（实测：点 −N 收起，半秒后自己又弹出），隐式手势跟显式操作打架，
+    // 比缺席更糟。拆开有两条明确的路：点右上角 +N，或选中后按 Enter。
     const int hover = dshwork::review::NodeAt(g_review_model, mx, my);
     if (hover != g_review_hover_row) {
       g_review_hover_row = hover;
-      g_review_hover_at = GetTickCount64();
     }
     // 手型的判定单独记一份：WM_SETCURSOR 会频繁进来，这里只是缓存。
     g_review_hover_chip = dshwork::review::LessonChipAt(g_review_model, mx, my) >= 0;
@@ -2155,6 +2139,17 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       StartLesson(g_review_model.rows[static_cast<size_t>(chip)].id);
       return 0;
     }
+    // 右上角「+N / −N」= 拆开/收起这一颗。
+    // 用户原话「左键不能拆」：以前只有「再点同一颗」这个隐式手势，而单击已经
+    // 被拿去看详解、开卡还会把图重新自适应，第二次点在屏幕上早就不在原来那颗上了。
+    // 拆要有个画出来的、点得着的入口，所以这里先判徽标、再判节点本身。
+    const int badge = dshwork::review::ExpandBadgeAt(g_review_model, x, y);
+    if (badge >= 0) {
+      g_review_model.selected = badge;
+      RepaintReview();
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 2, 0);
+      return 0;
+    }
     const int index = dshwork::review::NodeAt(g_review_model, x, y);
     if (index >= 0) {
       // 双击（同一颗 400ms 内点两次）= 把这一颗设成「当前任务」。
@@ -2164,7 +2159,6 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       const bool is_double = g_review_last_click_row == index && now_ms - g_review_last_click_at < 400;
       g_review_last_click_row = index;
       g_review_last_click_at = now_ms;
-      const bool again = index == g_review_model.selected;
       g_review_model.selected = index;
       if (is_double) {
         // 手势是「双击同一颗」。没做单击：单击还得留给选中和展开，
@@ -2174,17 +2168,13 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
       }
       SetTimer(g_window, kReviewAnimTimerId, kReviewFrameMsForScreen(), nullptr);
-      // 再点一次同一颗 = 拆开 / 收起：不额外教用户记快捷键。
-      // 一律交给 ReviewExpandSelected，因为行是 BuildReviewModel 摊平出来的：
-      // 早先这里就地擦 g_review_expanded 就收工，集合变了界面却没重建，
-      // 点了跟没点一样（踩过）。收起的出口只能有一个，否则两条路各错各的。
-      if (again && g_window != nullptr) {
-        PostMessageW(g_window, kMsgReview, 2, 0);
-      } else {
-        // 单击 = 看这颗的详解（验收 + 详情就地铺成卡片，不请求模型）。
-        // 双击仍然走上面那条「设为当前任务」，两者靠 400ms 的判定分开。
-        ShowNodeDetail(index);
-      }
+      // 单击 = 看这颗的详解（验收 + 详情就地铺成卡片，不请求模型）。
+      // 「拆开/收起」不占左键：它有一条明说的路——右上角那颗 +N / −N，
+      // 以及键盘的 Enter。早先这里还有「再点同一颗也拆」，但同一个左键既是
+      // 「看详解」又是「拆」时，第二下的意思取决于上一秒点过什么，
+      // 这就是用户说的「左键不能拆」（开卡后图一重新自适应，同一个屏幕坐标
+      // 早就不在那颗节点上了）。一个手势只留一个意思。
+      ShowNodeDetail(index);
       RepaintReview();
     }
     return 0;

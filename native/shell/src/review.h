@@ -357,6 +357,36 @@ inline int LessonChipAt(const Model& model, float x, float y) {
   return -1;
 }
 
+/**
+ * 右上角那颗「+N / −N」徽标的命中区（展开/收起）。
+ *
+ * 为什么要有它：单击节点现在会被拿去看详解，而「再点同一颗 = 拆开」是个没写在
+ * 任何地方的隐式手势，而且开卡时窗口会变高、图可能重新自适应，同一屏幕坐标第二次
+ * 点下去往往已经不在这颗节点上（实测会点到「讲讲它」）。给徽标一个真的命中区，
+ * 「拆」就有了一个看得见、点得着、不会被别的手势抢走的入口。
+ * 命中区比画出来的框四周各放大 3 DIP，理由同 LessonChipRect。
+ */
+inline D2D1_RECT_F ExpandBadgeRect(const Row& row) {
+  return D2D1::RectF(row.x + row.w - 44.0f, row.y + 8.0f, row.x + row.w - 10.0f, row.y + 26.0f);
+}
+
+inline int ExpandBadgeAt(const Model& model, float x, float y) {
+  if (!model.fitted) return -1;
+  const float wx = (x - model.pan_x) / model.zoom;
+  const float wy = (y - kHeader - model.pan_y) / model.zoom;
+  for (int i = static_cast<int>(model.rows.size()) - 1; i >= 0; --i) {
+    const Row& row = model.rows[static_cast<size_t>(i)];
+    if (row.child_count <= 0) continue;
+    const D2D1_RECT_F badge = ExpandBadgeRect(row);
+    constexpr float kSlop = 3.0f;
+    if (wx >= badge.left - kSlop && wx <= badge.right + kSlop && wy >= badge.top - kSlop &&
+        wy <= badge.bottom + kSlop) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 /** 讲解卡：图区最下面那一条，左右各让 kPad，压在节点之上。 */
 inline D2D1_RECT_F LessonCardRect(float width_dip, float height_dip) {
   const float bottom = height_dip - kFooter - kLessonCardGap;
@@ -841,15 +871,21 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   } else if (model.lesson_phase == 1) {
     hint = L"正在讲…（一颗概念节点讲一段，讲完会浮在这下面）· Esc 关掉";
   } else if (anim.hover_row >= 0 && static_cast<size_t>(anim.hover_row) < model.rows.size()) {
-    // 鼠标停在哪颗上，就把那颗能做的两件事直接说出来。
-    // 悬停是唯一能让「右键 = 完成」被发现的时机——图上没有右键菜单，光标也不变。
-    hint = model.read_only ? L"右键这颗 = 标记完成 · 左键 = 看详解 · 双击 = 设为当前任务"
-                           : L"左键这颗 = 看详解 · Enter = 再拆一层";
+    // 鼠标停在哪颗上，就把那颗能做的几件事直接说出来。
+    // 悬停是唯一能让「右键 = 完成」「点 +N = 拆开」被发现的时机——图上没有右键菜单，
+    // 光标在有子节点的那颗上也只变个手型，不说出来就没人试。
+    const bool has_children = model.rows[static_cast<size_t>(anim.hover_row)].child_count > 0;
+    if (model.read_only) {
+      hint = L"右键这颗 = 标记完成 · 左键 = 看详解 · 双击 = 设为当前任务";
+      if (has_children) hint += L" · 点 +N = 拆开/收起";
+    } else {
+      hint = has_children ? L"左键这颗 = 看详解 · 点 +N = 再拆一层" : L"左键这颗 = 看详解";
+    }
     hint_ink = ui::kText;
   } else if (model.read_only) {
     hint = L"左键 = 看详解 · 右键 = 标记完成 · 双击 = 设为当前任务 · Enter 展开/收起 · Esc 关闭";
   } else {
-    hint = L"左键 = 看详解 · Enter 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
+    hint = L"左键 = 看详解 · Enter 或点 +N 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
   }
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
