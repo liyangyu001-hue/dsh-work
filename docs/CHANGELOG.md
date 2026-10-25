@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-25 · 插件市场上架：预构建包挂 Release，清单提了 PR
+
+不上 npm 也能进市场——清单条目支持 `tarball:`，只要指向 GitHub Release 里以 `.tgz` 结尾的资产。
+
+- 仓库打上 `dsh-plugin` 等 8 个 topics（清单仓库的硬性要求之一）。
+- `npm pack` 出 `dshwork-plugin-0.1.0.tgz`（31.3 kB）：`lib/index.js`、`lib/client.js`、`cordis.patch.yml`、`package.json`。只含宿主半边与 web 客户端，Windows 原生伴随层仍要自己 `node scripts/build-native.mjs dshwork-shell`。
+- 建 Release `plugin-v0.1.0` 并把包装上去，下载实测 HTTP 200、`tar -tzf` 校验齐全。
+- 清单条目 `data/plugins/liyangyu001-hue__dsh-work--packages-plugin.yml`（`category: workflow`、`name: liyangyu001-hue/dsh-work#dshwork-plugin`、`tarball:` 指向资产），经 fork 分支提 PR → **awesome-dsh-plugin#9411**。
+- npm 发布仍待定（本机 `npm whoami` 是 `ENEEDAUTH`，包名/作用域也没定）；有了 npm 包之后可以省掉安装时那道 `allowBuilds` 授权。
+
 ## 2026-10-25 · 展开一颗不再让整张图「缩水」：缩放和平移留住，只把点到的那颗挪回视野
 
 上一轮修「左键不能拆」时顺出来的同源毛病：`ReviewExpandSelected()` 在 `BuildReviewModel()` 之后无条件 `FitView()`。而 `BuildReviewModel()` 每次都会新建一个 `Model`（`fitted=false`、`zoom=1`、`pan=0`），函数末尾自带 `if (!fitted) FitView()` —— 于是点一下展开，人自己调好的缩放和平移被抹掉、整张图重新适配到 0.888。
