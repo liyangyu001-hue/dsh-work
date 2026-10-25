@@ -7,6 +7,9 @@
 ---
 
 ## 进度
+- 2026-10-25 · **顶部小条改成黑白自适应，工作按钮蓝色、学习按钮绿色**（用户 m04280 原话「我希望把这个部分做一个黑白自适应 不然根本看不清 工作模式的icon可以是蓝色 但是学习 可以为绿色」）。做法不是换一套宿主变量，而是自己判底色：新增 `packages/plugin/src/client/theme.ts` 的 `detectSurfaceTone()`（body → html → body 第一个子元素 → `color-scheme` → `prefers-color-scheme` 五级兜底）与 `paletteFor(tone)` 两套**不透明**色板——半透明正是老问题的来源（`--dsw-menu-surface-fill` 实测 `rgba(248,249,250,0.58)`，压在深色会话底上合成亮度只有 ≈0.31，却配了近黑的字）。`watchSurfaceTone()` 用 MutationObserver 盯 `body/html` 的 class/style/data-theme，切主题即时跟上。颜色按用途给：`palette.work` 蓝（打开面板 / 打开节点图）、`palette.learn` 绿（学习 / 学习页，配了新画的翻书图标 `LearnIcon`）、`palette.office` 中性（分工，配两栏图标 `SplitIcon`）；禁用只是同色降透明度，语义不丢。条上加 `data-dsh-work-bar` / `data-dsh-work-tone` 方便探针断言。
+  - 验证：Playwright 两态实测 `light {bg rgba(255,255,255,0.97), text rgb(27,27,31), work rgb(10,111,216), learn rgb(18,133,74)}` / `dark {bg rgba(24,24,27,0.96), text rgb(242,242,245), work rgb(74,163,255), learn rgb(61,220,132)}`；把 `body` 背景改成 `#131316` 后 600ms 内 tone 自动翻成 dark（截图 `bar-light.png` / `bar-dark.png`）。桌面版重启后实拍 `desktop-bar-tone.png`：深底、白字、蓝绿分明。
+  - 绿门：`pnpm test` **163 绿 / 0 失败**（新增 `theme.test.ts` 5 条，含两套色板每个前景色对底色的 WCAG AA 4.5:1 断言）、`pnpm typecheck` 干净、`lib/client.js` 40.2 kB。
 - 2026-10-25 · **学习页能追问了（真调模型）、左列能按标题找、npm 这条路按用户意思不走了；顺手核了「令牌是不是每人自己的」**（用户 m04063 五点回复：①npm 不影响商店就不发 ②加可对话功能在子节点解释那部分 ⑤注意插件别绑作者的 token）。四件：
   - **追问（chat）**：新增 `packages/plugin/src/chat.ts`（`CHAT_PROMPT` 不寒暄、`MAX_QUESTION_CHARS = 400`、`MAX_HISTORY_TURNS = 6`、`MAX_ANSWER_CHARS = 600`、`clipText`、`buildChatPrompt`（带标题/目标/验收/上次讲解 + 最近 6 轮）、`tidyAnswer`（去围栏、去整段引号、折空行、截断）、`askNode`）；`http.ts` 新增 `POST /api/chat`（405 / 503 / 空问题 400 / 超 400 字 400 / history 逐条校验）；`index.ts` 里 `const chat: ChatApi` 复用 `resolveLlmSelection`，**不落库**（问答不该灌进 work.json）。网页学习页右列新增「追问」区块（`data-dsh-work-chat-*`，回车发送、Shift+回车换行，换节点自动清空）。真机（dev 64001 + Playwright）：问「用一句话说清：为什么重试前要先想幂等？」→ `POST /api/chat` **200**，答「重试会把同一笔请求再送一遍，先确认重复执行不会多扣款或多下单…」（`study-chat.png`）。
   - **学习页搜索**：`study-model.ts` 新增 `filterStudyRows(rows, query)`（只按标题、忽略大小写、空查询原样返回），`study.tsx` 左列加「按标题找…」输入框。真机：7 颗 → 输「幂等」剩 2 颗、输不存在的词显示「没有标题匹配的节点」（`study-search.png`）。
@@ -338,6 +341,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 - ✅ 办公界面第一版（2026-10-25 交付）：同一张图的「分工」页，按 `node.handoff.state` 把节点分成「AI 来做 / 人来做」两摞（见进度第一条）
 - ✅ 恢复 `kMinFitZoom`（2026-10-25 交付）：两处被字面 `\n` 吞掉的声明/clamp 拆回独立行；代价是窄窗口内容被裁，靠新补的「空白处左键拖动」平移看
 - ✅ 审阅窗拖到屏幕边缘吸附（2026-10-25 交付）：`SnapReviewToEdge()`，松手那一刻 16 DIP 内贴齐工作区（见进度第一条）
+- ✅ 顶部小条「黑字压深底、根本看不清」（2026-10-25 交付，用户 m04280）：黑白自适应 + 工作蓝 / 学习绿，新增 `packages/plugin/src/client/theme.ts`（五级底色探测 + 两套不透明色板 + WCAG 4.5:1 断言），桌面版重启后实拍确认（见进度第一条）
 - ✅ 学习页追问（2026-10-25 交付，用户 m04063 ②）：网页学习页右列「追问」直连模型（`POST /api/chat`，不落库），真机问到真答案（见进度第一条）
 - ✅ 学习页按标题搜索（2026-10-25 交付）：`filterStudyRows` + 左列输入框，7 颗 → 「幂等」剩 2 颗
 - ✅ npm 包按用户意思不发（2026-10-25 定案）：市场只走 Release tarball
@@ -384,6 +388,10 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 已知的坑（踩过一次就别再踩）
 
+- **别用「先读文件再整体写回」的 PowerShell 脚本改源码**：这一轮 `[System.IO.File]::ReadAllText('packages/...')` 用了相对路径（`cd` 没生效、cwd 还是 `D:\work\AI\work`）→ 抛出后 `$t` 是 `$null`，脚本继续执行到 `WriteAllText(..., $null)`，**把 `packages/plugin/src/client/index.tsx` 写成了 0 字节**。补救是 `git checkout --` 然后改用 `edit` 工具逐处替换。要么全绝对路径 + `if (-not $t) { throw }`，要么直接用 edit 工具。
+- 桌面窗口截图**不能把 pid 当 HWND**（`GetWindowRect((IntPtr)pid)` 会返回 `0,0 0x0`，`New-Object Bitmap 0,...` 直接抛「Parameter is not valid」）；用 `D:\work\AI\work\dshwork-probe\shot-window.ps1 -Pid2 <pid> -Out <png>`，它按 pid 枚举顶层窗再抓（本轮实测 `hwnd=132160 cls=Chrome_WidgetWin_1`）。
+- `dsh` 不在 `$PATH` 里（`Get-Command dsh` 为空、`Start-Process -FilePath 'dsh'` 报「系统找不到指定的文件」）：真身是 `C:\Users\25108\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`（`docs/GUIDE.md:185` 有记）。
+- 顶部小条这类悬浮玻璃**别信 `--dsw-*` 的玻璃色**：宿主的 `rgba(248,249,250,0.58)` 压在深色会话底上合成亮度只有 ≈0.31，等于「黑字压深底」。要么自己判底色（`client/theme.ts` 的 `detectSurfaceTone`），要么用不透明色。
 - 上架清单仓库（`awesome-dsh-plugin/awesome-dsh-plugin`）的条目**不是 npm 包名**：`name` 只是列表里的链接文字，`url` 才是仓库/子目录。monorepo 子包要 `url: …/tree/main/packages/<pkg>` + `name: owner/repo#subname`，文件名由 `slugFor(url)` 算出来（`owner__repo--packages-<pkg>.yml`），对不上会被 gate 打回。
 - 不发 npm 也能上架：清单条目支持 `tarball:`，但**必须是 github.com 的 release 资产且以 `.tgz` 结尾**（`TARBALL_HOSTS` 只认 github.com / objects.githubusercontent.com / release-assets.githubusercontent.com）。做法就是 `npm pack` → 建 Release → 上传资产；`package.json` 里留着 `private: true` 不影响安装，只挡发布。
 - 清单条目的 `description` 里出现 `: `（冒号+空格）**必须加引号**，否则 YAML 会当嵌套键、gate 直接报错；描述会被维护者拿去和代码核对，别写数字/API 名除非真的存在。

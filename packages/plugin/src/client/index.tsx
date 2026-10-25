@@ -18,6 +18,13 @@ import { useEffect, useState } from "react";
 import { StudyPage } from "./study.tsx";
 
 import { graphEntry, openFeedback, type OpenReply, type OpenTarget } from "./open-entry.ts";
+import {
+  detectSurfaceTone,
+  paletteFor,
+  watchSurfaceTone,
+  type BarPalette,
+  type SurfaceTone,
+} from "./theme.ts";
 
 /** 轮询间隔。真实推送走 SSE 是后续优化项；先保证"打开就能看到"这条最短路径。 */
 const POLL_MS = 3000;
@@ -145,25 +152,52 @@ function GraphIcon(): React.ReactElement {
  * 用户原话是「不然不知道怎么打开」—— 入口必须写清名字，不能只放个图标。
  */
 /**
- * 「学习 / 分工」这类二级入口的样式：描边小胶囊，和「打开节点图」同色但更轻。
- * 单独抽出来是因为两颗按钮一模一样，复制两遍容易改一处忘一处。
+ * 「学习 / 分工」这类二级入口的样式：描边小胶囊，颜色由这一侧的意思决定。
+ *
+ * 用户原话「工作模式的icon可以是蓝色 但是学习 可以为绿色」——所以颜色按
+ * **用途**给，不按启用态给：禁用时只把同一个色降透明度，语义不丢。
  */
-function railButtonStyle(enabled: boolean): React.CSSProperties {
+function railButtonStyle(enabled: boolean, accent: string, palette: BarPalette): React.CSSProperties {
   return {
     flex: "0 0 auto",
     display: "inline-flex",
     alignItems: "center",
+    gap: 5,
     height: 28,
-    padding: "0 10px",
+    padding: "0 10px 0 8px",
     borderRadius: 999,
-    border: `0.5px solid ${enabled ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-separator, rgba(0, 0, 0, 0.08))"}`,
+    border: `0.5px solid ${enabled ? accent : palette.separator}`,
     background: "transparent",
-    color: enabled ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-text-tertiary, #9a9a9e)",
+    color: enabled ? accent : palette.textDim,
     font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
     cursor: enabled ? "pointer" : "default",
     opacity: enabled ? 1 : 0.55,
     ...noDrag,
   };
+}
+/** 学习：一本翻开的小书。绿色那一侧用它，比纯文字好认。 */
+function LearnIcon(): React.ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 4.2c-1.5-1-3.4-1.3-5.4-1v8.9c2-.3 3.9 0 5.4 1 1.5-1 3.4-1.3 5.4-1V3.2c-2-.3-3.9 0-5.4 1Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M8 4.4v8.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+/** 分工：两栏并排，左边 AI、右边人——一眼看出「这事归谁」。 */
+function SplitIcon(): React.ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.6" y="2.6" width="5.6" height="10.8" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="8.8" y="2.6" width="5.6" height="10.8" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4.4 6.2v3.6M11.6 6.2v3.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
 }
 function Bar(): React.ReactElement {
   const { snapshot, online } = useWorkState();
@@ -172,6 +206,10 @@ function Bar(): React.ReactElement {
   // 学习页是网页侧的一整页（不用伴随层）：只读、纯前端渲染，数据就是这份 doc。
   const [studyOpen, setStudyOpen] = useState(false);
   const [studySelected, setStudySelected] = useState<string | null>(null);
+  // 黑白自适应：跟着这一条背后的底色走；切主题、换系统明暗都能跟上。
+  const [tone, setTone] = useState<SurfaceTone>(() => detectSurfaceTone());
+  useEffect(() => watchSurfaceTone(setTone), []);
+  const palette = paletteFor(tone);
   const doc = snapshot?.doc;
 
   // 统计口径：skipped 不计入分母 —— 它是"明确不做"，不该拖累进度
@@ -218,10 +256,12 @@ function Bar(): React.ReactElement {
         .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1), background-color 120ms cubic-bezier(.16,1,.3,1); }
         .dshwork-open:hover:not(:disabled) { filter: brightness(1.07); }
         .dshwork-open:active:not(:disabled) { transform: scale(.97); }
-        .dshwork-open:focus-visible { outline: 2px solid var(--dsw-accent, #0a84ff); outline-offset: 2px; }
-        .dshwork-ghost:hover:not(:disabled) { background-color: color-mix(in srgb, var(--dsw-accent, #0a84ff) 12%, transparent); }
+        .dshwork-open:focus-visible { outline: 2px solid ${palette.work}; outline-offset: 2px; }
+        .dshwork-ghost:hover:not(:disabled) { background-color: color-mix(in srgb, currentColor 12%, transparent); }
       `}</style>
       <div
+        data-dsh-work-bar="1"
+        data-dsh-work-tone={tone}
         style={{
           position: "fixed",
           top: 52,  // 52 = 窗口标题栏高度再留一点；贴 top:8 会压在标题栏上
@@ -234,9 +274,15 @@ function Bar(): React.ReactElement {
           padding: "0 10px 0 18px",
           maxWidth: "min(560px, 64vw)",
           font: "500 13px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif",
-          color: "var(--dsw-text-primary, #1a1a1a)",
+          // 不再用宿主的玻璃色：58% 的白压在深色会话底上会变成「黑字压深底」。
+          background: palette.surface,
+          color: palette.text,
+          border: `0.5px solid ${palette.separator}`,
+          boxShadow: palette.shadow,
+          borderRadius: 22,
+          backdropFilter: "blur(18px) saturate(140%)",
+          WebkitBackdropFilter: "blur(18px) saturate(140%)",
           ...noDrag,
-          ...glass,
         }}
         role="toolbar"
         aria-label="DSH Work 任务条"
@@ -247,8 +293,8 @@ function Bar(): React.ReactElement {
             height: 7,
             borderRadius: 999,
             flex: "0 0 auto",
-            background: online ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-text-tertiary, #9a9a9e)",
-            boxShadow: online ? "0 0 8px var(--dsw-accent, #0a84ff)" : "none",
+            background: online ? palette.learn : palette.textDim,
+            boxShadow: online ? `0 0 8px ${palette.learn}` : "none",
           }}
         />
         <span
@@ -268,7 +314,7 @@ function Bar(): React.ReactElement {
           style={{
             flex: "0 0 auto",
             fontVariantNumeric: "tabular-nums",
-            opacity: 0.55,
+            color: palette.textDim,
             fontSize: 12,
           }}
         >
@@ -280,7 +326,7 @@ function Bar(): React.ReactElement {
             flex: "0 0 auto",
             width: 1,
             height: 18,
-            background: "var(--dsw-separator, rgba(0, 0, 0, 0.08))",
+            background: palette.separator,
           }}
         />
         <span
@@ -307,9 +353,9 @@ function Bar(): React.ReactElement {
               height: 28,
               padding: "0 12px 0 9px",
               borderRadius: 999,
-              border: "0.5px solid var(--dsw-accent, #0a84ff)",
-              background: "var(--dsw-accent, #0a84ff)",
-              color: "#fff",
+              border: `0.5px solid ${palette.work}`,
+              background: palette.work,
+              color: palette.onAccent,
               font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
               cursor: opening ? "default" : "pointer",
               opacity: opening ? 0.65 : 1,
@@ -335,15 +381,9 @@ function Bar(): React.ReactElement {
               height: 28,
               padding: "0 11px 0 9px",
               borderRadius: 999,
-              border: `0.5px solid ${
-                graph.enabled
-                  ? "var(--dsw-accent, #0a84ff)"
-                  : "var(--dsw-separator, rgba(0, 0, 0, 0.08))"
-              }`,
+              border: `0.5px solid ${graph.enabled ? palette.work : palette.separator}`,
               background: "transparent",
-              color: graph.enabled
-                ? "var(--dsw-accent, #0a84ff)"
-                : "var(--dsw-text-tertiary, #9a9a9e)",
+              color: graph.enabled ? palette.work : palette.textDim,
               font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
               cursor: graph.enabled && !opening ? "pointer" : "default",
               opacity: graph.enabled ? (opening ? 0.65 : 1) : 0.55,
@@ -363,8 +403,9 @@ function Bar(): React.ReactElement {
             disabled={opening || !graph.enabled}
             title={graph.enabled ? "打开节点图并切到「学习」：右边给这颗的基础知识与详解流程" : graph.hint}
             aria-label="打开节点图的学习页"
-            style={railButtonStyle(graph.enabled && !opening)}
+            style={railButtonStyle(graph.enabled && !opening, palette.learn, palette)}
           >
+            <LearnIcon />
             学习
           </button>
           <button
@@ -375,8 +416,9 @@ function Bar(): React.ReactElement {
             disabled={opening || !graph.enabled}
             title={graph.enabled ? "打开节点图并切到「分工」：哪部分 AI 做、哪部分人做" : graph.hint}
             aria-label="打开节点图的分工页"
-            style={railButtonStyle(graph.enabled && !opening)}
+            style={railButtonStyle(graph.enabled && !opening, palette.office, palette)}
           >
+            <SplitIcon />
             分工
           </button>
           {/* 「学习页」和上面那颗「学习」不是一回事：那颗把原生节点图切到学习栏
@@ -389,8 +431,9 @@ function Bar(): React.ReactElement {
             disabled={!doc || nodes.length === 0}
             title={graph.enabled ? "在网页里打开学习页：左边要学的，右边这一颗的基础知识与详解流程" : graph.hint}
             aria-label="打开网页学习页"
-            style={railButtonStyle(Boolean(doc) && nodes.length > 0)}
+            style={railButtonStyle(Boolean(doc) && nodes.length > 0, palette.learn, palette)}
           >
+            <LearnIcon />
             学习页
           </button>
         </span>
