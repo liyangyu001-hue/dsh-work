@@ -19,7 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
 /** 必须与 package.json 的 name 完全一致：宿主按 id 对账 entries。 */
-const PACKAGE_ID = "@dshwork/plugin";
+const PACKAGE_ID = "@ka-studio/dsh-work";
 
 const entry = resolve(root, "packages/plugin/src/client/index.tsx");
 const outfile = resolve(root, "packages/plugin/lib/client.js");

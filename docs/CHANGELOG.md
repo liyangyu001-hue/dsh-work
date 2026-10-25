@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2026-10-25 · 包名换成 `@ka-studio/dsh-work`
+
+原来叫 `@dshwork/plugin`，但那个 npm 作用域不是发布者自己的（用户 npm 昵称是 `ka-studio`），`npm publish` 会 403。改成他自己的作用域，上架用的预构建包与清单条目一并换掉。
+
+- 仓库内 4 处：`packages/plugin/package.json` 的 `name`、`cordis.patch.yml` 的注入名（含注释）、`packages/plugin/src/index.ts` 的 `export const name`、`scripts/build-client.mjs` 的 `PACKAGE_ID`。`@dshwork/core` 是另一个包，没动。
+- 两个 profile（`desktop`、`dshwork-dev`）的依赖键与 `dsh.profile.bundles` 一起换名并重装，`node_modules\@ka-studio\dsh-work` 是指回仓库的 Junction；真机起 dev 宿主确认能加载（日志里 `任务库根目录` / `伴随层入口` / `就绪 seq=92` 都在）。
+- 重打 `ka-studio-dsh-work-0.1.0.tgz`（31324 B），删掉旧 Release 与旧 tag 重建 `plugin-v0.1.0`（id `423433406`）并上传新资产。
+- PR #9411 的条目同步为新 `tarball:`，`name:` 改成 `liyangyu001-hue/dsh-work#plugin`（跟清单仓库的 `owner/repo#子目录名` 惯例对齐）。
+- **需要重启一次桌面版**才会加载新包名（玻璃条与节点图都还会在旧包里）。
+
 ## 2026-10-25 · 插件市场上架：预构建包挂 Release，清单提了 PR
 
 不上 npm 也能进市场——清单条目支持 `tarball:`，只要指向 GitHub Release 里以 `.tgz` 结尾的资产。

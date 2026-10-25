@@ -35,7 +35,7 @@ import { WorkStore } from './store.ts';
 import { registerTools } from './tools.ts';
 import type { ToolHost } from './tools.ts';
 
-export const name = '@dshwork/plugin';
+export const name = '@ka-studio/dsh-work';
 
 /**
  * 只声明真正必须的服务。
