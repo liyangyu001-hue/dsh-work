@@ -118,6 +118,14 @@ export function validateDoc(doc: WorkDoc): string | null {
         return `节点 ${id} 的建议指纹不是字符串`;
       }
     }
+    if (node.artifact !== undefined && node.artifact !== null) {
+      if (typeof node.artifact.path !== 'string' || node.artifact.path.trim() === '') {
+        return `节点 ${id} 的产物路径是空的`;
+      }
+      if (typeof node.artifact.at !== 'number' || !Number.isFinite(node.artifact.at)) {
+        return `节点 ${id} 的产物时间不是数字`;
+      }
+    }
   }
   if (activeCount > 1) return `同时存在 ${activeCount} 个 active 节点`;
 
@@ -411,6 +419,24 @@ export function apply(input: WorkDoc, intent: Intent, ctx: ApplyContext): ApplyR
         return fail(`不认识的执行者 ${String(next)}（只支持 human / ai / either，或 null 清空）`);
       }
       withNode(draft, { ...target, executor: next, updatedAt: ctx.at });
+      break;
+    }
+
+    case 'node.artifact': {
+      const target = requireNode(intent.nodeId);
+      if (!target) return fail(`节点 ${intent.nodeId} 不存在`);
+      const path = intent.path;
+      if (path !== null && path.trim() === '') {
+        return fail('产物路径不能是空字符串（要撤掉请传 null）');
+      }
+      if (path !== null && path.split(/[\\/]/).includes('..')) {
+        return fail(`产物路径 ${path} 越界了：不允许出现 ..`);
+      }
+      withNode(draft, {
+        ...target,
+        artifact: path === null ? null : { path, at: ctx.at },
+        updatedAt: ctx.at,
+      });
       break;
     }
 

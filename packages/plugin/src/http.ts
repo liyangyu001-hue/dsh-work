@@ -68,6 +68,25 @@ export interface StatsApi {
     line: string;
   }>;
 }
+
+/**
+ * 节点档案：`.dsh-work/nodes/<id>.md`。
+ *
+ * 三件事分开做而不是一个「万能」接口：读（只读、不建文件）、建（写骨架并挂上指针）、
+ * 摘（明确声明「这一步没有产物」）。读者不会因为「点开看一眼」就产生副作用。
+ */
+export interface ArtifactApi {
+  read(nodeId: string | undefined): Promise<
+    | { ok: true; path: string; exists: boolean; content: string | null; tooLarge: boolean }
+    | { ok: false; status: number; reason: string }
+  >;
+  ensure(nodeId: string | undefined): Promise<
+    | { ok: true; path: string; created: boolean; content: string | null }
+    | { ok: false; status: number; reason: string }
+  >;
+  detach(nodeId: string | undefined): Promise<{ ok: true } | { ok: false; status: number; reason: string }>;
+}
+
 export interface HttpOptions {
   runtime: WorkRuntime;
   /** 返回 null 放行；返回数字则作为拒绝状态码。 */
@@ -86,6 +105,8 @@ export interface HttpOptions {
   feed?: FeedApi;
   /** 会话用量：没注入就 503。只读，不写任何东西。 */
   stats?: StatsApi;
+  /** 节点档案 `nodes/<id>.md`：没注入就 503。 */
+  artifact?: ArtifactApi;
   /**
    * 打开桌面面板的桥：浏览器按钮 → 宿主 → 伴随层轮询。
    * 没注入时按钮回 503，其余路由不受影响。
@@ -243,6 +264,42 @@ export function createHttpHandler(options: HttpOptions) {
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error), items: [] });
       }
+      return;
+    }
+    if (pathname === '/api/artifact') {
+      if (options.artifact === undefined) {
+        sendJson(res, 503, { ok: false, error: '宿主没有提供节点档案' });
+        return;
+      }
+      const send = (result: { ok: boolean; status?: number; [key: string]: unknown }): void => {
+        const { status, ...rest } = result;
+        sendJson(res, result.ok ? 200 : (status ?? 400), rest);
+      };
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        const nodeId = url.searchParams.get('nodeId') ?? undefined;
+        send(await options.artifact.read(nodeId));
+        return;
+      }
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.reason });
+        return;
+      }
+      const payload = body.value as { nodeId?: unknown; action?: unknown };
+      const nodeId = typeof payload.nodeId === 'string' && payload.nodeId !== '' ? payload.nodeId : undefined;
+      if (payload.action === 'detach') {
+        send(await options.artifact.detach(nodeId));
+        return;
+      }
+      if (payload.action !== undefined && payload.action !== 'ensure') {
+        sendJson(res, 400, { ok: false, status: 400, error: `不认识的 action ${String(payload.action)}` });
+        return;
+      }
+      send(await options.artifact.ensure(nodeId));
       return;
     }
     if (pathname === '/api/stats') {

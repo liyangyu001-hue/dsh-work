@@ -17,18 +17,19 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Actor, ApplyResult, Intent, WorkDoc } from '@dshwork/core';
+import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 import { createId } from '@dshwork/core';
 
 import { ensureToken, publishEndpoint } from './endpoint.ts';
 import { ROUTE_PREFIX, createHttpHandler } from './http.ts';
-import type { AdviseApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView, StatsApi } from './http.ts';
+import type { AdviseApi, ArtifactApi, ChatApi, FeedApi, LearnApi, PlanTextApi, RecognizeApi, RecognizeJobView, StatsApi } from './http.ts';
 import type { DraftPlan } from './recognize.ts';
 import { draftFromSpecs, expandNode, planSetFromDraft, planSetFromSpecs, recognizePlan } from './recognize.ts';
 import { adviceSignature, adviseNode, cachedAdvice } from './advise.ts';
 import { describeUsage, usageMeter } from './usage.ts';
 import { learnNode } from './learning.ts';
 import { askNode } from './chat.ts';
+import { artifactRelPath, ensureArtifactAt, readArtifact } from './artifact.ts';
 import { planFromText } from './planning.ts';
 import { describeEntry, titleLookup } from './feed.ts';
 import { createUiBridge, resolveCompanionExecutable, spawnCompanion } from './ui-open.ts';
@@ -617,6 +618,46 @@ export function apply(ctx: any, config?: PluginConfig): void {
         return { usage, line: describeUsage(usage) };
       },
     };
+    // 节点档案：文件在 `.dsh-work/nodes/<id>.md`，指针写进文档的 `artifact`。
+    // 「读」不建文件（点开看一眼不该产生副作用），「建」才写骨架并挂指针。
+    const artifact: ArtifactApi = {
+      async read(nodeId) {
+        const target = pickNode(store.snapshot, nodeId);
+        if (!target.ok) return target;
+        const relPath = target.node.artifact?.path ?? artifactRelPath(target.node.id);
+        try {
+          const view = await readArtifact(root, relPath);
+          return { ok: true, path: view.path, exists: view.exists, content: view.content, tooLarge: view.tooLarge };
+        } catch (error) {
+          return { ok: false, status: 409, reason: describe(error) };
+        }
+      },
+      async ensure(nodeId) {
+        const target = pickNode(store.snapshot, nodeId);
+        if (!target.ok) return target;
+        try {
+          const existingPath = target.node.artifact?.path;
+          // 文档里已经挂过一份（可能被手改成别的文件名），就认它，别另起一份。
+          const relPath = existingPath ?? artifactRelPath(target.node.id);
+          const { view, created } = await ensureArtifactAt(root, relPath, target.node, Date.now());
+          const committed = await store.commit(
+            { type: 'node.artifact', nodeId: target.node.id, path: view.path },
+            'human',
+          );
+          if (!committed.ok) return { ok: false, status: 409, reason: committed.reason };
+          return { ok: true, path: view.path, created, content: view.content };
+        } catch (error) {
+          return { ok: false, status: 500, reason: describe(error) };
+        }
+      },
+      async detach(nodeId) {
+        const target = pickNode(store.snapshot, nodeId);
+        if (!target.ok) return target;
+        const committed = await store.commit({ type: 'node.artifact', nodeId: target.node.id, path: null }, 'human');
+        if (!committed.ok) return { ok: false, status: 409, reason: committed.reason };
+        return { ok: true };
+      },
+    };
     const http = createHttpHandler({      runtime: {
         version,
         getSnapshot: (): WorkDoc => store.snapshot,
@@ -639,6 +680,7 @@ export function apply(ctx: any, config?: PluginConfig): void {
       planText,
       feed,
       stats,
+      artifact,
       ui,
     });
 
@@ -798,6 +840,25 @@ function readHostDefaultModel(ctx: any): { provider?: string; model?: string } {
   } catch {
     return {};
   }
+}
+
+/**
+ * 从一次请求里挑出「要操作哪一颗节点」。
+ *
+ * 没给 id 就认当前任务（`doc.pointer`）——界面上「打开产物」这类按钮
+ * 通常就是对着当前那颗按的，不该逼调用方先查一遍 id。
+ */
+function pickNode(
+  doc: WorkDoc,
+  nodeId: string | undefined,
+): { ok: true; node: WorkNode } | { ok: false; status: number; reason: string } {
+  const target = nodeId ?? doc.pointer;
+  if (target === null || target === undefined) {
+    return { ok: false, status: 409, reason: '没有指定要操作哪一颗' };
+  }
+  const node = doc.nodes[target];
+  if (node === undefined) return { ok: false, status: 404, reason: '没有这个节点' };
+  return { ok: true, node };
 }
 
 function pick(value: unknown): string | null {

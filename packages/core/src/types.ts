@@ -66,6 +66,20 @@ export interface Evidence {
   at: number;
 }
 
+/**
+ * 这一步的产物：一份落在 `nodes/<id>.md` 的档案。
+ *
+ * 为什么要有它：复盘时发现真库 7 颗 `done` 的节点、`evidence` 全空——
+ * 「做完了」只有状态，没有任何东西能点开看。`path` 相对任务库根目录存，
+ * 换机器/换目录都不会失效；文件本身由插件那边读写，core 只记这个指针。
+ */
+export interface Artifact {
+  /** 相对任务库根目录的路径，例如 `.dsh-work/nodes/nd_xxx.md`。 */
+  path: string;
+  /** 第一次挂上这份产物的时刻。 */
+  at: number;
+}
+
 export interface WorkNode {
   id: NodeId;
   parentId: NodeId | null;
@@ -82,6 +96,8 @@ export interface WorkNode {
   executor?: Executor | null;
   advice?: Advice | null;
   handoff?: Handoff | null;
+  /** 产物指针；`null` = 显式「这一步没有产物」，`undefined` = 还没挂过。 */
+  artifact?: Artifact | null;
   evidence: Evidence[];
   createdAt: number;
   updatedAt: number;
@@ -125,6 +141,8 @@ export type Intent =
   | { type: 'node.advise'; nodeId: NodeId; advice: Advice }
   /** 标这一步该谁做；`null` = 清掉标记，回到「都行 / 还没定」。 */
   | { type: 'node.assign'; nodeId: NodeId; executor: Executor | null }
+  /** 挂上/换掉这一步的产物指针；`null` = 显式声明「这一步没有产物」。 */
+  | { type: 'node.artifact'; nodeId: NodeId; path: string | null }
   | { type: 'node.evidence'; nodeId: NodeId; evidence: Evidence }
   | { type: 'handoff.offer'; nodeId: NodeId }
   /**

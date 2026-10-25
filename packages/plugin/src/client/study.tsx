@@ -24,6 +24,7 @@ import {
 const CHAT_HISTORY_TURNS = 6;
 const CHAT_URL = "/dsh-work/api/chat";
 const STATS_URL = "/dsh-work/api/stats";
+const ARTIFACT_URL = "/dsh-work/api/artifact";
 
 interface ChatTurn {
   readonly question: string;
@@ -39,6 +40,26 @@ const SURFACE: React.CSSProperties = {
 };
 
 const FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif";
+
+/** 页内小按钮：档案的「建 / 打开」都用这一套，别每处各写一份。 */
+const chipStyle: React.CSSProperties = {
+  height: 26,
+  padding: "0 12px",
+  borderRadius: 999,
+  border: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.12))",
+  background: "transparent",
+  color: "var(--dsw-text-secondary, #4a4a4e)",
+  font: `600 12px/1 ${FONT}`,
+  textDecoration: "none",
+  cursor: "pointer",
+};
+
+interface ArtifactView {
+  readonly path: string;
+  readonly exists: boolean;
+  readonly content: string | null;
+  readonly tooLarge: boolean;
+}
 
 function statusColor(status: string): string {
   if (status === "done") return "var(--dsw-text-tertiary, #9a9a9e)";
@@ -83,6 +104,68 @@ export function StudyPage(props: {
       alive = false;
     };
   }, [active]);
+
+  // 档案：`.dsh-work/nodes/<id>.md`。读不建文件，点「建档案」才写骨架。
+  const [artifact, setArtifact] = useState<ArtifactView | null>(null);
+  const [showArtifact, setShowArtifact] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [artifactFailure, setArtifactFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    setShowArtifact(false);
+    setArtifactFailure(null);
+    if (active === null) {
+      setArtifact(null);
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(`${ARTIFACT_URL}?nodeId=${encodeURIComponent(active)}`, {
+          credentials: "same-origin",
+        });
+        const body = (await res.json()) as ArtifactView & { ok?: boolean; reason?: string };
+        if (!alive) return;
+        if (body.ok === false) {
+          setArtifactFailure(body.reason ?? "读不到档案");
+          return;
+        }
+        setArtifact({ path: body.path, exists: body.exists, content: body.content, tooLarge: body.tooLarge });
+      } catch {
+        // 读档案失败不是大事：这一块空着，别把整页搞成错误页
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [active]);
+
+  const createArtifact = async (): Promise<void> => {
+    if (active === null || creating) return;
+    setCreating(true);
+    setArtifactFailure(null);
+    try {
+      const res = await fetch(ARTIFACT_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nodeId: active, action: "ensure" }),
+      });
+      const body = (await res.json()) as
+        | { ok: true; path: string; created: boolean; content: string | null }
+        | { ok: false; reason?: string };
+      if (body.ok !== true) {
+        setArtifactFailure(body.reason ?? "建档案失败");
+        return;
+      }
+      setArtifact({ path: body.path, exists: true, content: body.content, tooLarge: false });
+      setShowArtifact(body.created);
+    } catch {
+      setArtifactFailure("建档案失败：连不上宿主");
+    } finally {
+      setCreating(false);
+    }
+  };
 
   // 追问：模型在宿主那边，网页只发一句话过去（/dsh-work/api/chat）。
   // 问答不落库 —— 问一句就写一次 work.json 的话，任务库会被聊天记录灌满。
@@ -231,6 +314,7 @@ export function StudyPage(props: {
                 <button
                   key={row.id}
                   type="button"
+                  data-dsh-work-study-row={row.id}
                   onClick={() => props.onSelect(row.id)}
                   title={`${row.title}（${statusLabel(row.status)}）`}
                   style={{
@@ -316,6 +400,65 @@ export function StudyPage(props: {
                   ))}
                 </ol>
               )}
+
+              <div style={{ marginTop: 22, paddingTop: 14, borderTop: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.08))" }}>
+                <h3 style={{ margin: "0 0 8px", font: `600 12px/1.4 ${FONT}`, color: "var(--dsw-accent, #0a84ff)" }}>档案</h3>
+                <p data-dsh-work-artifact="1" style={{ margin: "0 0 8px", fontSize: 12.5, opacity: 0.7 }}>
+                  {artifact === null
+                    ? "还没看过这一颗的档案。"
+                    : artifact.exists
+                      ? `已经有档案：${artifact.path}`
+                      : "还没有档案。建一份就能把过程和结论写在里面。"}
+                </p>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {artifact !== null && artifact.exists ? (
+                    <button
+                      type="button"
+                      data-dsh-work-artifact-view="1"
+                      onClick={() => setShowArtifact((v) => !v)}
+                      style={chipStyle}
+                    >
+                      {showArtifact ? "收起档案" : "打开档案"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      data-dsh-work-artifact-create="1"
+                      disabled={creating}
+                      onClick={() => void createArtifact()}
+                      style={chipStyle}
+                    >
+                      {creating ? "正在建…" : "建档案"}
+                    </button>
+                  )}
+                  {artifactFailure === null ? null : (
+                    <span style={{ fontSize: 12, color: "#c0392b" }}>{artifactFailure}</span>
+                  )}
+                </div>
+                {showArtifact && artifact !== null && artifact.content !== null ? (
+                  <pre
+                    data-dsh-work-artifact-body="1"
+                    style={{
+                      margin: "10px 0 0",
+                      maxHeight: 260,
+                      overflow: "auto",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      background: "rgba(127,127,127,0.08)",
+                      fontSize: 12.5,
+                      lineHeight: 1.6,
+                      whiteSpace: "pre-wrap",
+                    }}
+                  >
+                    {artifact.content}
+                  </pre>
+                ) : null}
+                {artifact !== null && artifact.tooLarge ? (
+                  <p style={{ margin: "8px 0 0", fontSize: 12, opacity: 0.6 }}>
+                    档案太大（超过 512 KB），这一页不展开，直接用编辑器打开那个文件。
+                  </p>
+                ) : null}
+              </div>
 
               <div style={{ marginTop: 26, paddingTop: 14, borderTop: "0.5px solid var(--dsw-separator, rgba(0, 0, 0, 0.08))" }}>
                 <h3 style={{ margin: "0 0 8px", font: `600 12px/1.4 ${FONT}`, color: "var(--dsw-accent, #0a84ff)" }}>追问</h3>

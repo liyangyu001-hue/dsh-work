@@ -1,5 +1,13 @@
 # 变更日志
 
+## 2026-10-25 · 做完的事现在能点开看到了（节点产物 `nodes/<id>.md`）
+
+- **问题**：真库 7 颗节点全是 `done`，`evidence` 全空——「做完了」在库里没有任何可点开的东西，任务库当不了档案用。
+- **数据**：`packages/core/src/types.ts` 新增 `Artifact { path; at }`（`path` 相对任务库根目录），`WorkNode.artifact?: Artifact | null`；`state.ts` 的 `validateDoc` 挡 `path` 空串、`at` 非数字。
+- **文件层**：`packages/plugin/src/artifact.ts` —— `artifactRelPath(id)` 只放行 `[A-Za-z0-9_-]`（防 `../` 越界）、`readArtifact()` 超 512 KB 不读正文、`ensureArtifact()` 只建骨架且**绝不覆盖用户手改**、`detachArtifact()`。
+- **接口与界面**：`GET|POST /dsh-work/api/artifact`（建完顺带发 `node.artifact` 把指针写进 `work.json`）；网页学习页右列「档案」区块——已建给路径 + 「打开档案」就地展开，没建就照实说「还没有档案」并给「建档案」。
+- 验收：`pnpm test` **199 绿 / 0 失败**（新增 `artifact.test.ts` 6 条）、`pnpm typecheck` 干净。真机（dev 64001，`x-dsh-work-token`）：GET `exists:false` → POST `created:true`（磁盘 567 B）→ `seq` 106→107、`work.json` 里有 `artifact` 指针 → 再 GET `exists:true` 正文三段齐全；Playwright 两态截图 `study-artifact-open.png` / `study-artifact-none.png`，console 无错误。
+
 ## 2026-10-25 · 一次会话花了多少，现在能看见了（用量账本）
 
 - **账本**（`packages/plugin/src/usage.ts`）：`UsageMeter` 记「调用次数 / 输入 / 输出 / 缓存命中 / 失败次数 / 省下的调用」，`readUsage(chunk)` 只认 `type === 'usage'` 且字段是数字且非负的分片（宿主实测形状 `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens}`），形状不对返回 `null`——**猜不出来就不说**。`describeUsage()` 出一句人话（「2 次调用 · 1.1k tok · 其中缓存命中 0.1k · 省下 1 次」）。

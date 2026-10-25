@@ -7,6 +7,14 @@
 ---
 
 ## 进度
+- 2026-10-25 · **做完了这件事，现在能点开看到东西了（复盘排序第 ③ 件：节点产物落盘）**。真库 7 颗 `done`、`evidence` 全空——「做完了」在库里没有任何可点开的东西，这是复盘里最刺眼的一条。
+  - **数据**：`packages/core/src/types.ts` 新增 `export interface Artifact { path: string; at: number }`（`path` 相对任务库根目录，不写绝对路径），`WorkNode.artifact?: Artifact | null`；`state.ts` 的 `validateDoc` 挡两种脏数据（`path` 空串、`at` 不是数字）。
+  - **文件层**：`packages/plugin/src/artifact.ts` —— `nodesDir(root)` / `artifactRelPath(id)`（**校验 id 只允许 `[A-Za-z0-9_-]`**，防 `../` 逃出目录）/ `readArtifact()`（>512 KB 不读正文，只回 `tooLarge`）/ `ensureArtifact()`（不存在才写骨架：标题 + 建档时间 + 要做什么 + 什么算做完 + 过程，**已存在原样返回、绝不覆盖用户手改**）/ `detachArtifact()`。
+  - **接口**：`http.ts` 新增 `ArtifactApi` 与 `GET|POST /api/artifact`（未注入 503「宿主没有提供节点档案」；GET 回 `{ok,path,exists,content,tooLarge}`；POST 建完顺带发 `node.artifact` 意图把指针写进 `work.json`）。
+  - **界面**（网页学习页右列「档案」区块）：已建 → 「已经有档案：`.dsh-work/nodes/<id>.md`」+「打开档案 / 收起档案」就地展开正文；没建 → 「还没有档案。建一份就能把过程和结论写在里面。」+「建档案」。**没建的绝不假装齐活**。
+  - **真机证据**（dev 64001，`x-dsh-work-token`）：GET → `{"ok":true,"path":".dsh-work/nodes/nd_01m5fjfadd0hz5tznyk.md","exists":false}`；POST → `created:true`，磁盘上 567 B 的 `.md`，`work.json` 里 `nd_…artifact = {path,at}`、`seq` 106→107；再 GET → `exists:true`、首行 `# 写出当前理解与一个重试场景`。Playwright 打开学习页：已建的那颗显示「已经有档案：.dsh-work/nodes/nd_01m5fjfadd0hz5tznyk.md」并可就地展开正文（`study-artifact-open.png`）；切到第二颗显示「还没有档案。建一份就能把过程和结论写在里面。」且只有「建档案」按钮（`study-artifact-none.png`），console 无错误。
+  - 绿门：`pnpm test` **199 绿 / 0 失败**（新增 `artifact.test.ts` 6 条）、`pnpm typecheck` 干净、`lib/client.js` 54.1 kB。
+  - **还没做的**：原生节点图里还没有入口（详情卡不显示档案状态、也没有「O 打开」键）；`node.complete` 目前**不要求**已有产物（硬拦还是软提醒要用户定）。两条都记在「等用户决定」。
 - 2026-10-25 · **一次会话花了多少，现在能看见了（复盘排序里的第 ② 件的后半）**：宿主流里**确实**带 usage，所以照实记，不估算。
   - **账本**：新增 `packages/plugin/src/usage.ts` —— `UsageMeter`（`callStarted()` / `addUsage()` / `callFailed()` / `savedCall()` / `snapshot()` / `reset()`）+ `readUsage(chunk)` + `describeUsage(snapshot)`；`packages/plugin/src/recognize.ts` 的 `LlmChunk` 补 `usage?: unknown`，`collectText()` 里每趟 `callStarted()`、读到 `type === 'usage'` 的分片就 `addUsage()`、抛错时 `callFailed()`。**失败调用不从 calls 里减、也不进 token**——它们确实发生过了。
   - **一条数据来源**：探针实测宿主分片是 `{"type":"usage","usage":{"inputTokens":144,"outputTokens":357,"cacheReadTokens":128,"cacheWriteTokens":0,"totalTokens":629}}`（`recognize.ts` 里那行 TEMP `console.log` 已删）。`readUsage()` 只认 `usage` 里是数字且非负的项，形状不对返回 `null`，**不猜**。
@@ -164,14 +172,15 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 当前任务（只做一个，做完就停）
 
-- **2026-10-25 本轮交付：第 ② 件全部收口**——前半「建议按节点缓存」（`adviceSignature()` + `Advice.sig`，命中不调模型不写库）+ 后半「一次会话能看见花了多少」（`packages/plugin/src/usage.ts` 的 `UsageMeter` + `POST /dsh-work/api/stats` + 学习页头一行账本）。细节见进度前两条。
-- **当前任务 = 第 ③ 件：节点产物落盘 `nodes/<id>.md`，`done` 必须能指到产物。** 已在复盘里排第 ③，是「任务库能当档案用」的关键一步。落地思路（开工前先确认现状，别假设）：
-  - 现状：`packages/core/src/types.ts` 的 `WorkNode` 只有 `title/detail/acceptance/status/executor/handoff/advice`，**没有指向产物的字段**；真库 `work.json` 里 `evidence` 全空（复盘实测）。
-  - 要定的事：产物是**一份文件**（`nodes/<id>.md`，写入即产物）还是**一条引用**（`artifactPath` 字段指向用户自己的文件）。推荐前者（可写、可看、可 diff），并在 `node.complete` 时要求「已有产物或显式说明没有」。
-  - 验收标准：`done` 的节点能从节点图/学习页一键打开它的 `.md`；没有产物的 `done` 在分工页/学习页显示「没有产物」而不是假装齐活；`pnpm test` 覆盖「没产物不能标完成」这条（或做成可配的软提醒——这条要按用户口味定）。
+- **2026-10-25 本轮交付：第 ③ 件（节点产物落盘 → 学习页能点开档案）**。细节见进度第一条。
+- **当前任务 = 第 ④ 件：截图留存策略（默认 7 天清理 + 面板明示路径）。** 实测 `%USERPROFILE%\.dsh\dsh-work\captures` 已 63 个文件 / 2.9 MB，而 `docs/GUIDE.md` 的风险台账写着「默认 7 天清理」，代码里没有。
+  - 现状：`%USERPROFILE%\.dsh\dsh-work\captures` 里 63 个文件 / 2.9 MB（最早 10-19、最新 10-24），另有一批 `.tmp-2026…`；没有任何清理代码，也没在任何界面上告诉用户「图存在哪」。
+  - 要定的事：清理在**宿主启动时**跑（简单、可预期）还是每次截图后（及时、但多一次 IO）；默认 7 天是否做成配置项（`cfg.captureKeepDays`，0 = 永不删）。
+  - 验收标准：跑一次后 7 天前的图真的没了、当天的一张不少；面板/学习页能看到「截图放在哪、保留几天」；单测覆盖「按 mtime 判断、不删今天的、不删不是本插件命名的文件」。
 - 队列里其它候选（都已交付或已定案，别再重做）：
   - ① ~~交接可撤回 + 常驻入口~~ —— **已交付**。
-  - ② ~~建议按节点缓存 + 一次会话 token 可见~~ —— **已交付（本轮）**。
+  - ② ~~建议按节点缓存 + 一次会话 token 可见~~ —— **已交付**。
+  - ③ ~~节点产物落盘 `nodes/<id>.md`~~ —— **已交付（本轮）**，原生节点图入口还没做。
   - ④ 截图留存策略（默认 7 天清理 + 面板明示路径；实测 `.dsh/dsh-work/captures` 已 63 个文件 / 2.9 MB）。
   - ⑤ Pulse 节拍时钟 + 状态矩阵（等用户定形态，见「等用户决定」）。
   - ③ ~~节点加显式「执行者」~~、⑤ ~~恢复 `kMinFitZoom`~~、~~发不发 npm~~ —— **都已交付或已定案**。
@@ -388,6 +397,7 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 
 ## 等用户决定
 
+- **③ 留下的两个小口子（各要一句话）**：① 原生节点图里要不要也放档案入口（详情卡显示「档案：有 / 没有」+ 按 `O` 用默认程序打开那个 `.md`）；② `node.complete` 要不要**硬拦**「没有产物就不能标完成」（现在是软的：不拦，只记）。
 - ~~**上架到插件市场：要不要也发 npm**~~ —— **已定：不发（2026-10-25，用户「不影响就不发」）**。市场条目走 GitHub Release 的 `tarball:`，`npm login` 与此无关（原始背景留档：——**包名已定 `@ka-studio/dsh-work`**（用户 m02760 给的 npm 昵称是 `ka-studio`，npm 作用域必须等于用户名或自建组织，已问清并改完仓库 4 处 + 两个 profile，真机验证宿主能加载）。现在上架走的是「GitHub Release 预构建包 + 清单条目里的 `tarball:`」，PR **#9411** 已开、CI 除全站 Build 外全绿，**不需要 npm 账号就能被市场收录**。剩下：要不要再发一次 npm（好处是免 `allowBuilds` 构建授权、可 `dsh plugin add @ka-studio/dsh-work` 直装）；发的话需要用户在本机 `npm login`（现在 `npm whoami` 是 `ENEEDAUTH`）。
 - ~~**「Tab = 调出想学哪部分」用什么键**~~ —— **已定并交付（2026-10-25）**：用 `L`（learn）开/关学习栏。`Tab` 被 `capture.h` 的全局截图热键占着（`RegisterHotKey(MOD_NOREPEAT, VK_TAB)`），图里按会把框选层打出来，那条分支保留但只 `return`。
 - ~~**学习页要不要做网页侧**~~ —— **已做（2026-10-25，用户「要的」）**：玻璃条多了「学习页」按钮，打开一整页只读学习视图（左列按树序、右列基础知识与详解流程）。**剩下的小问**：「想学哪部分」现在只能点左列，要不要再加一个搜索/输入框（任务树大了以后按标题找会比翻列表快）；等你拍。
@@ -426,6 +436,9 @@ git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账�
 ---
 
 ## 已知的坑（踩过一次就别再踩）
+
+- **新接口忘了在 `createHttpHandler({...})` 的 options 里传一句，症状是 503「宿主没有提供 X」**：`/api/artifact` 第一版就这样——路由、handler、注入对象都写了，但 `index.ts` 的 options 漏了 `artifact,`，真机 GET/POST 全是 503。写完新接口**先跑一次真机请求**，别等界面调不通再回头找。
+- **Playwright 探针点不到列表行，往往是那行根本没有 `data-*`**：学习页左列原本是裸 `<button>`，探针一直超时；补 `data-dsh-work-study-row={row.id}` 才稳定。凡是要被探针（或以后的 UI 测试）点到的元素，一律挂 `data-dsh-work-*`。
 
 - **缓存指纹必须带长度前缀**：`adviceSignature()` 一开始直接用 `\u0001` 连接各段，结果 `title='a\u0001b'` 与 `detail='b\u0001c'` 能拼出同一个指纹（测试当场抓到）。改成每段 `${长度}:${内容}` 再连，分隔符就不再是「内容里的一等公民」。
 - **验证会写数据，验完要还原**：跑一次 `/api/advise` 就会覆盖节点上原有的建议（这是产品行为，不是 bug）。本轮验完把那条建议的原文用 `POST /api/intent` 写回去并去掉 `sig`（`seq` 105 留痕）。以后凡是「真库上验证写操作」的轮次，都要在板上写清「写了什么、怎么还原、还原后的 `seq`」。
