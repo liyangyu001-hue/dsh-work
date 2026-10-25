@@ -2326,6 +2326,60 @@ void CloseReview() {
 }
 
 /* 动作都在后台线程做，回来后用消息让 UI 线程收尾。 */
+
+/**
+ * 展开/收起之后，只把刚点的那颗挪回视野，别动缩放。
+ *
+ * 原来这里（以及 BuildReviewModel 内部）无脑 FitView：点开一颗，整张图
+ * 「啪」地缩到 0.888，人自己调好的缩放和平移全丢——用户报的就是这个
+ * 「点一下图就缩水」。缩放/平移是人在图里攒出来的上下文，重建模型没理由
+ * 动它；真正要保证的只是「刚展开的那几行看得见」，所以这里只挪平移：
+ * 越界了往回推，没越界就一个像素都不动。
+ */
+void RevealRowsInReview(const std::string& id) {
+  const auto& rows = g_review_model.rows;
+  int index = -1;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    if (rows[i].id == id) {
+      index = static_cast<int>(i);
+      break;
+    }
+  }
+  if (index < 0) return;
+  const dshwork::review::Row& head = rows[static_cast<size_t>(index)];
+  float left = head.x;
+  float right = head.x + head.w;
+  float top = head.y;
+  float bottom = head.y + head.h;
+  // 连同它新露出来的子行一起算：人要看的是「刚长出来的这一块」。
+  for (size_t i = static_cast<size_t>(index) + 1; i < rows.size(); ++i) {
+    if (rows[i].depth <= head.depth) break;
+    if (rows[i].x < left) left = rows[i].x;
+    if (rows[i].x + rows[i].w > right) right = rows[i].x + rows[i].w;
+    if (rows[i].y < top) top = rows[i].y;
+    if (rows[i].y + rows[i].h > bottom) bottom = rows[i].y + rows[i].h;
+  }
+  const float zoom = g_review_model.zoom;
+  const float view_w = dshwork::review::BodyWidth(g_review_model);
+  const float view_h = dshwork::review::BodyHeight(g_review_model);
+  const float margin = 8.0f;
+  // 先保证「右边/下边别被切掉」，再看「左边/上边别被切掉」。
+  // 内容比视口还宽时后者会覆盖前者：宁可看开头，也不能把人甩到空白里。
+  if (right * zoom + g_review_model.pan_x > view_w - margin) {
+    g_review_model.pan_x = view_w - margin - right * zoom;
+  }
+  if (left * zoom + g_review_model.pan_x < margin) {
+    g_review_model.pan_x = margin - left * zoom;
+  }
+  if (bottom * zoom + g_review_model.pan_y > view_h - margin) {
+    g_review_model.pan_y = view_h - margin - bottom * zoom;
+  }
+  if (top * zoom + g_review_model.pan_y < margin) {
+    g_review_model.pan_y = margin - top * zoom;
+  }
+  dshwork::review::ClampPan(g_review_model);
+}
+
 void ReviewExpandSelected() {
   const int index = g_review_model.selected;
   if (index < 0 || index >= static_cast<int>(g_review_model.rows.size())) {
@@ -2343,13 +2397,24 @@ void ReviewExpandSelected() {
     }
     // 光改这个集合界面是不会动的：行是 BuildReviewModel 摊平出来的，
     // 必须拿同一份 JSON 重建一次模型，再重新布局。（这一步漏过，表现就是点了没反应。）
+    const dshwork::review::Model before = g_review_model;
     BuildReviewModel(g_review_root);
-    // 展开会把内容撑宽，不重新自适应的话新节点会跑到窗口外（踩过）。
-    dshwork::review::FitView(g_review_model);
-    dshwork::review::ClampPan(g_review_model);
+    // 缩放和平移是人手里的上下文，重建后原样还回去。
+    // 这里以前无条件 FitView：展开一颗整张图就缩到 0.888，看起来像「点一下缩水」。
+    // 内容确实会变宽变高，所以只把刚点的那颗挪回视野（只挪平移、不动缩放）。
+    if (before.fitted) {
+      g_review_model.pan_x = before.pan_x;
+      g_review_model.pan_y = before.pan_y;
+      g_review_model.zoom = before.zoom;
+      g_review_model.fitted = true;
+      RevealRowsInReview(row.id);
+    } else {
+      dshwork::review::FitView(g_review_model);
+    }
     LayoutReview();
     RepaintReview();
-    LogToFile(std::string("审阅：本地") + (g_review_expanded.count(row.id) > 0 ? "展开 " : "收起 ") + row.id);
+    LogToFile(std::string("审阅：本地") + (g_review_expanded.count(row.id) > 0 ? "展开 " : "收起 ") + row.id +
+              "（缩放 " + std::to_string(before.zoom) + " → " + std::to_string(g_review_model.zoom) + "）");
     return;
   }
 
