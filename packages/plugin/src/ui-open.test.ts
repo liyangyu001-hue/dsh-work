@@ -95,3 +95,17 @@ test('拉起抛错不掀翻宿主：当作没起来', () => {
   assert.equal(outcome.launched, false);
   assert.match(outcome.hint ?? '', /启动失败/);
 });
+
+test('打开节点图可以带「怎么读」：rail 跟着指令走，不带就是普通读法', () => {
+  const bridge = createUiBridge({ now: () => 5_000 });
+  const learn = bridge.open('graph', 'learn');
+  assert.deepEqual(learn.command, { seq: 1, target: 'graph', rail: 'learn', at: 5_000 });
+
+  const office = bridge.open('graph', 'office');
+  assert.deepEqual(office.command, { seq: 2, target: 'graph', rail: 'office', at: 5_000 });
+
+  // 不带 rail：指令里不该凭空多出一个字段（伴随层按 undefined 判「普通读法」）。
+  const plain = bridge.open('graph');
+  assert.deepEqual(plain.command, { seq: 3, target: 'graph', at: 5_000 });
+  assert.equal('rail' in plain.command, false);
+});

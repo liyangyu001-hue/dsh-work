@@ -264,6 +264,8 @@ bool g_review_detail_local = false;
 void RepaintReview();
 void ReviewKey(int which);
 void LayoutReview();
+// 定义在文件后半段（见 ReviewScale 的函数体）：排版与吸边都要先换算 DIP。
+float ReviewScale();
 void ReviewExpandSelected();
 // 定义在文件后半段（意图通道），审阅窗的双击要先用一小段。
 void PostIntent(const std::string& type, const std::string& node_id);
@@ -493,6 +495,8 @@ void PollLoop() {
     dshwork::Endpoint endpoint = dshwork::ReadEndpoint();
     BarModel model;
     std::string ui_target;  // 非空 = 宿主按钮刚留下一条指令
+// 网页那条指令想要哪种读法（0 关 · 1 学习 · 2 分工），跟着 kMsgDocGraph 的 wparam 过去。
+dshwork::review::Model::Rail pending_rail = dshwork::review::Model::Rail::Off;
     if (!endpoint.ok) {
       model.state = dshwork::WorkModel::State::Offline;
       model.note = endpoint.error;
@@ -561,6 +565,20 @@ void PollLoop() {
                 if (target->text == "graph") {
                   ui_target = "graph";
                   last_ui_at = stamp;
+                  // 网页玻璃条的「学习 / 分工」：把要哪种读法一起带过来，
+                  // 打开图的时候就直接是那一栏（栏本身也能在图里头带上切）。
+                  const dshwork::JValue* rail = ui->Get("rail");
+                  if (rail != nullptr && rail->IsString()) {
+                    if (rail->text == "learn") {
+                      pending_rail = dshwork::review::Model::Rail::Learn;
+                    } else if (rail->text == "office") {
+                      pending_rail = dshwork::review::Model::Rail::Office;
+                    } else {
+                      pending_rail = dshwork::review::Model::Rail::Off;
+                    }
+                  } else {
+                    pending_rail = dshwork::review::Model::Rail::Off;
+                  }
                 } else if (target->text == "panel") {
                   ui_target = "panel";
                   last_ui_at = stamp;
@@ -588,7 +606,8 @@ void PollLoop() {
     if (g_window != nullptr) PostMessageW(g_window, kMsgModel, 0, 0);
     if (!ui_target.empty() && g_window != nullptr) {
       LogToFile(std::string("宿主按钮：打开") + (ui_target == "graph" ? "节点图" : "面板"));
-      PostMessageW(g_window, ui_target == "graph" ? kMsgDocGraph : kMsgOpenPanel, 0, 0);
+      PostMessageW(g_window, ui_target == "graph" ? kMsgDocGraph : kMsgOpenPanel,
+                    ui_target == "graph" ? static_cast<WPARAM>(pending_rail) : 0, 0);
     }
 
     for (int i = 0; i < 10 && g_polling.load(std::memory_order_relaxed); ++i) {
@@ -1161,6 +1180,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       return 0;
     case kMsgDocGraph:
       // 面板里点了当前任务那段文字：把人送进整张地图。
+      // wparam 带着「网页那边要哪种读法」（0 关 · 1 学习 · 2 分工），先落进模型再开窗。
+      g_review_model.rail = static_cast<dshwork::review::Model::Rail>(wparam);
       ShowReviewDoc();
       return 0;
     case kMsgReview: {
@@ -1669,6 +1690,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
   // 注意：这里不要清 g_review_expanded —— 它是「哪几颗摊开着」的跨次记忆，
   // 每次重建都清掉的话，子行刚放出来就会在下一帧塌回去。
   model.selected = g_review_model.selected;
+  // 右侧栏是"怎么看这张图"的选择，跟选中的那颗一样属于人的临场选择：重建时别抹掉。
+  model.rail = g_review_model.rail;
   // 「当前任务」：文档的 pointer 指到哪颗，图上就在哪颗上打标。
   // 草稿（plan 的 nodes 是数组）没有 pointer，读出来是空串，于是一颗都不标。
   model.current_id = root.GetString("pointer");
@@ -1714,6 +1737,8 @@ void BuildReviewModel(const dshwork::JValue& root) {
     // 运行中的交接：图里只要有一颗在跑，整扇窗就亮蓝边（见 review.h Draw）。
     if (const JValue* handoff = node.Get("handoff"); handoff != nullptr && handoff->IsObject()) {
       if (handoff->GetString("state") == "running") model.ai_running = true;
+      // 右侧「分工」栏要按"交给谁"分两摞，所以每颗都记下自己的交接状态。
+      row.handoff = handoff->GetString("state");
     }
     if (const JValue* children = node.Get("children"); children != nullptr && children->IsArray()) {
       row.child_count = static_cast<int>(children->array.size());
@@ -1807,6 +1832,42 @@ void LayoutReview() {
   if (y + px_h > work.bottom) y = work.bottom - px_h;
   if (y < work.top) y = work.top;
   SetWindowPos(g_review, HWND_TOPMOST, x, y, px_w, px_h, SWP_NOACTIVATE);
+}
+
+/**
+ * 松手时贴边：拖到离工作区边缘 16 DIP 以内，就当作"想让它贴在那儿"。
+ *
+ * 只在松手那一刻判定一次，拖动途中不做 —— 拖动时吸边会让手指发涩，人也感觉不到
+ * 边界到底在哪。上下左右各自独立判定：只贴上半边就只吸上边，不会顺带被推到左边。
+ * 阈值按 DIP 算再乘当前缩放，保证 100% 和 150% 的屏上"手感的距离"是一样的。
+ */
+void SnapReviewToEdge() {
+  if (g_review == nullptr || !g_review_open) return;
+  RECT win = {};
+  if (!GetWindowRect(g_review, &win)) return;
+  MONITORINFO info = {};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(MonitorFromWindow(g_review, MONITOR_DEFAULTTONEAREST), &info)) return;
+  const RECT work = info.rcWork;
+  const int threshold = static_cast<int>(16.0f * ReviewScale());
+  int x = win.left;
+  int y = win.top;
+  const int w = win.right - win.left;
+  const int h = win.bottom - win.top;
+  // 先左后右、先上后下：两边都够近时贴更近的那条，不来回跳。
+  if (abs(x - work.left) <= threshold) {
+    x = work.left;
+  } else if (abs(work.right - (x + w)) <= threshold) {
+    x = work.right - w;
+  }
+  if (abs(y - work.top) <= threshold) {
+    y = work.top;
+  } else if (abs(work.bottom - (y + h)) <= threshold) {
+    y = work.bottom - h;
+  }
+  if (x == win.left && y == win.top) return;
+  SetWindowPos(g_review, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+  LogToFile("审阅：贴边 (" + std::to_string(x) + ", " + std::to_string(y) + ")");
 }
 
 /**
@@ -1987,7 +2048,16 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     const POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};  // 屏幕坐标，不是客户区
     RECT win = {};
     if (GetWindowRect(window, &win)) {
-      const int header_px = static_cast<int>(dshwork::review::kHeader * ReviewScale());
+      const float dscale = ReviewScale();
+      // 头带右侧那两颗「学习 / 分工」是真按钮：必须先问它们要 HTCLIENT，
+      // 否则整条头带都在拖窗口，按钮永远点不动（2026-10-25 实测：点下去没有任何反应）。
+      POINT client = pt;
+      if (ScreenToClient(window, &client) != 0) {
+        const float dx = static_cast<float>(client.x) / dscale;
+        const float dy = static_cast<float>(client.y) / dscale;
+        if (dshwork::review::RailChipAt(g_review_model, dx, dy) >= 0) return HTCLIENT;
+      }
+      const int header_px = static_cast<int>(dshwork::review::kHeader * dscale);
       if (pt.x >= win.left && pt.x < win.right && pt.y >= win.top && pt.y < win.top + header_px) return HTCAPTION;
     }
     return HTCLIENT;
@@ -2003,6 +2073,8 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     // 落点的尾巴会伸到屏幕外面；松手那一刻把它推回来，人看到的才是完整一扇窗。
     g_review_moving = false;
     LayoutReview();
+    // 贴着屏幕边松手 = 想让它停在那儿。只在这一刻吸一次，拖动途中不吸（见 SnapReviewToEdge）。
+    SnapReviewToEdge();
     RECT win = {};
     if (GetWindowRect(window, &win)) {
       g_review_user_placed = true;
@@ -2125,6 +2197,20 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 3, 0);
       return 0;
     }
+    // 头带上的「学习 / 分工」：就地切换读法。开着同一个再点一次 = 收起来。
+    const int rail_chip = dshwork::review::RailChipAt(g_review_model, x, y);
+    if (rail_chip >= 0) {
+      const dshwork::review::Model::Rail want =
+          rail_chip == 0 ? dshwork::review::Model::Rail::Learn : dshwork::review::Model::Rail::Office;
+      g_review_model.rail = (g_review_model.rail == want) ? dshwork::review::Model::Rail::Off : want;
+      LogToFile(std::string("审阅：右侧栏 ") +
+                (g_review_model.rail == dshwork::review::Model::Rail::Off
+                     ? "收起"
+                     : (g_review_model.rail == dshwork::review::Model::Rail::Learn ? "学习" : "分工")));
+      LayoutReview();
+      RepaintReview();
+      return 0;
+    }
     // 讲解卡开着时，点卡片以外的地方 = 收起它。卡片本身只有字，没有可点的东西，
     // 所以"点外面收掉"是唯一的手势，和挂在上面的那颗按钮对称。
     if (dshwork::review::LessonCardOn(g_review_model) && !dshwork::review::LessonCardHit(g_review_model, x, y)) {
@@ -2176,6 +2262,25 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       // 早就不在那颗节点上了）。一个手势只留一个意思。
       ShowNodeDetail(index);
       RepaintReview();
+      return 0;
+    }
+    // 空白处按住左键 = 平移。
+    // 页脚一直写着「拖空白平移」，可之前只有中键能拖 —— 中键在笔记本触摸板上等于没有，
+    // 而自动适配改成不缩字之后，内容会比窗口宽，没有可用的平移手势，右边那几颗
+    // 就永远够不着。这里补上左键这一路（头带已经由 WM_NCHITTEST 拿去拖窗口，不冲突）。
+    g_review_panning = true;
+    g_review_pan_lx = x;
+    g_review_pan_ly = y;
+    SetCapture(window);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    return 0;
+  }
+  if (message == WM_LBUTTONUP) {
+    // 左键抬起 = 结束空白平移（中键那一路在 WM_MBUTTONUP 里收尾，两条互不干扰）。
+    if (g_review_panning) {
+      g_review_panning = false;
+      ReleaseCapture();
+      SetCursor(LoadCursorW(nullptr, IDC_ARROW));
     }
     return 0;
   }
@@ -2896,6 +3001,14 @@ void ReviewKey(int which) {
   last_code = which;
   last_at = now_ms;
   const int count = static_cast<int>(g_review_model.rows.size());
+  if (which == 6) {
+    // 6 号原本想留给 Tab（用户原话：「tab 是调出想学哪部分」），但 Tab 是
+    // 全局截图的注册热键（capture.h 的 RegisterHotKey(MOD_NOREPEAT, VK_TAB)）：
+    // 2026-10-25 实测，在图里按一下 Tab 会跳出框选层，学习和截图打架。
+    // 所以这个键先不接，改让「学习」「分工」两颗按钮 + ↑↓ 承担；
+    // 等用户定一个不冲突的键（比如 L）再接。
+    return;
+  }
   switch (which) {
     case 0:
       if (count > 0) g_review_model.selected = (g_review_model.selected + count - 1) % count;

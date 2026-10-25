@@ -28,7 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Actor, ApplyResult, Intent, WorkDoc, WorkNode } from '@dshwork/core';
 
 import { lessonFailure, lessonSuccess } from './lesson.ts';
-import type { UiBridge, UiOpenTarget } from './ui-open.ts';
+import type { UiBridge, UiOpenTarget, UiRail } from './ui-open.ts';
 
 export const ROUTE_PREFIX = '/dsh-work';
 
@@ -236,7 +236,7 @@ export function createHttpHandler(options: HttpOptions) {
         sendJson(res, body.status, { ok: false, error: body.reason });
         return;
       }
-      const payload = body.value as { target?: unknown };
+      const payload = body.value as { target?: unknown; rail?: unknown };
       const target: UiOpenTarget | null =
         payload.target === undefined || payload.target === 'panel'
           ? 'panel'
@@ -247,7 +247,18 @@ export function createHttpHandler(options: HttpOptions) {
         sendJson(res, 400, { ok: false, error: 'target 只能是 panel 或 graph' });
         return;
       }
-      sendJson(res, 200, { ok: true, ...options.ui.open(target) });
+      // rail 只在开节点图时有意义；乱写给 400，别把伴随层看不懂的值塞进状态里。
+      const rail: UiRail | undefined | null =
+        payload.rail === undefined
+          ? undefined
+          : payload.rail === 'learn' || payload.rail === 'office'
+            ? payload.rail
+            : null;
+      if (rail === null) {
+        sendJson(res, 400, { ok: false, error: 'rail 只能是 learn 或 office' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, ...options.ui.open(target, rail) });
       return;
     }
 

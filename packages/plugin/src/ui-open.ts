@@ -11,9 +11,14 @@ import { existsSync } from 'node:fs';
 
 export type UiOpenTarget = 'panel' | 'graph';
 
+/** 打开节点图时顺手带上「怎么读」：学习页 / 分工页。不写就是普通读法。 */
+export type UiRail = 'learn' | 'office';
+
 export interface UiCommand {
   seq: number;
   target: UiOpenTarget;
+  /** 只在 target === 'graph' 时有意义：右侧栏打开哪一页。 */
+  rail?: UiRail;
   /** 指令生成时刻（epoch ms）。伴随层按它判新旧与新鲜度。 */
   at: number;
 }
@@ -34,7 +39,7 @@ export interface UiBridge {
   companionAlive(): boolean;
   /** 收到一次带伴随层令牌的请求：证明它活着。 */
   noteCompanion(): void;
-  open(target: UiOpenTarget): UiOpenOutcome;
+  open(target: UiOpenTarget, rail?: UiRail): UiOpenOutcome;
 }
 
 export interface UiBridgeOptions {
@@ -73,9 +78,9 @@ export function createUiBridge(options: UiBridgeOptions = {}): UiBridge {
     noteCompanion() {
       lastCompanionAt = now();
     },
-    open(target) {
+    open(target, rail) {
       seq += 1;
-      command = { seq, target, at: now() };
+      command = rail === undefined ? { seq, target, at: now() } : { seq, target, rail, at: now() };
       if (companionAlive()) return { command, companion: true, launched: false };
 
       if (options.launch) {

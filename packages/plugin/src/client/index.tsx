@@ -140,6 +140,27 @@ function GraphIcon(): React.ReactElement {
  * 所以按钮只把意愿交给宿主（POST /api/ui/open），伴随层轮询状态时取走。
  * 用户原话是「不然不知道怎么打开」—— 入口必须写清名字，不能只放个图标。
  */
+/**
+ * 「学习 / 分工」这类二级入口的样式：描边小胶囊，和「打开节点图」同色但更轻。
+ * 单独抽出来是因为两颗按钮一模一样，复制两遍容易改一处忘一处。
+ */
+function railButtonStyle(enabled: boolean): React.CSSProperties {
+  return {
+    flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    height: 28,
+    padding: "0 10px",
+    borderRadius: 999,
+    border: `0.5px solid ${enabled ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-separator, rgba(0, 0, 0, 0.08))"}`,
+    background: "transparent",
+    color: enabled ? "var(--dsw-accent, #0a84ff)" : "var(--dsw-text-tertiary, #9a9a9e)",
+    font: "600 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+    cursor: enabled ? "pointer" : "default",
+    opacity: enabled ? 1 : 0.55,
+    ...noDrag,
+  };
+}
 function Bar(): React.ReactElement {
   const { snapshot, online } = useWorkState();
   const [note, setNote] = useState<string | null>(null);
@@ -165,7 +186,7 @@ function Bar(): React.ReactElement {
    * 桌面窗口是另一个进程的 Win32 窗口，浏览器碰不到它。
    * 反馈文案收在 open-entry.ts 里，四档都有单测。
    */
-  const openCompanion = async (target: OpenTarget): Promise<void> => {
+  const openCompanion = async (target: OpenTarget, rail?: "learn" | "office"): Promise<void> => {
     if (opening) return;
     setOpening(true);
     try {
@@ -173,7 +194,7 @@ function Bar(): React.ReactElement {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target }),
+        body: JSON.stringify(rail === undefined ? { target } : { target, rail }),
       });
       const data = (await res.json().catch(() => ({}))) as OpenReply;
       setNote(openFeedback(target, { ...data, status: res.status }));
@@ -324,6 +345,32 @@ function Bar(): React.ReactElement {
           >
             <GraphIcon />
             打开节点图
+          </button>
+          {/* 学习 / 分工：同一张图换一种读法。用户原话是「在基础面板的按钮上有个切换」，
+              所以入口放在这里，而不是让人先开图再找。 */}
+          <button
+            type="button"
+            className="dshwork-open dshwork-ghost"
+            data-dsh-work-learn="1"
+            onClick={() => void openCompanion("graph", "learn")}
+            disabled={opening || !graph.enabled}
+            title={graph.enabled ? "打开节点图并切到「学习」：右边给这颗的基础知识与详解流程" : graph.hint}
+            aria-label="打开节点图的学习页"
+            style={railButtonStyle(graph.enabled && !opening)}
+          >
+            学习
+          </button>
+          <button
+            type="button"
+            className="dshwork-open dshwork-ghost"
+            data-dsh-work-office="1"
+            onClick={() => void openCompanion("graph", "office")}
+            disabled={opening || !graph.enabled}
+            title={graph.enabled ? "打开节点图并切到「分工」：哪部分 AI 做、哪部分人做" : graph.hint}
+            aria-label="打开节点图的分工页"
+            style={railButtonStyle(graph.enabled && !opening)}
+          >
+            分工
           </button>
         </span>
       </div>

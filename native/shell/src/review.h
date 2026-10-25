@@ -34,6 +34,9 @@ struct Row {
   // 这一颗是不是文档的「当前任务」（doc.pointer 指的正是它）。
   // 和「选中」是两件事：选中是手里拿着的，当前是文档里站着的那一步。
   bool current = false;
+  // 交给 AI 的那条线走到哪了：offered / running / review / accepted / returned，
+  // 空 = 没交。右侧「分工」栏靠它分「AI 在做」和「人来做」两摞。
+  std::string handoff;
 
   // 排版结果（世界坐标，DIP）。父节点用它的孩子算垂直位置。
   float x = 0.0f;
@@ -83,6 +86,12 @@ struct Model {
 
   // 每颗节点「第一次被看到」的时刻，用来让新长出来的框错开淡入。
   std::unordered_map<std::string, ULONGLONG> appear;
+
+  // 右侧那一栏。用户原话：「在基础面板的按钮上有个切换选项，切到学习」「现在的流程
+  // 其实就是办公界面」——两者都是"把眼下这张图换个读法"，所以用同一栏、两个页签：
+  // 学习 = 这颗在讲什么 + 它拆出来的流程；分工 = 哪些交给 AI、哪些留给人。
+  enum class Rail { Off, Learn, Office };
+  Rail rail = Rail::Off;
 };
 
 struct Anim {
@@ -102,7 +111,8 @@ constexpr float kGapX = 48.0f;   // 列间距：够画连线就行，太宽一�
 constexpr float kGapY = 20.0f;   // 行间距
 constexpr float kNodeRadius = 14.0f;
 
-constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定\nconstexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
+constexpr float kMinZoom = 0.28f;      // 手动缩放的下限：内容再宽也让人自己决定
+constexpr float kMinFitZoom = 1.0f;   // 自动适配也不缩小：字就是设计尺寸，放不下就让人自己拖/滚
 constexpr float kMaxZoom = 1.60f;
 
 // 一长条是一行排开：一颗占 kNodeW + kGapX = 224 DIP。1600 正好放得下 7 颗
@@ -113,8 +123,24 @@ constexpr float kWindowH = 720.0f;
 constexpr float kCommitW = 108.0f;
 constexpr float kCommitH = 32.0f;
 
+// 右侧「学习 / 分工」栏：宽度固定，图区让出这一段。
+// 开栏时窗口整体加宽同样的宽度 —— 不然挤窄的只会是节点，字还是那么大，白白换掉一屏节点。
+constexpr float kRailW = 300.0f;
+constexpr float kRailGap = 16.0f;
+constexpr float kRailPad = 18.0f;
+// 头带上那两颗切换按钮（学习 / 分工）
+constexpr float kRailChipW = 52.0f;
+constexpr float kRailChipH = 22.0f;
+constexpr float kRailChipGap = 8.0f;
+
+inline bool RailOn(const Model& m) { return m.rail != Model::Rail::Off; }
+
 inline float WindowWidth(const Model& m) {
-  return (m.avail_w > 0.0f && m.avail_w < kWindowW) ? m.avail_w : kWindowW;
+  float base = (m.avail_w > 0.0f && m.avail_w < kWindowW) ? m.avail_w : kWindowW;
+  if (RailOn(m)) base += kRailW + kRailGap;
+  // 栏开了也不能冲出屏幕：屏幕比这还窄时，宁可挤图区。
+  if (m.avail_w > 0.0f && base > m.avail_w) base = m.avail_w;
+  return base;
 }
 // 窗口高度跟着内容长：一层节点就是一条扁条，展开子层再长高。
 // 夹在 [kMinWindowH, kWindowH] 之间：太小放不下页脚，太大就失去浮层的轻快感。
@@ -134,11 +160,17 @@ inline float LessonReserve(const Model& m) { return LessonCardOn(m) ? kLessonCar
 
 inline float WindowHeight(const Model& m) {
   if (m.content_h <= 0.0f) return kWindowH;
-  const float min_h = kMinWindowH + LessonReserve(m);
+  // 开右栏时窗口至少要够"标题 + 四行说明 + 三条流程"——不然那一栏变成一条缝，
+  // 字挤在一起还不如不开。
+  const float min_h = (RailOn(m) ? 400.0f : kMinWindowH) + LessonReserve(m);
   const float want = kHeader + kFooter + m.content_h + kPad * 2.0f + LessonReserve(m);
   return want < min_h ? min_h : (want > kWindowH ? kWindowH : want);
 }
-inline float BodyWidth(const Model& m) { return WindowWidth(m); }
+// 图区宽度：开了右栏就把那一段让出去（排版、缩放、命中都用这一个数）。
+inline float BodyWidth(const Model& m) {
+  const float full = WindowWidth(m);
+  return RailOn(m) ? (full - kRailW - kRailGap) : full;
+}
 inline float BodyHeight(const Model& m) { return WindowHeight(m) - kHeader - kFooter; }
 
 inline float EaseOut(float t) {
@@ -275,7 +307,8 @@ inline void FitView(Model& model) {
     zoom = zx < zy ? zx : zy;  // 手写比较：windows.h 的 min 宏会吃掉 std::min
   }
   if (zoom > 1.0f) zoom = 1.0f;
-  // 自动适配时别把字缩到看不清：够不着就让人自己拖，不硬塞\n  if (zoom < kMinFitZoom) zoom = kMinFitZoom;
+  // 自动适配时别把字缩到看不清：够不着就让人自己拖，不硬塞
+  if (zoom < kMinFitZoom) zoom = kMinFitZoom;
   model.zoom = zoom;
 
   // 居中：把内容中心搬到面板中心
@@ -322,7 +355,8 @@ inline D2D1_RECT_F CommitRectAt(float width_dip, float height_dip) {
 }
 
 inline bool CommitHit(const Model& model, float x, float y) {
-  const D2D1_RECT_F rect = CommitRectAt(WindowWidth(model), WindowHeight(model));
+  // 开右栏时按钮跟着图区右缘走，别钻到栏底下。
+  const D2D1_RECT_F rect = CommitRectAt(BodyWidth(model), WindowHeight(model));
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
@@ -393,11 +427,189 @@ inline D2D1_RECT_F LessonCardRect(float width_dip, float height_dip) {
   return D2D1::RectF(kPad, bottom - kLessonCardH, width_dip - kPad, bottom);
 }
 
-/** 点在这张卡里吗？卡没开时永远 false。 */
+/** 右侧那栏的矩形（定义在下面 LessonCardHit 之后；这里先声明，画栏要用）。 */
+inline D2D1_RECT_F RailRect(float width_dip, float height_dip);
+/** UTF-8 → UTF-16（定义在文件后半段；画栏先用到）。 */
+inline std::wstring WidenNode(const std::string& text);
+
+/** 把一段中文按字数硬折行：这个分层窗口里 DWrite 不做自动换行（见 FitText 的注释）。 */
+inline std::vector<std::wstring> WrapRough(const std::wstring& text, size_t per_line, size_t max_lines = 4) {
+  std::vector<std::wstring> lines;
+  if (text.empty() || per_line == 0 || max_lines == 0) return lines;
+  size_t i = 0;
+  while (i < text.size() && lines.size() < max_lines) {
+    lines.push_back(text.substr(i, per_line));
+    i += per_line;
+  }
+  if (i < text.size() && !lines.empty()) lines.back() += L"…";
+  return lines;
+}
+
+/** 右侧那栏的矩形（定义在下面 LessonCardHit 之后；这里先声明，画栏要用）。 */
+inline D2D1_RECT_F RailRect(float width_dip, float height_dip);
+
+/**
+ * 右侧「学习 / 分工」栏。
+ *
+ * 一栏两用：学习页签回答"这颗在讲什么、它拆出什么步骤"，分工页签回答"哪些交给 AI、
+ * 哪些留给人"。两者都是把同一张图换个读法，所以共用宽度、共用位置，只是内容不同。
+ * 栏开了以后图区会变窄（BodyWidth 让出 kRailW + kRailGap），节点跟着重排。
+ */
+inline void DrawRail(ID2D1RenderTarget* target, const Model& model, const PanelFormats& fmt, float width_dip,
+                     float height_dip, float alpha) {
+  if (!RailOn(model)) return;
+  const D2D1_RECT_F rail = RailRect(width_dip, height_dip);
+  ui::FillRound(target, fmt.brush, rail, 16.0f, ui::Fade(0xFF191B22, alpha));
+  ui::StrokeRound(target, fmt.brush, rail, 16.0f, ui::Fade(0xFFFFFFFF, 0.07f * alpha), 0.5f);
+
+  const float left = rail.left + kRailPad;
+  const float right = rail.right - kRailPad;
+  const float limit = rail.bottom - 6.0f;
+  float y = rail.top + 14.0f;
+
+  const bool learn = model.rail == Model::Rail::Learn;
+  ui::Text(target, learn ? L"学习" : L"分工", fmt.title, D2D1::RectF(left, y, right, y + 20.0f), fmt.brush,
+           ui::Fade(ui::kText, alpha));
+  y += 28.0f;
+
+  const Row* sel = nullptr;
+  if (model.selected >= 0 && static_cast<size_t>(model.selected) < model.rows.size()) {
+    sel = &model.rows[static_cast<size_t>(model.selected)];
+  }
+
+  if (learn) {
+    // 学哪一颗：Tab / 上下键换，标题跟着走。
+    const std::wstring heading = sel != nullptr ? WidenNode(sel->title) : L"先点一颗节点";
+    ui::Text(target, ui::FitText(heading, right - left, 11.5f), fmt.body, D2D1::RectF(left, y, right, y + 18.0f),
+             fmt.brush, ui::Fade(sel != nullptr ? ui::kText : ui::kTextDim, alpha));
+    y += 26.0f;
+
+    ui::Text(target, L"基础知识", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+             ui::Fade(ui::kAccent, alpha));
+    y += 20.0f;
+    std::string body;
+    if (sel != nullptr) body = sel->detail.empty() ? sel->acceptance : sel->detail;
+    const std::wstring wide = body.empty() ? std::wstring(L"（这颗没写基础说明）") : WidenNode(body);
+    for (const std::wstring& line : WrapRough(wide, 20, 4)) {
+      if (y + 16.0f > limit) break;
+      ui::Text(target, line, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+               ui::Fade(ui::kTextDim, alpha));
+      y += 17.0f;
+    }
+
+    y += 10.0f;
+    if (y + 16.0f <= limit) {
+      ui::Text(target, L"详解流程", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+               ui::Fade(ui::kAccent, alpha));
+      y += 20.0f;
+    }
+    int shown = 0;
+    if (model.selected >= 0) {
+      for (size_t i = 0; i < model.rows.size() && shown < 3; ++i) {
+        if (model.rows[i].parent != model.selected) continue;
+        if (y + 16.0f > limit) break;
+        const std::wstring line = std::to_wstring(shown + 1) + L". " + WidenNode(model.rows[i].title);
+        ui::Text(target, ui::FitText(line, right - left, 11.0f), fmt.meta, D2D1::RectF(left, y, right, y + 16.0f),
+                 fmt.brush, ui::Fade(ui::kTextDim, alpha));
+        y += 17.0f;
+        shown += 1;
+      }
+    }
+    if (shown == 0 && y + 16.0f <= limit) {
+      ui::Text(target, L"（还没拆出下一步：点右上 +N 拆一颗）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+               ui::Fade(ui::kTextDim, alpha));
+    }
+    return;
+  }
+
+  // 分工：同一棵树按"谁来做"重排成两摞。做完/跳过的先不算 —— 它们已经不在盘子里了。
+  int ai = 0;
+  int human = 0;
+  for (const Row& row : model.rows) {
+    if (row.status == "done" || row.status == "skipped") continue;
+    if (row.handoff.empty()) {
+      human += 1;
+    } else {
+      ai += 1;
+    }
+  }
+  const std::wstring ai_head = L"AI 来做（" + std::to_wstring(ai) + L"）";
+  ui::Text(target, ai_head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kAccent, alpha));
+  y += 20.0f;
+  int shown_ai = 0;
+  for (const Row& row : model.rows) {
+    if (row.status == "done" || row.status == "skipped" || row.handoff.empty()) continue;
+    if (y + 16.0f > limit) break;
+    const std::wstring line = WidenNode(row.title);
+    ui::Text(target, ui::FitText(L"· " + line, right - left, 11.0f), fmt.meta, D2D1::RectF(left, y, right, y + 16.0f),
+             fmt.brush, ui::Fade(ui::kTextDim, alpha));
+    y += 17.0f;
+    shown_ai += 1;
+  }
+  if (shown_ai == 0 && y + 16.0f <= limit) {
+    ui::Text(target, L"（还没有交给 AI 的）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+             ui::Fade(ui::kTextDim, alpha));
+    y += 17.0f;
+  }
+
+  y += 10.0f;
+  const std::wstring human_head = L"人来做（" + std::to_wstring(human) + L"）";
+  if (y + 16.0f <= limit) {
+    ui::Text(target, human_head, fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+             ui::Fade(ui::kText, alpha));
+    y += 20.0f;
+  }
+  int shown_human = 0;
+  for (const Row& row : model.rows) {
+    if (row.status == "done" || row.status == "skipped" || !row.handoff.empty()) continue;
+    if (y + 16.0f > limit) break;
+    ui::Text(target, ui::FitText(L"· " + WidenNode(row.title), right - left, 11.0f), fmt.meta,
+             D2D1::RectF(left, y, right, y + 16.0f), fmt.brush, ui::Fade(ui::kTextDim, alpha));
+    y += 17.0f;
+    shown_human += 1;
+  }
+  if (shown_human == 0 && y + 16.0f <= limit) {
+    // 不能说死「都交给 AI 了」：人做那一摞空着的常见原因是剩下的都收尾了。
+    ui::Text(target, L"（没有要人做的）", fmt.meta, D2D1::RectF(left, y, right, y + 16.0f), fmt.brush,
+             ui::Fade(ui::kTextDim, alpha));
+  }
+}
+
 inline bool LessonCardHit(const Model& model, float x, float y) {
   if (!LessonCardOn(model)) return false;
-  const D2D1_RECT_F card = LessonCardRect(WindowWidth(model), WindowHeight(model));
+  const D2D1_RECT_F card = LessonCardRect(BodyWidth(model), WindowHeight(model));
   return x >= card.left && x <= card.right && y >= card.top && y <= card.bottom;
+}
+
+/** 右侧那栏的矩形：贴着右边缘，从标题栏下方一直到底部页脚上方。 */
+inline D2D1_RECT_F RailRect(float width_dip, float height_dip) {
+  const float right = width_dip - kRailPad;
+  const float left = right - kRailW;
+  return D2D1::RectF(left, kHeader + 10.0f, right, height_dip - kFooter - 10.0f);
+}
+
+/**
+ * 头带上那两颗切换按钮（0 = 学习，1 = 分工）。
+ *
+ * 用户要的是「在基础面板的按钮上有个切换选项」——网页玻璃条那边也有入口，
+ * 但人一旦站在图里，最顺手的还是就地切，所以头带上再放一对。
+ */
+inline D2D1_RECT_F RailChipRect(const Model& model, int which) {
+  const float width_dip = WindowWidth(model);
+  // 「N 件事」占着最右 130 DIP，两个按钮排在它左边（再留 10 DIP 空隙，
+  // 否则按钮的圆角会压在计数文字上 —— 第一版就是这么糊在一起的）。
+  const float right = width_dip - kPad - 140.0f - static_cast<float>(1 - which) * (kRailChipW + kRailChipGap);
+  return D2D1::RectF(right - kRailChipW, kHeader * 0.5f - kRailChipH * 0.5f + 4.0f, right,
+                     kHeader * 0.5f + kRailChipH * 0.5f + 4.0f);
+}
+
+/** 点在哪个切换按钮上：0 = 学习，1 = 分工，-1 = 都没点。 */
+inline int RailChipAt(const Model& model, float x, float y) {
+  for (int i = 0; i < 2; ++i) {
+    const D2D1_RECT_F chip = RailChipRect(model, i);
+    if (x >= chip.left && x <= chip.right && y >= chip.top && y <= chip.bottom) return i;
+  }
+  return -1;
 }
 
 
@@ -566,11 +778,23 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
 
   // ---- 标题栏 ----
   const std::wstring heading = model.title.empty() ? L"任务树" : model.title;
-  ui::Text(target, heading, fmt.title, D2D1::RectF(kPad, 16.0f, width_dip - kPad - 90.0f, 42.0f), fmt.brush,
+  ui::Text(target, heading, fmt.title, D2D1::RectF(kPad, 16.0f, width_dip - kPad - 200.0f, 42.0f), fmt.brush,
            ui::Fade(ui::kText, a));
   const std::wstring count = std::to_wstring(model.total) + L" 件事";
   ui::Text(target, count, fmt.meta, D2D1::RectF(width_dip - kPad - 130.0f, 20.0f, width_dip - kPad, 40.0f),
            fmt.brush, ui::Fade(ui::kTextDim, a));
+
+  // 头带上的「学习 / 分工」切换：网页玻璃条上也有入口，但人在图里时最顺手的是就地切。
+  // 开着的那个填色、字变白，另一个只留描边 —— 一眼看得出现在是哪种读法。
+  for (int i = 0; i < 2; ++i) {
+    const bool on = (i == 0 && model.rail == Model::Rail::Learn) || (i == 1 && model.rail == Model::Rail::Office);
+    const D2D1_RECT_F chip = RailChipRect(model, i);
+    ui::FillRound(target, fmt.brush, chip, 7.0f, ui::Fade(on ? 0x330A84FF : 0x10FFFFFF, a));
+    ui::StrokeRound(target, fmt.brush, chip, 7.0f, ui::Fade(on ? ui::kAccent : 0xFFFFFFFF, (on ? 0.9f : 0.14f) * a),
+                    0.7f);
+    ui::TextCentered(target, i == 0 ? L"学习" : L"分工", fmt.meta, chip, fmt.brush,
+                     ui::Fade(on ? 0xFFFFFFFF : ui::kTextDim, a));
+  }
 
   // ---- 图区 ----
   const D2D1_RECT_F body = D2D1::RectF(0.0f, kHeader, width_dip, height_dip - kFooter);
@@ -824,13 +1048,17 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
   target->PopAxisAlignedClip();
   target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 
+  // ---- 右侧栏 ----
+  // 画在图区裁剪之外：栏本身是固定的，不跟着节点的缩放/平移走。
+  DrawRail(target, model, fmt, width_dip, height_dip, a);
+
   // ---- 讲解卡 ----
   //
   // 讲的内容是宿主的模型现写的，长度不可控，所以它是"浮"在图区底部的一条，
   // 而不是长在节点里：关掉之后节点还是原来那个样子。
   if (LessonCardOn(model)) {
     const bool failed = model.lesson_phase == 3;
-    const D2D1_RECT_F card = LessonCardRect(width_dip, height_dip);
+    const D2D1_RECT_F card = LessonCardRect(BodyWidth(model), height_dip);
     ui::FillRound(target, fmt.brush, card, 14.0f, ui::Fade(0xF21B1D24, a));
     ui::StrokeRound(target, fmt.brush, card, 14.0f, ui::Fade(failed ? 0xFFFF9F0A : ui::kAccent, 0.45f * a), 1.0f);
 
@@ -891,7 +1119,7 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),
            fmt.brush, ui::Fade(hint_ink, a));
 
-  const D2D1_RECT_F commit = CommitRectAt(width_dip, height_dip);
+  const D2D1_RECT_F commit = CommitRectAt(BodyWidth(model), height_dip);
   ui::FillRound(target, fmt.brush, commit, kCommitH * 0.5f,
                 model.busy ? ui::Fade(0xFF3A3A40, a) : ui::Fade(ui::kAccent, a));
   ui::TextCentered(target, model.read_only ? L"知道了" : L"就这样", fmt.body, commit, fmt.brush,

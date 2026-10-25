@@ -268,6 +268,28 @@ test('打开面板：POST 留指令，/api/state 把它送给伴随层', async (
       body: JSON.stringify({ target: 'desktop' }),
     });
     assert.equal(bad.status, 400);
+
+    // rail：开节点图时顺手带上「怎么读」。合法值透传进指令与状态，
+    // 乱写要挡在路由口 —— 伴随层不认识的值会让它默默退回普通读法，人看不出错在哪。
+    const learn = await fetch(`${h.base}/api/ui/open`, {
+      method: 'POST',
+      body: JSON.stringify({ target: 'graph', rail: 'learn' }),
+    });
+    assert.equal(learn.status, 200);
+    const learnOutcome = (await learn.json()) as { command: { target: string; rail?: string } };
+    assert.equal(learnOutcome.command.target, 'graph');
+    assert.equal(learnOutcome.command.rail, 'learn');
+
+    const learnState = (await (await fetch(`${h.base}/api/state`)).json()) as {
+      ui: { target: string; rail?: string } | null;
+    };
+    assert.equal(learnState.ui?.rail, 'learn');
+
+    const badRail = await fetch(`${h.base}/api/ui/open`, {
+      method: 'POST',
+      body: JSON.stringify({ target: 'graph', rail: 'study' }),
+    });
+    assert.equal(badRail.status, 400);
   } finally {
     await h.close();
   }
