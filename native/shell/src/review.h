@@ -836,13 +836,20 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     hint = model.note;
     hint_ink = ui::kText;
   } else if (LessonCardOn(model)) {
-    hint = L"讲解开着 · Esc 关掉 · ↑↓ 换一颗 · 拖空白平移 · 滚轮缩放";
+    // 卡片有两种来源（左键的本地详解 / 「讲讲它」的模型讲解），这行不偏向任何一边。
+    hint = L"卡片开着 · Esc 关掉 · ↑↓ 换一颗 · 拖空白平移 · 滚轮缩放";
   } else if (model.lesson_phase == 1) {
     hint = L"正在讲…（一颗概念节点讲一段，讲完会浮在这下面）· Esc 关掉";
+  } else if (anim.hover_row >= 0 && static_cast<size_t>(anim.hover_row) < model.rows.size()) {
+    // 鼠标停在哪颗上，就把那颗能做的两件事直接说出来。
+    // 悬停是唯一能让「右键 = 完成」被发现的时机——图上没有右键菜单，光标也不变。
+    hint = model.read_only ? L"右键这颗 = 标记完成 · 左键 = 看详解 · 双击 = 设为当前任务"
+                           : L"左键这颗 = 看详解 · Enter = 再拆一层";
+    hint_ink = ui::kText;
   } else if (model.read_only) {
-    hint = L"双击节点 = 设为当前任务 · ↑↓ 选 · Enter 展开/收起 · 点概念节点「讲讲它」听讲解 · Esc 关闭";
+    hint = L"左键 = 看详解 · 右键 = 标记完成 · 双击 = 设为当前任务 · Enter 展开/收起 · Esc 关闭";
   } else {
-    hint = L"↑↓ 选 · Enter 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
+    hint = L"左键 = 看详解 · Enter 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
   }
   ui::Text(target, hint, fmt.meta,
            D2D1::RectF(kPad, height_dip - kFooter + 14.0f, width_dip - kPad - kCommitW - 20.0f, height_dip - 8.0f),

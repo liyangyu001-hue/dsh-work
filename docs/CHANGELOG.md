@@ -1,5 +1,16 @@
 # 变更日志
 
+## 2026-10-25 · 节点图上「右键完成、左键看详解」：手不用离开图，也不用等模型
+
+用户原话是「节点图加『完成这颗』——做这个」「当鼠标移到子节点上 就能右键 完成 左键 给到详解」。之前完成一颗只能在面板右下点「完成」（`node.advance`）或者全局双击 Tab；节点图上只有双击设当前任务、Enter 展开/收起、概念节点的「讲讲它」。
+
+- **右键一颗 = 标记完成**：`ReviewProc` 收到 `WM_RBUTTONDOWN` 后把物理坐标 ÷ `ReviewScale()` 换成 DIP，用 `review::NodeAt` 找行，记下 `g_review_menu_row` 再 `PostMessageW(kMsgReview, 7)` 回主线程（鼠标消息里不能直接起线程干活，和现有 1~6 号消息同一套规矩）。`CompleteRow()` 先挡三种情况：草稿模式（节点还没落库，宿主认不出 id）、已经 `done`、已经 `skipped`——分别回一句人话，不发请求；其余起后台线程 `PostIntent("node.complete", id)`，宿主那条 intent 本来就认 `nodeId`（`packages/core/src/state.ts:336`）。
+- **左键单击 = 就地看详解**：不再只是「选中」。`ShowNodeDetail()` 把这一颗的 `acceptance`（没有就退回 `detail`）铺进现有的讲解卡（`lesson_phase = 2`），状态单独拼一行「已完成 / 已跳过 / 当前任务 · 正在做 / 正在进行 / 待办 · N 步 · Esc 关掉 · 点别处也行」。**全程不请求模型**——这是本地已有的字段，和「讲讲它」（`/api/learn`）不是一回事。双击仍是设当前任务，再点同一颗仍是拆开/收起。
+- **顺手补了两个「写了但从没生效」的东西**：① `review::Anim::hover_row` 在 `main.cpp` 里只有声明、没有赋值，所以绘制侧的悬停高亮和悬停页脚提示一直没出现过——`RepaintReview()` 现在把 `g_review_hover_row` 传进去；② 右键把当前任务标完成后，卡片上那句「当前任务 · 正在做」会留在原地（`RefreshReviewDoc()` 原样保留 `lesson_*`），新增 `RefreshDetailCard()`：只有当卡片是「本地详解」时才按最新行重灌，`讲讲它` 的模型讲解不受影响。
+- 页脚：只读文档图改成 `左键 = 看详解 · 右键 = 标记完成 · 双击 = 设为当前任务 · Enter 展开/收起 · Esc 关闭`，草稿改成 `左键 = 看详解 · Enter 再拆一层 · Ctrl+Enter 就这样 · Esc 不要了`，悬停时再教一遍；卡片开着时那句从「讲解开着」改成中性的「卡片开着 · Esc 关掉 · ↑↓ 换一颗 · 拖空白平移 · 滚轮缩放」。
+
+验收没有碰真实任务库：起了一个 mock 宿主（`node:` http，把真实 `/api/state` 的一份拷贝里某颗改成 `active`），伴随层用独立 `DSH_HOME` 指过去。左键 → 窗口从 2400×390 长到 2400×522、卡片里是这颗的 acceptance（`rc-detail2.png`）；右键 → 日志「审阅：标记完成 nd_…」「意图已提交：node.complete」，`mock-intents.ndjson` 收到 `{"intent":{"type":"node.complete","nodeId":"nd_01m5fjfadd4ht037a7e"},"by":"human"}`，图跟着状态重画、卡片自己变成「已完成」（`rc-complete.png`）；对已收尾的再点右键，页脚回「这颗已经完成了」（`rc-guard4-footer.png`）。原生 595.5 KB（只剩两条旧警告），`pnpm test` 130 绿、`pnpm typecheck` 干净。
+
 ## 2026-10-25 · 节点图连线流光改成「轮动展示」：一次只亮一条边，走完最后一条回第一条
 
 原来 `native/shell/src/review.h` 给每条边错开 `i * 0.11` 的相位（`phase = flow_phase + i * 0.11f`），于是**所有边同时在流**，看上去像一条并行流水线，反而看不出「现在走到哪一步」。按用户「轮动展示」的原话（追问后选定「节点图里节点间的流光线节奏」）改成：

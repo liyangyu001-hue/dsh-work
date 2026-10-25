@@ -257,6 +257,12 @@ int g_review_hover_row = -1;
 int g_review_last_click_row = -1;
 ULONGLONG g_review_last_click_at = 0;
 ULONGLONG g_review_hover_at = 0;
+// 右键点在谁身上。右键本身不碰窗口（窗口归 UI 线程），只把行号记在这儿，
+// 再 PostMessage 回主循环去做（和「再拆一层」「讲讲它」同一条路）。
+int g_review_menu_row = -1;
+// 卡片里装的是「本地详解」（左键，验收 + 详情）还是「模型讲的一段」（讲讲它）。
+// 两者复用同一块卡片，但轮询重建时只有前者要跟着节点状态刷新。
+bool g_review_detail_local = false;
 
 void RepaintReview();
 void ReviewKey(int which);
@@ -275,6 +281,12 @@ void RefreshReviewDoc();
 void SetReviewHint(const std::wstring& text, ULONGLONG ms = 2600);
 /** 把图上第 index 行设成当前任务（定义在 ShowReviewDoc 之后）。 */
 void TryFocusRow(int index);
+/** 右键：把第 index 行标记完成（定义在 ShowReviewDoc 之后）。 */
+void CompleteRow(int index);
+/** 左键：把第 index 行的验收/详情就地铺成讲解卡（不请求模型，定义同处）。 */
+void ShowNodeDetail(int index);
+/** 本地详解开着时按最新行内容刷一遍卡片（定义在 ShowNodeDetail 之后）。 */
+void RefreshDetailCard();
 // 后台拿回结果后由 kMsgReview 6 在 UI 线程贴到模型上（定义在 StartLesson 之后）。
 void ApplyLessonOutcome();
 // 「讲讲它」的结果：网络在后台线程跑，回来后 PostMessage(kMsgReview, 6) 交给 UI 线程。
@@ -1205,6 +1217,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case 6:  // 「讲讲它」回来了
           ApplyLessonOutcome();
           return 0;
+        case 7:  // 右键某颗 = 把它标记完成
+          CompleteRow(g_review_menu_row);
+          return 0;
         default:
           return 0;
       }
@@ -1884,6 +1899,10 @@ void RepaintReview() {
   anim.open = g_review_anim_open;
   anim.highlight_y = g_review_hl_y;
   anim.now = GetTickCount64();
+  // 鼠标停在哪颗：绘制侧据此提亮那颗、「讲讲它」跟着变手型，
+  // 页脚也会换成这张图上能做的动作（右键完成就在这句里被说出来）。
+  // 之前这个字段一直没人填，等于悬停态从没画出来过。
+  anim.hover_row = g_review_hover_row;
   dshwork::review::Draw(g_target, model, formats, g_reviewScale, static_cast<float>(px_w) / g_reviewScale,
                         static_cast<float>(px_h) / g_reviewScale, 1.0f, anim);
   if (FAILED(g_target->EndDraw())) LogToFile("审阅窗绘制失败");
@@ -2161,8 +2180,27 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
       // 点了跟没点一样（踩过）。收起的出口只能有一个，否则两条路各错各的。
       if (again && g_window != nullptr) {
         PostMessageW(g_window, kMsgReview, 2, 0);
+      } else {
+        // 单击 = 看这颗的详解（验收 + 详情就地铺成卡片，不请求模型）。
+        // 双击仍然走上面那条「设为当前任务」，两者靠 400ms 的判定分开。
+        ShowNodeDetail(index);
       }
       RepaintReview();
+    }
+    return 0;
+  }
+  if (message == WM_RBUTTONDOWN) {
+    // 右键 = 把鼠标底下这颗标记完成。
+    // 坐标同样先换成 DIP（理由见 WM_LBUTTONDOWN 那段）。
+    const float scale_ok = ReviewScale();
+    const float x = static_cast<float>(GET_X_LPARAM(lparam)) / scale_ok;
+    const float y = static_cast<float>(GET_Y_LPARAM(lparam)) / scale_ok;
+    const int index = dshwork::review::NodeAt(g_review_model, x, y);
+    if (index >= 0) {
+      g_review_menu_row = index;
+      g_review_model.selected = index;
+      RepaintReview();
+      if (g_window != nullptr) PostMessageW(g_window, kMsgReview, 7, 0);
     }
     return 0;
   }
@@ -2180,6 +2218,8 @@ LRESULT CALLBACK ReviewProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
  */
 void StartLesson(const std::string& node_id) {
   if (node_id.empty()) return;
+  // 从这一刻起卡片归模型讲的内容，轮询重建不要再拿本地验收去覆盖它。
+  g_review_detail_local = false;
   if (g_review_model.lesson_unsupported) {
     // 已经知道这个宿主没有讲解接口：别再烧一次请求，直接把原因摆出来。
     g_review_model.lesson_node = node_id;
@@ -2589,6 +2629,8 @@ void RefreshReviewDoc() {
     break;
   }
   dshwork::review::ClampPan(g_review_model);
+  // 卡片开着、而且装的是本地详解：按刚重建出来的行把「当前任务 / 已完成」刷成新的。
+  RefreshDetailCard();
   LayoutReview();  // 行数可能变了：窗口按新的内容高度长一下
   RepaintReview();
   LogToFile(pointer_changed ? "节点图跟着状态重画：当前任务 → " + pointer
@@ -2619,6 +2661,97 @@ void TryFocusRow(int index) {
   const std::string id = row.id;
   LogToFile("审阅：设为当前任务 " + id);
   std::thread([id]() { PostIntent("node.focus", id); }).detach();
+}
+
+/**
+ * 右键一颗节点 = 把它标记完成。
+ *
+ * 为什么不是本地改状态：这一步的真假由宿主的状态机说了算（比如它可能还在等
+ * 子节点），本地改完下一轮轮询又会被打回去，看起来就是"点了没反应"。所以这里
+ * 只发意图，圆点怎么变交给下一次轮询——和双击设当前任务同一条路。
+ */
+void CompleteRow(int index) {
+  if (!g_review_read_only) {
+    // 草稿里的节点还没落库，宿主认不出这些 id（同 TryFocusRow 的理由）。
+    SetReviewHint(L"草稿里的节点还没落库，先收下再标完成");
+    return;
+  }
+  if (index < 0 || static_cast<size_t>(index) >= g_review_model.rows.size()) return;
+  const dshwork::review::Row& row = g_review_model.rows[static_cast<size_t>(index)];
+  if (row.status == "done") {
+    LogToFile("审阅：右键这颗已经收尾，不重复标 " + row.id);
+    SetReviewHint(L"这颗已经完成了");
+    return;
+  }
+  if (row.status == "skipped") {
+    SetReviewHint(L"这颗已经跳过了，不用再标完成");
+    return;
+  }
+  const std::string id = row.id;
+  LogToFile("审阅：标记完成 " + id);
+  SetReviewHint(L"完成：" + dshwork::Widen(row.title));
+  std::thread([id]() { PostIntent("node.complete", id); }).detach();
+}
+
+/**
+ * 把一颗节点的「验收 + 详情」灌进卡片（纯字段，不排版、不重画）。
+ *
+ * 抽出来是因为两处都要用：左键点开时灌一次；轮询发现这颗状态变了（比如刚被
+ * 右键标完成）时再灌一次 —— 否则卡片上会一直挂着「当前任务 · 正在做」。
+ */
+void FillNodeDetail(const dshwork::review::Row& row) {
+  // 先验收再详情：人问"这步怎么算做完"，验收就是答案。
+  std::string body = !row.acceptance.empty() ? row.acceptance : row.detail;
+  if (body.empty()) body = "这颗还没写验收和详情。右键可以标完成，双击可以设成当前任务。";
+  std::string hint;
+  if (row.status == "done") {
+    hint = "已完成";
+  } else if (row.status == "skipped") {
+    hint = "已跳过";
+  } else if (row.current) {
+    hint = "当前任务 · 正在做";
+  } else if (row.status == "active") {
+    hint = "正在进行";
+  } else {
+    hint = "待办";
+  }
+  if (row.has_children) {
+    hint += (row.expanded ? " · 已摊开 " : " · 收着 ") + std::to_string(row.child_count) + " 颗";
+  }
+  hint += " · Esc 关掉 · 点别处也行";
+  g_review_model.lesson_node = row.id;
+  // 2 = 有内容可看（1 是"正在讲"，3 是"讲不了"），和讲解卡的状态机复用。
+  g_review_model.lesson_phase = 2;
+  g_review_model.lesson_title = row.title.empty() ? std::string("详解") : row.title;
+  g_review_model.lesson_text = body;
+  g_review_model.lesson_hint = hint;
+}
+
+/**
+ * 左键一颗节点 = 就地看这颗的详解。
+ *
+ * 用讲解卡那块地方（同一个 model 的 lesson_* 字段），但**不请求模型**：
+ * 人想先知道「这颗要做什么、怎么算做完」，这些宿主早就写好了（验收 / 详情），
+ * 立刻能看；要模型现讲一段那是另一颗按钮「讲讲它」的事。
+ */
+void ShowNodeDetail(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= g_review_model.rows.size()) return;
+  const dshwork::review::Row& row = g_review_model.rows[static_cast<size_t>(index)];
+  g_review_detail_local = true;  // 本地详解：轮询重建时要跟着节点状态刷
+  FillNodeDetail(row);
+  LogToFile("审阅：看详解 " + row.id);
+  LayoutReview();  // 卡片占掉图区底部一条，窗口高度要跟着长
+  RepaintReview();
+}
+
+/** 本地详解开着时，按最新的行内容把卡片重灌一遍（轮询重建后调用）。 */
+void RefreshDetailCard() {
+  if (!g_review_detail_local || g_review_model.lesson_phase != 2) return;
+  for (size_t i = 0; i < g_review_model.rows.size(); ++i) {
+    if (g_review_model.rows[i].id != g_review_model.lesson_node) continue;
+    FillNodeDetail(g_review_model.rows[i]);
+    return;
+  }
 }
 
 /**
