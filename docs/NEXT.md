@@ -172,7 +172,7 @@ node scripts/push-via-api.mjs <远端当前 sha>
 git rev-parse HEAD^{tree} 与 GET /git/commits/<远端sha> 的 .tree.sha 对账）。
 推完把远端新 sha 记在下面这行，下一轮用它当起点。
 
-> 当前远端 sha：**开工前现取**（`GET https://api.github.com/repos/liyangyu001-hue/dsh-work/git/ref/heads/main`），别信这行的具体值——push-via-api 每次重放都会改写 sha。历史记录：最近一次推送把本地 29b1814（ROADMAP 对账）重放成远端 \$(f7b87e4bee897e6f65b54761f6e23f821e588594.Substring(0,7))\，本轮回填提交重放后是下一轮的第一个提交。
+> 当前远端 sha：**开工前现取**（`GET https://api.github.com/repos/liyangyu001-hue/dsh-work/git/ref/heads/main`），别信这行的具体值——push-via-api 每次重放都会改写 sha。历史记录：最近一次推送把本地 `baeebee`（③ 网页档案复验证据）重放成远端 `ee3b8ba`，本轮回填提交重放后是下一轮的第一个提交。
 > 上一轮记的 `50587dcb65bdc197a2aa3d8ce078a5554b2946ab`（轮动展示那轮）、`0beddc8f38c4bc428abde0ebd0b9b31c5f972580`（轮动口径那轮）、`3a2c89bb073cc7ab33c4cf59d3ed00a28bfb1831`（面板事件流那轮）、`1732b95c654f9065706246cf159119b13196dff9`（2026-10-24 第七轮）与 `8709f6dea60200232c517f25afe091b57522d304` 都已是历史，仅作对照。
 > 本轮开工时现取到的是 `8709f6dea60200232c517f25afe091b57522d304`（上一次「记 sha」提交推送后的 sha），仍按上面的办法现取，别抄这一行。
 > **推送起点别直接抄这一行**：只改 `docs/NEXT.md` 的那次回填提交总是排在它后面，抄旧 sha 当起点会把已经在远端的提交再重放一遍。开工先现取：
