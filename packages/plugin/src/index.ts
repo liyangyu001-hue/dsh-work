@@ -708,6 +708,8 @@ export function apply(ctx: any, config?: PluginConfig): void {
       feed,
       stats,
       artifact,
+      // 伴随层/网页要打开 nodes/<id>.md，根目录得一起给。
+      root,
       ui,
     });
 

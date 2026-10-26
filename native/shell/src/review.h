@@ -39,6 +39,9 @@ struct Row {
   std::string handoff;
   // 这一步该谁做：human / ai / either；空 = 还没定（三态之外还有"没想过"）。
   std::string executor;
+  // 节点产物（相对任务库根目录，.dsh-work/nodes/<id>.md）。空 = 还没建档案。
+  // 不猜、不补默认值：有档案才让「按 O 打开」有东西可开。
+  std::string artifact;
 
   // 排版结果（世界坐标，DIP）。父节点用它的孩子算垂直位置。
   float x = 0.0f;
@@ -1129,14 +1132,14 @@ inline void Draw(ID2D1RenderTarget* target, const Model& model, const PanelForma
     // 光标在有子节点的那颗上也只变个手型，不说出来就没人试。
     const bool has_children = model.rows[static_cast<size_t>(anim.hover_row)].child_count > 0;
     if (model.read_only) {
-      hint = L"右键这颗 = 标记完成 · 左键 = 看详解 · 双击 = 设为当前任务 · H = 交给 AI/撤回";
+      hint = L"右键这颗 = 标记完成 · 左键 = 看详解 · 双击 = 设为当前任务 · H = 交给 AI/撤回 · O = 打开档案";
       if (has_children) hint += L" · 点 +N = 拆开/收起";
     } else {
       hint = has_children ? L"左键这颗 = 看详解 · 点 +N = 再拆一层" : L"左键这颗 = 看详解";
     }
     hint_ink = ui::kText;
   } else if (model.read_only) {
-    hint = L"左键 = 看详解 · 右键 = 标记完成 · 双击 = 设为当前任务 · H = 交给 AI/撤回 · Enter 展开/收起 · Esc 关闭";
+    hint = L"左键 = 看详解 · 右键 = 标记完成 · 双击 = 设为当前任务 · H = 交给 AI/撤回 · O = 打开档案 · Enter 展开/收起 · Esc 关闭";
   } else {
     hint = L"左键 = 看详解 · Enter 或点 +N 再拆一层 · 点概念节点「讲讲它」听讲解 · Ctrl+Enter 就这样 · Esc 不要了";
   }

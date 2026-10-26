@@ -110,6 +110,11 @@ export interface HttpOptions {
   /** 节点档案 `nodes/<id>.md`：没注入就 503。 */
   artifact?: ArtifactApi;
   /**
+   * 任务库根目录（绝对路径）。文档里的档案路径是**相对**的，伴随层要真的打开
+   * 文件就得知道根在哪；不注入时 `/api/state` 里给 null，界面只显示相对路径。
+   */
+  root?: string;
+  /**
    * 打开桌面面板的桥：浏览器按钮 → 宿主 → 伴随层轮询。
    * 没注入时按钮回 503，其余路由不受影响。
    */
@@ -334,6 +339,8 @@ export function createHttpHandler(options: HttpOptions) {
       sendJson(res, 200, {
         seq: snapshot.seq,
         doc: snapshot,
+        // 档案路径是相对的，伴随层按 O 打开文件时要把根拼回去。
+        root: options.root ?? null,
         // 伴随层每秒拉一次状态，顺手把「打开面板」指令带走；
         // 没有桥时给 null，老的伴随层读到 null 会当没请求。
         ui: options.ui ? { ...options.ui.snapshot(), companion: options.ui.companionAlive() } : null,

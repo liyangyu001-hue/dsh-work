@@ -193,6 +193,9 @@ std::string g_review_pending_expand;
 // 最近一次构建用的 JSON 根（草稿或文档）。本地展开/收起只要重建模型，
 // 不该为此再跑一趟 HTTP —— 那是白白多一次往返。
 dshwork::JValue g_review_root;
+// 任务库根目录（来自 /api/state 的 root 字段）。空 = 宿主没给，就打不开档案，
+// 界面只说相对路径 —— 不拿 cwd 去猜，猜错了会打开别的仓库里的同名文件。
+std::wstring g_review_repo_root;
 // 最近一次轮询拿到的 /api/state 原文。节点图开着时要靠它跟宿主一起变：
 // UI 线程只解析、不自己发请求（一次请求要等一轮链路，够卡一个帧了）。
 // 由 g_model_mutex 一起守着，和 g_model 同一份节奏。
@@ -559,6 +562,11 @@ dshwork::review::Model::Rail pending_rail = dshwork::review::Model::Rail::Off;
           // 宿主按钮把「打开面板 / 节点图」指令挂在 state 上，这里取走。
           dshwork::JValue root;
           if (dshwork::ParseJson(body, root)) {
+            // 任务库根目录（绝对路径）：档案是相对路径，按 O 打开时要拼回去。
+            if (const dshwork::JValue* repo = root.Get("root"); repo != nullptr && repo->IsString()) {
+              const std::wstring wide = dshwork::Widen(repo->text);
+              if (!wide.empty() && wide != g_review_repo_root) g_review_repo_root = wide;
+            }
             const dshwork::JValue* ui = root.Get("ui");
             const dshwork::JValue* at = (ui != nullptr) ? ui->Get("at") : nullptr;
             const dshwork::JValue* target = (ui != nullptr) ? ui->Get("target") : nullptr;
@@ -676,9 +684,10 @@ void TickReviewAnim() {
   // 截图热键占着（capture.h 的 RegisterHotKey），在图里按会把框选层打出来。
   struct Watch { UINT vk; int code; };
   static const Watch kWatched[] = {{VK_UP, 0},  {VK_DOWN, 1}, {VK_RETURN, 2},
-                                   {VK_BACK, 3}, {VK_ESCAPE, 4}, {'L', 7}, {'H', 8}};
-  static bool was_down[7] = {};
-  for (int i = 0; i < 7; ++i) {
+                                   {VK_BACK, 3}, {VK_ESCAPE, 4}, {'L', 7}, {'H', 8},
+                                   {'O', 9}};
+  static bool was_down[8] = {};
+  for (int i = 0; i < 8; ++i) {
     const bool down = (GetAsyncKeyState(static_cast<int>(kWatched[i].vk)) & 0x8000) != 0;
     if (down && !was_down[i]) {
       const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1747,6 +1756,10 @@ void BuildReviewModel(const dshwork::JValue& root) {
     // 这一步该谁做（human / ai / either）。空 = 还没定，分工页单独列一摞，
     // 不要猜成「human」——没标和标了「人做」是两件事。
     row.executor = node.GetString("executor");
+    // 节点产物：文档里只存相对路径，空 = 还没建档案（不猜、不补默认值）。
+    if (const JValue* artifact = node.Get("artifact"); artifact != nullptr && artifact->IsObject()) {
+      row.artifact = artifact->GetString("path");
+    }
     // 运行中的交接：图里只要有一颗在跑，整扇窗就亮蓝边（见 review.h Draw）。
     if (const JValue* handoff = node.Get("handoff"); handoff != nullptr && handoff->IsObject()) {
       if (handoff->GetString("state") == "running") model.ai_running = true;
@@ -2936,6 +2949,12 @@ void FillNodeDetail(const dshwork::review::Row& row) {
   if (row.has_children) {
     hint += (row.expanded ? " · 已摊开 " : " · 收着 ") + std::to_string(row.child_count) + " 颗";
   }
+  // 产物：做完了指不到东西，done 就只是一行状态。写进卡片让人一眼看见有没有。
+  if (row.artifact.empty()) {
+    hint += " · 没有档案（学习页可以建一份）";
+  } else {
+    hint += " · 档案 " + row.artifact + "（按 O 打开）";
+  }
   hint += " · Esc 关掉 · 点别处也行";
   g_review_model.lesson_node = row.id;
   // 2 = 有内容可看（1 是"正在讲"，3 是"讲不了"），和讲解卡的状态机复用。
@@ -3046,6 +3065,61 @@ void EnsureReviewWindow() {
 }
 
 /** 审阅窗的按键：0 上 · 1 下 · 2 回车 · 3 Ctrl+回车 · 4 Esc · 7 L（学习栏）· 8 H（交给 AI / 撤回） */
+/**
+ * 档案的绝对路径：根目录 + 相对路径。
+ *
+ * 两道保险：根未知就返回空（宁可不打开，也不拿 cwd 猜——猜错会打开另一个仓库里
+ * 的同名文件）；相对路径里出现 `..` 一律拒绝，档案只能落在任务库里面。
+ */
+std::wstring ArtifactFullPath(const std::string& rel) {
+  if (g_review_repo_root.empty() || rel.empty()) return std::wstring();
+  std::wstring relw = dshwork::Widen(rel);
+  for (wchar_t& c : relw) {
+    if (c == L'/') c = L'\\';
+  }
+  if (relw.find(L"..") != std::wstring::npos) return std::wstring();
+  if (!relw.empty() && (relw.front() == L'\\' || (relw.size() >= 2 && relw[1] == L':'))) return std::wstring();
+  std::wstring full = g_review_repo_root;
+  if (!full.empty() && full.back() != L'\\') full += L'\\';
+  return full + relw;
+}
+
+/**
+ * O = 打开这颗的档案（`nodes/<id>.md`）。
+ *
+ * 为什么不内嵌一个 Markdown 浏览器：那是另一个产品。人的真实动作是「把这颗的
+ * 记录拿出来改/贴给别人」，交回系统默认编辑器最省事，也不替用户挑编辑器。
+ */
+void OpenArtifactForSelected() {
+  const int index = g_review_model.selected;
+  if (index < 0 || static_cast<size_t>(index) >= g_review_model.rows.size()) {
+    SetReviewHint(L"先选中一颗再按 O");
+    return;
+  }
+  const dshwork::review::Row& row = g_review_model.rows[static_cast<size_t>(index)];
+  if (row.artifact.empty()) {
+    SetReviewHint(L"这颗还没有档案：学习页里点「建档案」");
+    return;
+  }
+  const std::wstring full = ArtifactFullPath(row.artifact);
+  if (full.empty()) {
+    SetReviewHint(L"不知道任务库根目录，打不开档案");
+    return;
+  }
+  if (GetFileAttributesW(full.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    SetReviewHint(L"档案文件不在了：" + dshwork::Widen(row.artifact));
+    return;
+  }
+  const HINSTANCE opened = ShellExecuteW(nullptr, L"open", full.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+    SetReviewHint(L"系统没能打开它：" + dshwork::Widen(row.artifact));
+    return;
+  }
+  LogToFile("审阅：把档案交给系统打开 " + row.artifact);
+  // ShellExecuteW 只保证「请求交给系统了」，不保证真有一个编辑器接住
+  // （这台机器上 .md 可能没有默认程序，会弹「打开方式」）。所以措辞不写死「已打开」。
+  SetReviewHint(L"已交给系统打开档案：" + dshwork::Widen(row.artifact));
+}
 void ReviewKey(int which) {
   if (!g_review_open) return;
   // 一次按下可能被投递两遍：窗口有焦点时 WM_KEYDOWN 来一次，动画定时器里的
@@ -3070,6 +3144,11 @@ void ReviewKey(int which) {
     // H = Handoff：把这颗交给 AI；已经交出去（还没人接）就撤回。
     // 这一条是补死胡同用的：以前只能交、不能撤，人手一抖这颗就永远挂着。
     ToggleHandoffForSelected();
+    return;
+  }
+  if (which == 9) {
+    // O = Open：把这一颗的档案交给系统默认编辑器。没有档案就说清楚，不假装。
+    OpenArtifactForSelected();
     return;
   }
   if (which == 7) {
