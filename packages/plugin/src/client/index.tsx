@@ -408,6 +408,62 @@ function Bar(): React.ReactElement {
     }
   };
 
+  // 「能退出的地方」：这条任务条不该只能靠卸载插件才消失。
+  // 收起的意图记在 localStorage，刷新页面也记得；恢复按钮常驻在最上沿。
+  const [barHidden, setBarHidden] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("dsh-work.bar-hidden") === "1";
+    } catch {
+      return false; // 隐私模式下记不住，就不隐藏，别把人挡在外面
+    }
+  });
+  const hideBar = (): void => {
+    setBarHidden(true);
+    try {
+      localStorage.setItem("dsh-work.bar-hidden", "1");
+    } catch {
+      // 存不住也得收起，本页内生效即可
+    }
+  };
+  const showBar = (): void => {
+    setBarHidden(false);
+    try {
+      localStorage.removeItem("dsh-work.bar-hidden");
+    } catch {
+      // 同上
+    }
+  };
+
+  if (barHidden) {
+    return (
+      <button
+        type="button"
+        data-dsh-work-restore="1"
+        onClick={showBar}
+        title="重新显示 DSH Work 任务条"
+        aria-label="重新显示 DSH Work 任务条"
+        style={{
+          position: "fixed",
+          top: 52,
+          left: "50%",
+          transform: "translateX(-50%)",
+          height: 22,
+          padding: "0 10px",
+          font: "500 11px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+          color: "var(--dsw-text-tertiary, #7a7a80)",
+          background: palette.surface,
+          border: `0.5px solid ${palette.separator}`,
+          borderRadius: 999,
+          cursor: "pointer",
+          opacity: 0.55,
+          ...noDrag,
+        }}
+      >
+        DSH
+      </button>
+    );
+  }
+
   return (
     <>
       <style>{`        .dshwork-open { transition: filter 120ms cubic-bezier(.16,1,.3,1), transform 120ms cubic-bezier(.16,1,.3,1), background-color 120ms cubic-bezier(.16,1,.3,1); }
@@ -602,6 +658,30 @@ function Bar(): React.ReactElement {
               </button>
             </>
           )}
+          <button
+            type="button"
+            data-dsh-work-hide="1"
+            onClick={hideBar}
+            title="收起任务条（点最上沿那个小 DSH 可恢复）"
+            aria-label="收起任务条"
+            className="dshwork-ghost"
+            style={{
+              width: 22,
+              height: 22,
+              display: "grid",
+              placeItems: "center",
+              padding: 0,
+              marginLeft: 2,
+              border: "none",
+              borderRadius: 999,
+              background: "transparent",
+              color: "var(--dsw-text-tertiary, #7a7a80)",
+              cursor: "pointer",
+              font: "400 15px/1 system-ui, -apple-system, 'Segoe UI', sans-serif",
+            }}
+          >
+            ×
+          </button>
         </span>
       </div>
       {studyOpen && doc ? (
